@@ -487,12 +487,19 @@ async def _cancel_task(task: asyncio.Task) -> None:
 # Main drone lifecycle
 # ---------------------------------------------------------------------------
 
+_ARM_MAX_ATTEMPTS = 6
+_ARM_RETRY_DELAY_S = 5
+_ARM_SHUTDOWN_POLL_S = 0.5
+
+
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         config=None, ui_state=None):
+                         config=None, ui_state=None, on_connected_cb=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If config is provided, use it directly (allows live mutation from web UI).
     If ui_state is provided, logs are pushed to the web UI.
+    If on_connected_cb is provided, it is called once after the drone connects
+    (useful for simulation setup teardown, e.g. restoring a world file).
     """
     if config is None:
         config = ControllerConfig.from_args(args)
@@ -525,33 +532,57 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
             if state.is_connected:
                 break
 
-        if manage_takeoff_landing:
-            await drone.action.set_takeoff_altitude(args.takeoff_altitude)
-            await drone.action.arm()
-            await drone.action.takeoff()
-            await asyncio.sleep(15)
-        else:
-            await _wait_for_offboard_mode(drone, shutdown)
+        if on_connected_cb is not None:
+            on_connected_cb()
+
+        armed = False
+        vel_api = VelocityCommandAPI(drone, config)
+        alt_task = None
+        control_task = None
+        watch_task = None
+        try:
+            if manage_takeoff_landing:
+                await drone.action.set_takeoff_altitude(args.takeoff_altitude)
+                # Retry arm() — PX4 may need time to pass pre-arm checks
+                for attempt in range(_ARM_MAX_ATTEMPTS):
+                    if shutdown.is_set():
+                        return
+                    try:
+                        await drone.action.arm()
+                        armed = True
+                        break
+                    except mavsdk.action.ActionError as e:
+                        if attempt == _ARM_MAX_ATTEMPTS - 1:
+                            raise
+                        LOGGER.warning(
+                            "[drone] arm() failed (%s), retrying in %ds... (%d/%d)",
+                            e, _ARM_RETRY_DELAY_S, attempt + 1, _ARM_MAX_ATTEMPTS - 1)
+                        # Sleep in small increments so shutdown is checked promptly
+                        for _ in range(int(_ARM_RETRY_DELAY_S / _ARM_SHUTDOWN_POLL_S)):
+                            if shutdown.is_set():
+                                return
+                            await asyncio.sleep(_ARM_SHUTDOWN_POLL_S)
+                await drone.action.takeoff()
+                await asyncio.sleep(15)
+            else:
+                await _wait_for_offboard_mode(drone, shutdown)
+                if shutdown.is_set():
+                    return
+
+            await _start_offboard(drone, vel_api, shutdown)
             if shutdown.is_set():
                 return
 
-        vel_api = VelocityCommandAPI(drone, config)
-        await _start_offboard(drone, vel_api, shutdown)
-        if shutdown.is_set():
-            return
+            if manage_takeoff_landing:
+                await asyncio.sleep(3)
 
-        if manage_takeoff_landing:
-            await asyncio.sleep(3)
+            altitude_cache: dict = {}
+            alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
+            control_task = asyncio.create_task(
+                live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
+            if not manage_takeoff_landing:
+                watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
 
-        altitude_cache: dict = {}
-        alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
-        control_task = asyncio.create_task(
-            live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
-        watch_task = None
-        if not manage_takeoff_landing:
-            watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
-
-        try:
             done, pending = await asyncio.wait(
                 [
                     asyncio.create_task(shutdown.wait()),
@@ -567,15 +598,14 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                 else:
                     LOGGER.warning("[drone] Shutdown requested, stopping control loop...")
         except asyncio.CancelledError:
-            if manage_takeoff_landing:
-                LOGGER.warning("[drone] Shutdown requested, landing...")
-            else:
-                LOGGER.warning("[drone] Shutdown requested, stopping control loop...")
+            LOGGER.warning("[drone] Shutdown requested...")
         finally:
-            await _cancel_task(alt_task)
+            if alt_task is not None:
+                await _cancel_task(alt_task)
             if watch_task is not None:
                 await _cancel_task(watch_task)
-            if manage_takeoff_landing:
+            if control_task is not None:
+                await _cancel_task(control_task)
+            if manage_takeoff_landing and armed:
                 await _land_safely(drone, vel_api)
-            await _cancel_task(control_task)
         LOGGER.info("[drone] Done.")
