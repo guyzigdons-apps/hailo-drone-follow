@@ -201,8 +201,6 @@ def app_callback(element, buffer, user_data):
 def add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     """Register pipeline-adapter-specific CLI flags."""
     group = parser.add_argument_group("pipeline-adapter")
-    group.add_argument("--enable-tracking", action="store_true",
-                       help="Enable object tracking")
     group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
                        help="Seconds to keep following a track ID after target leaves frame (default: 2.0)")
 
