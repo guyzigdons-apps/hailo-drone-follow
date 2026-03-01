@@ -25,6 +25,14 @@ SKIP_HAILO_APPS=false
 SKIP_UI=false
 SKIP_PYTHON=false
 
+run_for_install_user() {
+    if [ "$EUID" -eq 0 ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+        sudo -u "$SUDO_USER" "$@"
+    else
+        "$@"
+    fi
+}
+
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
@@ -86,15 +94,25 @@ fi
 if ! $SKIP_PYTHON; then
     echo -e "${GREEN}[2/3] Installing Python dependencies...${NC}"
 
+    VENV_PYTHON="$HAILO_APPS_DIR/venv_hailo_apps/bin/python"
+    if [ ! -x "$VENV_PYTHON" ]; then
+        echo -e "${RED}  Error: hailo-apps virtualenv not found at: $VENV_PYTHON${NC}"
+        echo -e "  Ensure hailo-apps is installed first, or run with --skip-python and install manually in your venv."
+        exit 1
+    fi
+
+    echo -e "  Using Python from venv: ${CYAN}$VENV_PYTHON${NC}"
+
     # Install hailo-apps as local editable package (avoids pip cloning from git)
-    if [ -d "$HAILO_APPS_DIR" ] && [ -f "$HAILO_APPS_DIR/pyproject.toml" ]; then
+    # Skip this when --skip-hailo-apps is used, since hailo-apps should already be installed.
+    if ! $SKIP_HAILO_APPS && [ -d "$HAILO_APPS_DIR" ] && [ -f "$HAILO_APPS_DIR/pyproject.toml" ]; then
         echo -e "  Installing hailo-apps (editable) from ${CYAN}$HAILO_APPS_DIR${NC}..."
-        pip install -e "$HAILO_APPS_DIR"
+        run_for_install_user "$VENV_PYTHON" -m pip install -e "$HAILO_APPS_DIR"
     fi
 
     # Install drone-follow and its dependencies
     echo -e "  Installing drone-follow (editable)..."
-    pip install -e "$SCRIPT_DIR"
+    run_for_install_user "$VENV_PYTHON" -m pip install -e "$SCRIPT_DIR"
 
     echo -e "${GREEN}  Python dependencies installed successfully.${NC}"
 else
