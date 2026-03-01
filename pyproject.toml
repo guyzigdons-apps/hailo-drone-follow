@@ -1,0 +1,18 @@
+[project]
+name = "drone-follow"
+version = "0.1.0"
+description = "Autonomous drone-follow using Hailo AI tiling detection"
+requires-python = ">=3.9"
+dependencies = [
+    "mavsdk",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+hailo = [
+    "hailo-apps @ git+https://github.com/hailo-ai/hailo-apps.git",
+]
+
+[project.scripts]
+drone-follow = "drone_follow.drone_follow_app:main"

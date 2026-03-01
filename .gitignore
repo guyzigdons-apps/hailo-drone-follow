@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+.env
+*.log
+recordings/
+drone_follow/ui/node_modules/
+drone_follow/ui/build/
