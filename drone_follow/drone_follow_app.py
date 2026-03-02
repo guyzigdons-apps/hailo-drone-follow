@@ -20,6 +20,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from contextlib import nullcontext
 
 from drone_follow.follow_api import ControllerConfig, SharedDetectionState
@@ -216,8 +217,7 @@ def main():
     if ui_pre_args.record and ui_state is not None:
         # Schedule recording start after pipeline enters PLAYING state
         def _start_recording_delayed():
-            import time as _time
-            _time.sleep(1.0)  # wait for pipeline to reach PLAYING
+            time.sleep(1.0)  # wait for pipeline to reach PLAYING
             app.start_recording()
         threading.Thread(target=_start_recording_delayed, daemon=True).start()
 
