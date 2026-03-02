@@ -371,6 +371,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 video_height=self.video_height,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
+                mirror_image=self.options_menu.horizontal_mirror,
+                vertical_mirror=self.options_menu.vertical_mirror,
             )
 
             detection_pipeline = INFERENCE_PIPELINE(
