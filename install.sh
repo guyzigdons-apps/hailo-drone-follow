@@ -65,8 +65,8 @@ if ! $SKIP_HAILO_APPS; then
 
     if [ ! -d "$HAILO_APPS_DIR" ]; then
         echo -e "${YELLOW}  hailo-apps not found at: $HAILO_APPS_DIR${NC}"
-        echo -e "  Cloning hailo-apps from github (branch: feature/all-upstream-improvements)..."
-        git clone -b feature/all-upstream-improvements https://github.com/hailo-ai/hailo-apps.git "$HAILO_APPS_DIR"
+        echo -e "  Cloning hailo-apps from github (branch: feature/combined-fixes-and-features)..."
+        git clone -b feature/combined-fixes-and-features https://github.com/hailocs/hailo-apps-internal.git "$HAILO_APPS_DIR"
     fi
 
     echo -e "  Using hailo-apps at: ${CYAN}$HAILO_APPS_DIR${NC}"
