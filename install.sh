@@ -64,10 +64,9 @@ if ! $SKIP_HAILO_APPS; then
     echo -e "${GREEN}[1/3] Checking hailo-apps base platform...${NC}"
 
     if [ ! -d "$HAILO_APPS_DIR" ]; then
-        echo -e "${RED}  Error: hailo-apps not found at: $HAILO_APPS_DIR${NC}"
-        echo -e "  Clone it first:  git clone https://github.com/hailo-ai/hailo-apps.git $HAILO_APPS_DIR"
-        echo -e "  Or specify path: $0 --hailo-apps-dir /path/to/hailo-apps"
-        exit 1
+        echo -e "${YELLOW}  hailo-apps not found at: $HAILO_APPS_DIR${NC}"
+        echo -e "  Cloning hailo-apps from github..."
+        git clone https://github.com/hailo-ai/hailo-apps.git "$HAILO_APPS_DIR"
     fi
 
     echo -e "  Using hailo-apps at: ${CYAN}$HAILO_APPS_DIR${NC}"
