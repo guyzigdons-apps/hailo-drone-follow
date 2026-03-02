@@ -20,11 +20,13 @@ import logging
 import os
 import signal
 import threading
+from contextlib import nullcontext
 
 from drone_follow.follow_api import ControllerConfig, SharedDetectionState
 from drone_follow.follow_api.state import FollowTargetState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
+from drone_follow.sim import WorldLoader
 from drone_follow.servers import FollowServer
 
 LOGGER = logging.getLogger("drone_follow.app")
@@ -49,8 +51,18 @@ def _resolve_serial_connection(args):
 
 
 def _add_app_args(parser: argparse.ArgumentParser) -> None:
-    """Register application-level CLI flags (servers, UI)."""
+    """Register application-level CLI flags (servers, UI, world loading)."""
     group = parser.add_argument_group("app")
+
+    # World loading
+    group.add_argument("--px4-path", default=None, metavar="DIR",
+                       help="Path to PX4-Autopilot directory. Required when using --world.")
+    group.add_argument("--world", default=None, metavar="NAME_OR_PATH",
+                       help="SDF world to load in Gazebo. Can be a name from sdf_examples/ "
+                            "(e.g. '2_person_world') or a path to an .sdf file. "
+                            "Temporarily symlinks it as default.sdf; "
+                            "restores the original after the drone connects.")
+
     group.add_argument("--follow-server-port", type=int, default=8080,
                        help="HTTP server port for target selection")
     group.add_argument("--ui", action="store_true",
@@ -132,6 +144,15 @@ def main():
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
 
+    # Validate --world / --px4-path pair early (before starting servers)
+    world_loader = None
+    if args.world is not None:
+        if args.px4_path is None:
+            LOGGER.error("--world requires --px4-path")
+            raise SystemExit(1)
+        world_loader = WorldLoader(args.px4_path, args.world)
+        world_loader.validate()
+
     # Start follow server (always available)
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
     follow_server.start()
@@ -160,14 +181,19 @@ def main():
         _quit_pipeline()
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
+    world_ctx = world_loader if world_loader is not None else nullcontext()
+    on_connected = world_loader.restore if world_loader is not None else None
+
     def run_drone():
         """Run drone control in a background thread with its own asyncio loop."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(
-                run_live_drone(args, shared_state, shutdown,
-                              config=controller_config, ui_state=ui_state))
+            with world_ctx:
+                loop.run_until_complete(
+                    run_live_drone(args, shared_state, shutdown,
+                                  config=controller_config, ui_state=ui_state,
+                                  on_connected_cb=on_connected))
         except Exception:
             LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
         finally:

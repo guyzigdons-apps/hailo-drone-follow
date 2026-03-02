@@ -4,41 +4,36 @@
 
 ### Prerequisites
 
-- **Hailo application infrastructure** (hailort, hailo-tappas-core, Python bindings). See the [main installation guide](../../../../doc/user_guide/installation.md) for your platform.
-- **Python 3.8+** with the project virtual environment activated (e.g. `source setup_env.sh`).
+- **Hailo application infrastructure** (hailort, hailo-tappas-core, Python bindings).
+- **Python 3.9+** with the project virtual environment activated (`source setup_env.sh`).
 - **MAVSDK** for drone connection and offboard control (installed via pip in the project venv).
 - For **simulation**: PX4 SITL and Gazebo (e.g. `make px4_sitl gz_x500_mono_cam` from PX4-Autopilot).
 - For **real drone**: PX4 (or compatible) firmware and a connection (e.g. USB or UDP).
 
 ### Steps
 
-1. **Install hailo-apps** (from the repository root):
+1. **Create a virtual environment and install dependencies**:
    ```bash
-   cd /path/to/hailo-apps
-   sudo ./install.sh
+   python -m venv venv
    source setup_env.sh
+   pip install -e .
    ```
 
-2. **Install Python dependencies**:
-   ```bash
-   pip install -r hailo_apps/python/pipeline_apps/drone_follow/requirements.txt
-   ```
-
-3. **Optional – Web UI** (for `--ui` with live video and click-to-follow):
+2. **Optional – Web UI** (for `--ui` with live video and click-to-follow):
 
    Requires **Node.js / npm** to be installed.
    ```bash
-   cd hailo_apps/python/pipeline_apps/drone_follow/ui
+   cd drone_follow/ui
    npm install
    npm run build
    cd -
    ```
-   The built UI is served from `ui/build` when you run with `--ui`.
+   The built UI is served from `drone_follow/ui/build` when you run with `--ui`.
    Running with `--ui` without building first will exit with an error message.
 
-4. **Verify** the app parses and shows help:
+3. **Verify** the app parses and shows help:
    ```bash
-   python drone_follow_app.py --help
+   drone-follow --help
    ```
 
 ## Instructions
@@ -56,13 +51,38 @@
 
 3. Run the video bridge:
    ```bash
-   python tools/video_bridge.py
+   python drone_follow/tools/video_bridge.py
    ```
 
 4. Run the drone follow application:
    ```bash
-   python drone_follow_app.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
+   drone-follow --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
+
+## Easy World Loading
+
+Use `--world` to automatically load a custom Gazebo world (SDF) before PX4 starts. This symlinks your world as PX4's `default.sdf`, so `make px4_sitl gz_x500_mono_cam` picks it up with no extra configuration. The original world is restored after the drone connects.
+
+```bash
+drone-follow --input udp://0.0.0.0:5600 --target-distance 8 --fixed-altitude \
+    --px4-path ~/PX4-Autopilot --world 2_person_world
+```
+
+`--px4-path` is required when using `--world`.
+
+### World resolution
+
+| Argument | Resolves to |
+|---|---|
+| `2_person_world` (bare name) | `drone_follow/sdf_examples/2_person_world.sdf` |
+| `my_world.sdf` (relative with .sdf) | `drone_follow/sdf_examples/my_world.sdf`, then CWD |
+| `/absolute/path/to/world.sdf` | Used as-is |
+
+### Bundled worlds
+
+- `2_person_world` – Two people standing in the scene.
+- `2_persons_diagonal` – Two people placed diagonally.
+- `random_walk` – A person walking a random path.
 
 ### Key options (match the app)
 
@@ -85,7 +105,7 @@ Set the video/MAVLink host to the IP of the PC that will run drone_follow, then 
 PX4_VIDEO_HOST_IP=<MAVLINK_HOST_IP> make px4_sitl gz_x500_mono_cam
 ```
 
-Replace `<MAVLINK_HOST_IP>` with the IP address of the machine where you run `drone_follow_app.py`.
+Replace `<MAVLINK_HOST_IP>` with the IP address of the machine where you run `drone-follow`.
 
 **2. (Optional) Persistent MAVLink config on PX4**
 
@@ -100,10 +120,10 @@ mavlink start -t <MAVLINK_HOST_IP> -o 14560 -r 100000
 Run the app so it listens for video on UDP 5600 and MAVLink on UDP 14560:
 
 ```bash
-python drone_follow_app.py --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:14560 --target-bbox-height 0.5
+drone-follow --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:14560 --target-bbox-height 0.5
 ```
 
-Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine’s IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
+Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine's IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
 
 ## HTTP Control Server
 
@@ -121,7 +141,7 @@ By default (no target set), the drone follows the person with the **largest boun
 - `POST /follow/<detection_id>` - Start following a specific tracked person
   - Returns 200: `{"status": "success", "following_id": <id>}` if the ID is found in the current frame
   - Returns 404: `{"status": "error", "message": "...", "available_ids": [...]}` if the ID is not in the current frame
-  
+
 - `POST /follow/clear` - Clear target and return to following the largest person
   - Returns: `{"status": "success", "following_id": null, "message": "Cleared target, now following largest person"}`
 
@@ -140,7 +160,7 @@ Tracking IDs are available by default, so you can select a specific person to fo
 
 1. Run the app:
    ```bash
-   python drone_follow_app.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
+   drone-follow --input udp://0.0.0.0:5600 --target-bbox-height 0.5 --enable-tracking
    ```
 
 2. Check which people are visible:
@@ -154,7 +174,7 @@ Tracking IDs are available by default, so you can select a specific person to fo
    # Follow the person with tracking ID 3
    curl -X POST http://localhost:8080/follow/3
    # Returns: {"status": "success", "following_id": 3}
-   
+
    # If ID not found:
    # Returns: {"status": "error", "message": "Detection ID 42 not found in current frame", "available_ids": [1, 3, 5]}
    ```
