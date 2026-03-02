@@ -20,7 +20,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Defaults
-HAILO_APPS_DIR="${HAILO_APPS_DIR:-$(dirname "$SCRIPT_DIR")/hailo-apps}"
+HAILO_APPS_DIR="${HAILO_APPS_DIR:-$SCRIPT_DIR/hailo-apps}"
 SKIP_HAILO_APPS=false
 SKIP_UI=false
 SKIP_PYTHON=false
