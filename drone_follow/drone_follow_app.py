@@ -64,7 +64,7 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                             "restores the original after the drone connects.")
 
     group.add_argument("--follow-server-port", type=int, default=8080,
-                       help="HTTP server port for target selection (only with --enable-tracking)")
+                       help="HTTP server port for target selection")
     group.add_argument("--ui", action="store_true",
                        help="Enable web UI with live video and clickable bounding boxes")
     group.add_argument("--ui-port", type=int, default=5001,
@@ -81,7 +81,7 @@ def _build_parser() -> argparse.ArgumentParser:
     Each domain only registers arguments it owns:
       - follow_api:        controller gains, framing, search, smoothing, safety
       - drone_api:         MAVLink connection, flight lifecycle
-      - pipeline_adapter:  tracking-lost-timeout
+            - pipeline_adapter:  pipeline-specific integration args
       - app (this file):   UI/server ports
     """
     from hailo_apps.python.core.common.core import get_pipeline_parser
@@ -89,9 +89,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ControllerConfig.add_args(parser)
     add_drone_args(parser)
-
-    from drone_follow.pipeline_adapter import add_pipeline_args
-    add_pipeline_args(parser)
 
     _add_app_args(parser)
     return parser
@@ -115,7 +112,6 @@ def main():
     ui_pre.add_argument("--ui-port", type=int, default=5001)
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--record", action="store_true")
-    ui_pre.add_argument("--enable-tracking", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
     ui_state = None
@@ -132,12 +128,6 @@ def main():
             LOGGER.error("  npm install")
             LOGGER.error("  npm run build")
             raise SystemExit(1)
-        # Auto-enable tracking for UI (stable IDs needed for click-to-follow)
-        if not ui_pre_args.enable_tracking:
-            import sys as _sys
-            _sys.argv.append("--enable-tracking")
-            LOGGER.info("[ui] Auto-enabling tracking for UI mode")
-
     # Build the full parser from all domains, then pass to pipeline adapter
     parser = _build_parser()
 
