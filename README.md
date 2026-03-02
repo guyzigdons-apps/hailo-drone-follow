@@ -70,7 +70,6 @@
 - **`--fixed-altitude`** – Hold altitude constant; use with `--target-distance` for distance-based following.
 - **`--no-takeoff-landing`** – Do not take off or land; assume the drone is already in offboard mode (e.g. when you arm and switch to offboard yourself).
 - **`--yaw-only`** – Only yaw to center the person; no forward/backward or altitude movement (see Yaw-Only Mode below).
-- **`--enable-tracking`** – Enable tracking IDs for the HTTP API and optional web UI target selection.
 - **`--ui`** – Enable web UI with live video and click-to-follow (requires UI built; see Optional – Web UI above).
 - **Input/connection:** Pipeline input is set with `--input` (e.g. `udp://0.0.0.0:5600`, `rpi`, `usb`). MAVLink connection defaults to `udpin://0.0.0.0:14540`; override with `--connection` or use `--serial` for a serial link.
 
@@ -119,29 +118,29 @@ By default (no target set), the drone follows the person with the **largest boun
 - `GET /status` - Get current tracking status
   - Returns: `{"following_id": <id or null>, "last_seen": <timestamp or null>, "available_ids": [list of IDs]}`
   
-- `POST /follow/<detection_id>` - Start following a specific tracked person (requires `--enable-tracking`)
+- `POST /follow/<detection_id>` - Start following a specific tracked person
   - Returns 200: `{"status": "success", "following_id": <id>}` if the ID is found in the current frame
   - Returns 404: `{"status": "error", "message": "...", "available_ids": [...]}` if the ID is not in the current frame
   
 - `POST /follow/clear` - Clear target and return to following the largest person
   - Returns: `{"status": "success", "following_id": null, "message": "Cleared target, now following largest person"}`
 
-### Basic Usage (Without Tracking)
+### Basic Usage
 
-Even without tracking enabled, the server is available and shows status:
+The server is always available and shows status:
 
 ```bash
 # Check current status
 curl http://localhost:8080/status
 ```
 
-### Target Selection with Tracking
+### Target Selection with Tracking IDs
 
-When running with `--enable-tracking`, you can select a specific person to follow by their tracking ID:
+Tracking IDs are available by default, so you can select a specific person to follow:
 
-1. Run with tracking enabled:
+1. Run the app:
    ```bash
-   python drone_follow_app.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5 --enable-tracking
+   python drone_follow_app.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
 
 2. Check which people are visible:

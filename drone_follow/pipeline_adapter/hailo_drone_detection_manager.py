@@ -30,19 +30,14 @@ _EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
 # ---------------------------------------------------------------------------
 
 def _maybe_clear_target_after_lost(user_data):
-    """Clear the follow target only if it has been missing longer than tracking_lost_timeout_s."""
+    """Clear the follow target when it is no longer seen."""
     target_state = user_data.target_state
     if target_state is None:
         return
     target_id = target_state.get_target()
     if target_id is None:
         return
-    last_seen = target_state.get_last_seen()
-    if last_seen is None:
-        target_state.set_target(None)
-        return
-    if time.monotonic() - last_seen >= user_data.tracking_lost_timeout_s:
-        target_state.set_target(None)
+    target_state.set_target(None)
 
 
 def _build_det_info(person, track_id=None):
@@ -198,14 +193,6 @@ def app_callback(element, buffer, user_data):
 # Pipeline app factory
 # ---------------------------------------------------------------------------
 
-def add_pipeline_args(parser: argparse.ArgumentParser) -> None:
-    """Register pipeline-adapter-specific CLI flags."""
-    group = parser.add_argument_group("pipeline-adapter")
-    group.add_argument("--enable-tracking", action="store_true",
-                       help="Enable object tracking")
-    group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
-                       help="Seconds to keep following a track ID after target leaves frame (default: 2.0)")
-
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None, record_dir=None):
@@ -236,16 +223,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     if parser is None:
         parser = get_pipeline_parser()
-        add_pipeline_args(parser)
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     tracking_lost_timeout_s=2.0, byte_tracker=None):
+                     byte_tracker=None):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
-            self.tracking_lost_timeout_s = tracking_lost_timeout_s
             self.byte_tracker = byte_tracker
 
     class DroneFollowTilingApp(GStreamerTilingApp):
@@ -451,17 +436,10 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             return ' ! '.join(pipeline_parts)
 
-    # Pre-parse to check if tracking is enabled (so we can create the tracker before full parse)
-    _track_pre = argparse.ArgumentParser(add_help=False)
-    _track_pre.add_argument("--enable-tracking", action="store_true")
-    _track_pre_args, _ = _track_pre.parse_known_args()
-
-    tracker = None
-    if _track_pre_args.enable_tracking:
-        tracker = ByteTracker(
-            track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
-        )
-        LOGGER.info("[tracking] ByteTracker running synchronously in callback")
+    tracker = ByteTracker(
+        track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
+    )
+    LOGGER.info("[tracking] ByteTracker running synchronously in callback")
 
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
@@ -471,5 +449,4 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
         record_dir=record_dir,
     )
-    user_data.tracking_lost_timeout_s = getattr(app.options_menu, 'tracking_lost_timeout', 2.0)
     return app

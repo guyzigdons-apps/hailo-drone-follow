@@ -5,14 +5,12 @@ for backward compatibility.
 
 Provides a REST API to control which tracked person the drone should follow.
 The server is always available and provides status information.
-Target selection by ID requires tracking to be enabled (--enable-tracking flag).
 
 Usage:
     The server starts automatically in all modes.
 
     POST /follow/<detection_id>
         Start following the person with the specified tracking ID.
-        Requires --enable-tracking to be enabled.
         Returns: {"status": "success", "following_id": <id>}
 
     GET /status
