@@ -6,7 +6,7 @@ Architecture:
     pipeline_adapter/   Hailo/GStreamer pipeline adapter + ByteTracker
     servers/            HTTP servers (follow target API, web UI)
     tools/              Standalone utilities (video bridge)
-    drone_follow.py     Composition root and CLI entrypoint
+    drone_follow_app.py Composition root and CLI entrypoint
 """
 
 from .follow_api import (

@@ -55,7 +55,7 @@ def _update_ui(ui_state, persons, person_to_id, following_id):
     ui_state.update_detections(all_dets, following_id)
 
 
-def _run_tracker(byte_tracker, persons, hailo):
+def _run_tracker(byte_tracker, persons):
     """Run ByteTracker and return (available_ids, person_by_id, person_to_id).
 
     person_by_id:  {track_id -> person detection}
@@ -94,7 +94,7 @@ def _run_tracker(byte_tracker, persons, hailo):
 def app_callback(element, buffer, user_data):
     """Tiling pipeline callback: pick largest person (or specific tracked person), update shared state.
 
-    When ByteTracker is enabled (user_data.byte_tracker is not None):
+    ByteTracker runs synchronously in the callback:
     1. Convert detections to Nx5 array, run tracker.update() synchronously
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
@@ -117,7 +117,7 @@ def app_callback(element, buffer, user_data):
         return
 
     available_ids, person_by_id, person_to_id = _run_tracker(
-        user_data.byte_tracker, persons, hailo)
+        user_data.byte_tracker, persons)
 
     # --- Target selection ---
     target_id = target_state.get_target() if target_state is not None else None
