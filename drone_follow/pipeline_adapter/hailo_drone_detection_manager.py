@@ -226,8 +226,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         record_dir: Directory for recording output files (optional)
     """
     from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import (
-        GStreamerTilingApp, user_app_callback_class,
+        GStreamerTilingApp,
     )
+    from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
     from hailo_apps.python.core.common.core import get_pipeline_parser
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
         QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
@@ -237,7 +238,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         parser = get_pipeline_parser()
         add_pipeline_args(parser)
 
-    class DroneFollowUserData(user_app_callback_class):
+    class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
                      tracking_lost_timeout_s=2.0, byte_tracker=None):
             super().__init__()

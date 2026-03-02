@@ -11,7 +11,7 @@ dependencies = [
 
 [project.optional-dependencies]
 hailo = [
-    "hailo-apps @ git+https://github.com/hailo-ai/hailo-apps.git",
+    "hailo-apps @ git+https://github.com/hailocs/hailo-apps-internal.git@feature/combined-fixes-and-features",
 ]
 
 [project.scripts]
