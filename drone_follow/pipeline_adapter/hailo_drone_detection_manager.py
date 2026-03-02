@@ -16,7 +16,6 @@ import hailo
 import numpy as np
 
 from drone_follow.follow_api.types import Detection
-from drone_follow.follow_api.state import SharedDetectionState, FollowTargetState
 
 from .byte_tracker import ByteTracker
 
