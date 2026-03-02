@@ -1,8 +1,5 @@
 """HTTP server for drone follow application.
 
-FollowTargetState now lives in follow_api.state and is re-exported here
-for backward compatibility.
-
 Provides a REST API to control which tracked person the drone should follow.
 The server is always available and provides status information.
 
@@ -27,7 +24,6 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Re-export from follow_api for backward compatibility
 from drone_follow.follow_api.state import FollowTargetState
 
 LOGGER = logging.getLogger("drone_follow.follow_server")

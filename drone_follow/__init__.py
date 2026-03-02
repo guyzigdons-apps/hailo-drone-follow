@@ -6,7 +6,7 @@ Architecture:
     pipeline_adapter/   Hailo/GStreamer pipeline adapter + ByteTracker
     servers/            HTTP servers (follow target API, web UI)
     tools/              Standalone utilities (video bridge)
-    drone_follow.py     Composition root and CLI entrypoint
+    drone_follow_app.py Composition root and CLI entrypoint
 """
 
 from .follow_api import (
@@ -20,12 +20,8 @@ from .follow_api import (
 # Keep package import lightweight for tests/environments that don't have
 # optional runtime deps (e.g. hailo, GStreamer).
 try:
-    from .pipeline_adapter import (
-        app_callback,
-        create_app,
-    )
+    from .pipeline_adapter import create_app
 except Exception:  # pragma: no cover - optional runtime dependencies
-    app_callback = None
     create_app = None
 
 try:
@@ -40,7 +36,6 @@ __all__ = [
     "SharedDetectionState",
     "ControllerConfig",
     "compute_velocity_command",
-    "app_callback",
     "create_app",
     "SharedUIState",
     "WebServer",

@@ -16,7 +16,6 @@ import hailo
 import numpy as np
 
 from drone_follow.follow_api.types import Detection
-from drone_follow.follow_api.state import SharedDetectionState, FollowTargetState
 
 from .byte_tracker import ByteTracker
 
@@ -28,17 +27,6 @@ _EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
 # ---------------------------------------------------------------------------
 # Callback helpers
 # ---------------------------------------------------------------------------
-
-def _maybe_clear_target_after_lost(user_data):
-    """Clear the follow target when it is no longer seen."""
-    target_state = user_data.target_state
-    if target_state is None:
-        return
-    target_id = target_state.get_target()
-    if target_id is None:
-        return
-    target_state.set_target(None)
-
 
 def _build_det_info(person, track_id=None):
     """Build a UI detection dict from a Hailo detection object."""
@@ -66,8 +54,8 @@ def _update_ui(ui_state, persons, person_to_id, following_id):
     ui_state.update_detections(all_dets, following_id)
 
 
-def _run_tracker(byte_tracker, persons, hailo):
-    """Run ByteTracker (or HailoTracker fallback) and return (available_ids, person_by_id, person_to_id).
+def _run_tracker(byte_tracker, persons):
+    """Run ByteTracker and return (available_ids, person_by_id, person_to_id).
 
     person_by_id:  {track_id -> person detection}
     person_to_id:  {id(person) -> track_id}  (reverse lookup)
@@ -75,32 +63,24 @@ def _run_tracker(byte_tracker, persons, hailo):
     available_ids = set()
     person_by_id = {}
 
-    if byte_tracker is not None:
-        SCALE = 1000.0
-        det_array = np.empty((len(persons), 5), dtype=np.float32)
-        for i, person in enumerate(persons):
-            bbox = person.get_bbox()
-            det_array[i, 0] = bbox.xmin() * SCALE
-            det_array[i, 1] = bbox.ymin() * SCALE
-            det_array[i, 2] = (bbox.xmin() + bbox.width()) * SCALE
-            det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
-            det_array[i, 4] = person.get_confidence()
+    SCALE = 1000.0
+    det_array = np.empty((len(persons), 5), dtype=np.float32)
+    for i, person in enumerate(persons):
+        bbox = person.get_bbox()
+        det_array[i, 0] = bbox.xmin() * SCALE
+        det_array[i, 1] = bbox.ymin() * SCALE
+        det_array[i, 2] = (bbox.xmin() + bbox.width()) * SCALE
+        det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
+        det_array[i, 4] = person.get_confidence()
 
-        all_tracks = byte_tracker.update(det_array)
+    all_tracks = byte_tracker.update(det_array)
 
-        for t in all_tracks:
-            if t.is_activated and 0 <= t.input_index < len(persons):
-                available_ids.add(t.track_id)
-                person_by_id[t.track_id] = persons[t.input_index]
-            elif t.is_activated:
-                available_ids.add(t.track_id)
-    else:
-        for person in persons:
-            track = person.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-            if len(track) == 1:
-                track_id = track[0].get_id()
-                available_ids.add(track_id)
-                person_by_id[track_id] = person
+    for t in all_tracks:
+        if t.is_activated and 0 <= t.input_index < len(persons):
+            available_ids.add(t.track_id)
+            person_by_id[t.track_id] = persons[t.input_index]
+        elif t.is_activated:
+            available_ids.add(t.track_id)
 
     person_to_id = {id(p): tid for tid, p in person_by_id.items()}
     return available_ids, person_by_id, person_to_id
@@ -113,7 +93,7 @@ def _run_tracker(byte_tracker, persons, hailo):
 def app_callback(element, buffer, user_data):
     """Tiling pipeline callback: pick largest person (or specific tracked person), update shared state.
 
-    When ByteTracker is enabled (user_data.byte_tracker is not None):
+    ByteTracker runs synchronously in the callback:
     1. Convert detections to Nx5 array, run tracker.update() synchronously
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
@@ -126,18 +106,17 @@ def app_callback(element, buffer, user_data):
     ui_state = user_data.ui_state
 
     if not persons:
-        if user_data.byte_tracker is not None:
-            user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
+        user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
         user_data.shared_state.update(None, available_ids=set())
-        if target_state is not None:
-            _maybe_clear_target_after_lost(user_data)
+        if target_state is not None and target_state.get_target() is not None:
+            target_state.set_target(None)
         _update_ui(ui_state, [], {}, target_state.get_target() if target_state else None)
         if target_state is None or target_state.get_target() is None:
             LOGGER.debug("[SEARCH MODE] No person detected in frame - follow state cleared")
         return
 
     available_ids, person_by_id, person_to_id = _run_tracker(
-        user_data.byte_tracker, persons, hailo)
+        user_data.byte_tracker, persons)
 
     # --- Target selection ---
     target_id = target_state.get_target() if target_state is not None else None
@@ -152,7 +131,8 @@ def app_callback(element, buffer, user_data):
             follow_mode = f"ID {target_id}"
         else:
             user_data.shared_state.update(None, available_ids=available_ids)
-            _maybe_clear_target_after_lost(user_data)
+            if target_state.get_target() is not None:
+                target_state.set_target(None)
             _update_ui(ui_state, persons, person_to_id, target_state.get_target())
             if target_state.get_target() is None:
                 LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",

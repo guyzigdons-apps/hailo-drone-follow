@@ -81,7 +81,6 @@ def _build_parser() -> argparse.ArgumentParser:
     Each domain only registers arguments it owns:
       - follow_api:        controller gains, framing, search, smoothing, safety
       - drone_api:         MAVLink connection, flight lifecycle
-            - pipeline_adapter:  pipeline-specific integration args
       - app (this file):   UI/server ports
     """
     from hailo_apps.python.core.common.core import get_pipeline_parser

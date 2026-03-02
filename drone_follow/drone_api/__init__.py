@@ -7,16 +7,12 @@ functions/classes exported here.
 
 from .mavsdk_drone import (
     VelocityCommandAPI,
-    DetachedMavsdkServer,
     run_live_drone,
-    live_control_loop,
     add_drone_args,
 )
 
 __all__ = [
     "VelocityCommandAPI",
-    "DetachedMavsdkServer",
     "run_live_drone",
-    "live_control_loop",
     "add_drone_args",
 ]
