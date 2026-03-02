@@ -5,11 +5,8 @@ Other modules receive detections as pure Detection objects via callbacks.
 ByteTracker (multi-object tracker) also lives here.
 """
 
-from .byte_tracker import ByteTracker
-from .hailo_drone_detection_manager import app_callback, create_app
+from .hailo_drone_detection_manager import create_app
 
 __all__ = [
-    "ByteTracker",
-    "app_callback",
     "create_app",
 ]
