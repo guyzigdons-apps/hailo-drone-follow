@@ -9,7 +9,7 @@ The parser is assembled here from each domain's add_*_args() function,
 so no module sees arguments it doesn't own.
 
 Usage:
-    python drone_follow_app.py --input rpi  # live mode with camera + drone
+    python drone_follow.py --input rpi  # live mode with camera + drone
 
 Pipeline options (--input, --input-codec, etc.) are passed through to the tiling pipeline.
 """
@@ -21,11 +21,15 @@ import os
 import signal
 import threading
 
-from drone_follow.follow_api import ControllerConfig, SharedDetectionState
-from drone_follow.follow_api.state import FollowTargetState
-from drone_follow.drone_api import run_live_drone
-from drone_follow.drone_api.mavsdk_drone import add_drone_args
-from drone_follow.servers import FollowServer
+from follow_api import ControllerConfig, SharedDetectionState
+from follow_api.state import FollowTargetState
+from drone_api import run_live_drone
+from drone_api.mavsdk_drone import add_drone_args
+
+try:
+    from servers import FollowServer
+except ImportError:
+    from .servers import FollowServer
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -59,8 +63,6 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Web UI server port (default: 5001)")
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
-    group.add_argument("--record", action="store_true",
-                       help="Record raw video + detections for the entire session (requires --ui)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -78,7 +80,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ControllerConfig.add_args(parser)
     add_drone_args(parser)
 
-    from drone_follow.pipeline_adapter import add_pipeline_args
+    try:
+        from pipeline_adapter import add_pipeline_args
+    except ImportError:
+        from .pipeline_adapter import add_pipeline_args
     add_pipeline_args(parser)
 
     _add_app_args(parser)
@@ -102,21 +107,23 @@ def main():
     ui_pre.add_argument("--ui", action="store_true")
     ui_pre.add_argument("--ui-port", type=int, default=5001)
     ui_pre.add_argument("--ui-fps", type=int, default=10)
-    ui_pre.add_argument("--record", action="store_true")
     ui_pre.add_argument("--enable-tracking", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
     ui_state = None
     web_server = None
     if ui_pre_args.ui:
-        from drone_follow.servers import WebServer, SharedUIState
+        try:
+            from servers import WebServer, SharedUIState
+        except ImportError:
+            from .servers import WebServer, SharedUIState
         ui_state = SharedUIState()
         # Check that the UI has been built
         _ui_build_index = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "ui", "build", "index.html")
         if not os.path.isfile(_ui_build_index):
             LOGGER.error("Web UI has not been built yet.")
-            LOGGER.error("  cd drone_follow/ui")
+            LOGGER.error("  cd hailo_apps/python/pipeline_apps/drone_follow/ui")
             LOGGER.error("  npm install")
             LOGGER.error("  npm run build")
             raise SystemExit(1)
@@ -129,12 +136,13 @@ def main():
     # Build the full parser from all domains, then pass to pipeline adapter
     parser = _build_parser()
 
-    from drone_follow.pipeline_adapter import create_app
+    try:
+        from pipeline_adapter import create_app
+    except ImportError:
+        from .pipeline_adapter import create_app
 
-    recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
-                     ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
-                     record_dir=recordings_dir)
+                     ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
@@ -152,10 +160,13 @@ def main():
         web_server = WebServer(ui_state, target_state, shared_state,
                                controller_config=controller_config,
                                port=args.ui_port, static_dir=static_dir,
-                               follow_server_port=args.follow_server_port,
-                               recording_ctl=app)
-
+                               follow_server_port=args.follow_server_port)
         web_server.start()
+
+    def _eos_to_shutdown():
+        eos_reached.wait()
+        shutdown.set()
+    threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
@@ -164,28 +175,13 @@ def main():
         except Exception:
             pass
 
-    def _eos_to_shutdown():
-        eos_reached.wait()
-        shutdown.set()
-        _quit_pipeline()
-    threading.Thread(target=_eos_to_shutdown, daemon=True).start()
-
-    def run_drone():
-        """Run drone control in a background thread with its own asyncio loop."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    def run_pipeline():
         try:
-            loop.run_until_complete(
-                run_live_drone(args, shared_state, shutdown,
-                              config=controller_config, ui_state=ui_state))
-        except Exception:
-            LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
-        finally:
-            loop.close()
-
-    drone_thread = threading.Thread(target=run_drone, daemon=True)
-    drone_thread.start()
-    LOGGER.info("[app] Drone control started in background thread")
+            app.run()
+        except SystemExit:
+            pass
+    pipeline_thread = threading.Thread(target=run_pipeline, daemon=False)
+    pipeline_thread.start()
 
     def on_signal(*_):
         if not shutdown.is_set():
@@ -193,32 +189,42 @@ def main():
             LOGGER.warning("[drone] Ctrl+C received, shutting down...")
             _quit_pipeline()
 
+    # Register signal handlers at module level so they survive the asyncio loop
     signal.signal(signal.SIGINT, on_signal)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, on_signal)
 
-    # Start recording from CLI flag after pipeline is running
-    if ui_pre_args.record and ui_state is not None:
-        # Schedule recording start after pipeline enters PLAYING state
-        def _start_recording_delayed():
-            import time as _time
-            _time.sleep(1.0)  # wait for pipeline to reach PLAYING
-            app.start_recording()
-        threading.Thread(target=_start_recording_delayed, daemon=True).start()
-
-    # Run the GStreamer pipeline on the main thread (UI + Hailo start immediately)
-    LOGGER.info("[app] Starting Hailo pipeline and UI on main thread")
     try:
-        app.run()
-    except (SystemExit, KeyboardInterrupt):
-        pass
-    finally:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, on_signal)
+        except NotImplementedError:
+            pass  # already registered above
+        loop.run_until_complete(
+            run_live_drone(args, shared_state, shutdown,
+                          config=controller_config, ui_state=ui_state))
+    except KeyboardInterrupt:
         if not shutdown.is_set():
             shutdown.set()
-        if app.is_recording:
-            app.stop_recording()
-        # Wait for drone thread to finish cleanly
-        drone_thread.join(timeout=5.0)
+        LOGGER.warning("[drone] Shutdown.")
+        _quit_pipeline()
+    except Exception:
+        LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
+    finally:
+        if shutdown.is_set():
+            _quit_pipeline()
+        # Wait for pipeline; stay responsive to Ctrl+C
+        try:
+            while pipeline_thread.is_alive():
+                pipeline_thread.join(timeout=1.0)
+        except KeyboardInterrupt:
+            if not shutdown.is_set():
+                shutdown.set()
+            LOGGER.warning("[drone] Ctrl+C received, shutting down...")
+            _quit_pipeline()
+            pipeline_thread.join(timeout=5.0)
         if web_server is not None:
             web_server.stop()
         follow_server.stop()

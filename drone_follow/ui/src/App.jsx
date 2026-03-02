@@ -12,7 +12,6 @@ export default function App() {
   const [logsOpen, setLogsOpen] = useState(true);
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
-  const [recording, setRecording] = useState(false);
   const imgRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -41,27 +40,6 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, []);
-
-  // Poll recording status
-  useEffect(() => {
-    let active = true;
-    const poll = async () => {
-      while (active) {
-        try {
-          const res = await fetch("/api/status");
-          if (res.ok) {
-            const data = await res.json();
-            if (data.recording !== undefined) setRecording(data.recording);
-          }
-        } catch {
-          // server not ready
-        }
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    };
-    poll();
-    return () => { active = false; };
   }, []);
 
   // Fetch config on mount
@@ -124,19 +102,6 @@ export default function App() {
       const port = config?.follow_server_port || 8080;
       const host = window.location.hostname;
       await fetch(`http://${host}:${port}/follow/${id}`, { method: "POST" });
-    } catch {
-      // ignore
-    }
-  };
-
-  const handleRecord = async () => {
-    try {
-      const endpoint = recording ? "/api/record/stop" : "/api/record/start";
-      const res = await fetch(endpoint, { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        setRecording(data.recording ?? !recording);
-      }
     } catch {
       // ignore
     }
@@ -218,12 +183,6 @@ export default function App() {
             {velocity.yawspeed_deg_s.toFixed(1)} deg/s
           </span>
         )}
-        <button
-          className={`record-btn ${recording ? "recording" : ""}`}
-          onClick={handleRecord}
-        >
-          {recording ? "Stop Rec" : "Record"}
-        </button>
         <button className="clear-btn" onClick={handleClear}>
           Clear Target
         </button>

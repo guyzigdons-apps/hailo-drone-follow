@@ -6,17 +6,14 @@ No other module needs to import hailo or gi.repository.
 
 import argparse
 import logging
-import os
-import threading
 import time
-from datetime import datetime
 from typing import Optional
 
 import hailo
 import numpy as np
 
-from drone_follow.follow_api.types import Detection
-from drone_follow.follow_api.state import SharedDetectionState, FollowTargetState
+from follow_api.types import Detection
+from follow_api.state import SharedDetectionState, FollowTargetState
 
 from .byte_tracker import ByteTracker
 
@@ -138,7 +135,7 @@ def app_callback(element, buffer, user_data):
             _maybe_clear_target_after_lost(user_data)
         _update_ui(ui_state, [], {}, target_state.get_target() if target_state else None)
         if target_state is None or target_state.get_target() is None:
-            LOGGER.debug("[SEARCH MODE] No person detected in frame - follow state cleared")
+            LOGGER.info("[SEARCH MODE] No person detected in frame - follow state cleared")
         return
 
     available_ids, person_by_id, person_to_id = _run_tracker(
@@ -160,7 +157,7 @@ def app_callback(element, buffer, user_data):
             _maybe_clear_target_after_lost(user_data)
             _update_ui(ui_state, persons, person_to_id, target_state.get_target())
             if target_state.get_target() is None:
-                LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
+                LOGGER.info("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
                             target_id, sorted(available_ids) if available_ids else "none")
             return
     else:
@@ -190,7 +187,7 @@ def app_callback(element, buffer, user_data):
                target_state.get_target() if target_state else None)
 
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
-    LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
+    LOGGER.info("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
                 follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
 
 
@@ -199,16 +196,24 @@ def app_callback(element, buffer, user_data):
 # ---------------------------------------------------------------------------
 
 def add_pipeline_args(parser: argparse.ArgumentParser) -> None:
-    """Register pipeline-adapter-specific CLI flags."""
+    """Register pipeline-adapter-specific CLI flags.
+
+    Only arguments that the pipeline adapter itself needs go here.
+    Controller, drone, and UI args are registered by their own modules.
+    """
     group = parser.add_argument_group("pipeline-adapter")
-    group.add_argument("--enable-tracking", action="store_true",
-                       help="Enable object tracking")
     group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
                        help="Seconds to keep following a track ID after target leaves frame (default: 2.0)")
+    group.add_argument("--openhd-stream", action="store_true",
+                       help="Send overlay video to OpenHD via UDP RTP instead of display sink")
+    group.add_argument("--openhd-port", type=int, default=5500,
+                       help="OpenHD UDP input port (default: 5500)")
+    group.add_argument("--openhd-bitrate", type=int, default=5000,
+                       help="H264 encoding bitrate in kbps for OpenHD stream (default: 5000)")
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
-               parser: Optional[argparse.ArgumentParser] = None, record_dir=None):
+               parser: Optional[argparse.ArgumentParser] = None):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -223,22 +228,20 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         ui_fps: MJPEG stream frame rate (default: 10)
         parser: Pre-built argparse parser with all domain args already registered.
                 If None, a bare pipeline parser is created (for backward compat).
-        record_dir: Directory for recording output files (optional)
     """
     from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import (
-        GStreamerTilingApp,
+        GStreamerTilingApp, user_app_callback_class,
     )
-    from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
     from hailo_apps.python.core.common.core import get_pipeline_parser
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
-        QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
+        QUEUE, DISPLAY_PIPELINE,
     )
 
     if parser is None:
         parser = get_pipeline_parser()
         add_pipeline_args(parser)
 
-    class DroneFollowUserData(app_callback_class):
+    class DroneFollowUserData(user_app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
                      tracking_lost_timeout_s=2.0, byte_tracker=None):
             super().__init__()
@@ -251,15 +254,11 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
         def __init__(self, app_callback, user_data, parser=None, eos_reached=None,
-                     ui_enabled=False, ui_state=None, ui_fps=30, record_dir=None):
+                     ui_enabled=False, ui_state=None, ui_fps=30):
             self._eos_reached = eos_reached
             self._ui_enabled = ui_enabled
             self._ui_state = ui_state
             self._ui_fps = ui_fps
-            self._recording = False
-            self._record_dir = record_dir or os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
-            self._record_lock = threading.Lock()
             super().__init__(app_callback, user_data, parser=parser)
             # Connect appsink after pipeline is created by super().__init__
             if self._ui_enabled:
@@ -298,86 +297,25 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             if self._ui_enabled:
                 self._connect_mjpeg_sink()
 
-        # ---- Recording control ----
-
-        @property
-        def is_recording(self):
-            return self._recording
-
-        def _generate_record_path(self):
-            os.makedirs(self._record_dir, exist_ok=True)
-            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            return os.path.join(self._record_dir, f"rec_{ts}.mkv")
-
-        def start_recording(self, path=None):
-            """Start GStreamer-native recording. Returns the output file path."""
-            import gi
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
-
-            with self._record_lock:
-                if self._recording:
-                    LOGGER.warning("[record] Already recording")
-                    return None
-                if not self._ui_enabled:
-                    LOGGER.error("[record] Recording requires UI pipeline (--ui)")
-                    return None
-
-                valve = self.pipeline.get_by_name("record_valve")
-                filesink = self.pipeline.get_by_name("record_sink")
-                if valve is None or filesink is None:
-                    LOGGER.error("[record] Recording elements not found in pipeline")
-                    return None
-
-                record_path = path or self._generate_record_path()
-
-                # Set filesink to NULL to change location, then back to PLAYING
-                filesink.set_state(Gst.State.NULL)
-                filesink.set_property("location", record_path)
-                filesink.sync_state_with_parent()
-
-                valve.set_property("drop", False)
-                self._recording = True
-                self._current_record_path = record_path
-                LOGGER.info("[record] Started recording to %s", record_path)
-                return record_path
-
-        def stop_recording(self):
-            """Stop recording and finalize the file."""
-            import gi
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
-
-            with self._record_lock:
-                if not self._recording:
-                    return None
-
-                valve = self.pipeline.get_by_name("record_valve")
-                if valve is None:
-                    self._recording = False
-                    return None
-
-                # Close the valve (stop new buffers)
-                valve.set_property("drop", True)
-
-                # Send EOS downstream from valve's src pad to finalize the muxer
-                src_pad = valve.get_static_pad("src")
-                if src_pad:
-                    src_pad.send_event(Gst.Event.new_eos())
-
-                self._recording = False
-                path = getattr(self, "_current_record_path", None)
-                LOGGER.info("[record] Stopped recording: %s", path)
-                return path
-
         def get_pipeline_string(self):
-            if not self._ui_enabled:
-                return super().get_pipeline_string()
+            # Override parent to never insert hailotracker GStreamer element;
+            # ByteTracker runs in Python instead.
+            saved = self.enable_tracking
+            self.enable_tracking = False
 
-            # Build pipeline with tee: one branch for display, one for MJPEG appsink
+            openhd_stream = getattr(self.options_menu, 'openhd_stream', False)
+
+            # If no custom output needed, delegate to parent
+            if not self._ui_enabled and not openhd_stream:
+                result = super().get_pipeline_string()
+                self.enable_tracking = saved
+                return result
+            self.enable_tracking = saved
+
+            # Build pipeline with custom output (OpenHD stream and/or MJPEG UI)
             from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
                 SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-                TILE_CROPPER_PIPELINE,
+                TILE_CROPPER_PIPELINE, OPENHD_STREAM_PIPELINE,
             )
 
             source_pipeline = SOURCE_PIPELINE(
@@ -386,14 +324,19 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 video_height=self.video_height,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
+                input_codec=self.input_codec,
+                horizontal_mirror=not self.no_horizontal_mirror,
+                vertical_mirror=self.vertical_mirror,
             )
 
+            nms_score_thresh = self.nms_score_threshold if self.nms_score_threshold is not None else 0.001
             detection_pipeline = INFERENCE_PIPELINE(
                 hef_path=self.hef_path,
                 post_process_so=self.post_process_so,
                 post_function_name=self.post_function,
                 batch_size=self.batch_size,
                 config_json=self.labels_json,
+                additional_params=f"nms-score-threshold={nms_score_thresh}",
             )
 
             tiling_mode = 1 if self.use_multi_scale else 0
@@ -414,37 +357,39 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-            display_branch = DISPLAY_PIPELINE(
-                video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
-            )
+            # Primary output branch: OpenHD stream, display, or fakesink
+            if openhd_stream:
+                openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
+                openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 5000)
+                primary_branch = OPENHD_STREAM_PIPELINE(
+                    port=openhd_port, bitrate=openhd_bitrate,
+                )
+            else:
+                no_display = getattr(self.options_menu, 'no_display', False)
+                if no_display:
+                    primary_branch = f"fakesink sync={self.sync}"
+                else:
+                    primary_branch = DISPLAY_PIPELINE(
+                        video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                    )
 
-            # MJPEG branch (raw video, no overlay — React draws bboxes)
-            mjpeg_branch = (
-                f"videoconvert n-threads=2 ! "
-                f"videorate max-rate={self._ui_fps} ! "
-                f"video/x-raw,framerate={self._ui_fps}/1 ! "
-                f"jpegenc quality=70 ! "
-                f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
-            )
-
-            # Recording branch (valve drops by default; toggled at runtime)
-            default_record_path = self._generate_record_path()
-            record_branch = (
-                f"valve name=record_valve drop=true ! "
-                f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
-                f"videoconvert n-threads=2 ! "
-                f"x264enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
-                f"matroskamux ! filesink name=record_sink async=false location={default_record_path}"
-            )
-
-            # Tee splits into display + MJPEG + recording
-            # All branches use leaky queues so a slow branch never stalls the others
-            output_pipeline = (
-                f"tee name=ui_tee "
-                f"ui_tee. ! {QUEUE(name='display_branch_q', leaky='downstream')} ! {display_branch} "
-                f"ui_tee. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
-                f"ui_tee. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
-            )
+            if self._ui_enabled:
+                # MJPEG branch (raw video, no overlay — React draws bboxes)
+                mjpeg_branch = (
+                    f"videoconvert n-threads=2 ! "
+                    f"videorate max-rate={self._ui_fps} ! "
+                    f"video/x-raw,framerate={self._ui_fps}/1 ! "
+                    f"jpegenc quality=70 ! "
+                    f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
+                )
+                # Tee splits into primary + MJPEG
+                output_pipeline = (
+                    f"tee name=ui_tee "
+                    f"ui_tee. ! {QUEUE(name='primary_branch_q')} ! {primary_branch} "
+                    f"ui_tee. ! {QUEUE(name='mjpeg_branch_q')} ! {mjpeg_branch}"
+                )
+            else:
+                output_pipeline = primary_branch
 
             pipeline_parts = [source_pipeline, tile_cropper_pipeline]
             pipeline_parts.extend([user_callback_pipeline, output_pipeline])
@@ -469,7 +414,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
-        record_dir=record_dir,
     )
     user_data.tracking_lost_timeout_s = getattr(app.options_menu, 'tracking_lost_timeout', 2.0)
     return app
+
+

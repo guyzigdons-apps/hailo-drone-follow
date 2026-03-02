@@ -81,62 +81,6 @@ body {
   background: #555;
 }
 
-.record-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  background: #444;
-  color: #e0e0e0;
-  border: 1px solid #555;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 13px;
-  font-family: monospace;
-}
-
-.record-btn:hover {
-  background: #555;
-}
-
-.record-btn.record-active,
-.record-btn.recording {
-  background: #5a1a1a;
-  border-color: #8a3a3a;
-  color: #ff6b6b;
-}
-
-.record-btn.record-active:hover,
-.record-btn.recording:hover {
-  background: #6a2a2a;
-}
-
-.record-dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  background: #cc3333;
-  border-radius: 50%;
-}
-
-.record-dot-blink {
-  animation: blink-dot 1s ease-in-out infinite;
-}
-
-@keyframes blink-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.2; }
-}
-
-.record-error {
-  font-size: 11px;
-  color: #ff6b6b;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .video-container {
   position: relative;
   width: 100%;

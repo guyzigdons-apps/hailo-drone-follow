@@ -115,7 +115,7 @@ class _WebHandler(BaseHTTPRequestHandler):
     shared_state = None   # SharedDetectionState
     controller_config = None  # ControllerConfig
     follow_server_port: int = 8080
-    recording_ctl = None  # object with start_recording/stop_recording/is_recording
+
     def log_message(self, format, *args):
         pass
 
@@ -196,8 +196,6 @@ class _WebHandler(BaseHTTPRequestHandler):
             status = self.target_state.get_status()
         if self.shared_state is not None:
             status["available_ids"] = list(self.shared_state.get_available_ids())
-        if self.recording_ctl is not None:
-            status["recording"] = self.recording_ctl.is_recording
         self._send_json(status)
 
     _CONFIG_FIELDS = {
@@ -327,29 +325,8 @@ class _WebHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/config":
             self._handle_post_config()
-        elif self.path == "/api/record/start":
-            self._handle_record_start()
-        elif self.path == "/api/record/stop":
-            self._handle_record_stop()
         else:
             self.send_error(404, "Not Found")
-
-    def _handle_record_start(self):
-        if self.recording_ctl is None:
-            self._send_json({"error": "Recording not available"}, status=404)
-            return
-        path = self.recording_ctl.start_recording()
-        if path:
-            self._send_json({"recording": True, "path": path})
-        else:
-            self._send_json({"error": "Failed to start recording (already recording or UI not enabled)"}, status=409)
-
-    def _handle_record_stop(self):
-        if self.recording_ctl is None:
-            self._send_json({"error": "Recording not available"}, status=404)
-            return
-        path = self.recording_ctl.stop_recording()
-        self._send_json({"recording": False, "path": path})
 
 
 class WebServer:
@@ -357,7 +334,7 @@ class WebServer:
 
     def __init__(self, ui_state, target_state=None, shared_state=None,
                  controller_config=None, host="0.0.0.0", port=5001, static_dir=None,
-                 follow_server_port=8080, recording_ctl=None):
+                 follow_server_port=8080):
         self.ui_state = ui_state
         self.target_state = target_state
         self.shared_state = shared_state
@@ -366,7 +343,6 @@ class WebServer:
         self.port = port
         self.static_dir = static_dir
         self.follow_server_port = follow_server_port
-        self.recording_ctl = recording_ctl
         self.server = None
         self.thread = None
 
@@ -377,7 +353,6 @@ class WebServer:
         _WebHandler.controller_config = self.controller_config
         _WebHandler.static_dir = self.static_dir
         _WebHandler.follow_server_port = self.follow_server_port
-        _WebHandler.recording_ctl = self.recording_ctl
 
         self.server = ThreadingHTTPServer((self.host, self.port), _WebHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
