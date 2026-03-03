@@ -7,7 +7,7 @@
 - **Hailo application infrastructure** (hailort, hailo-tappas-core, Python bindings).
 - **Python 3.9+** with the project virtual environment activated (`source setup_env.sh`).
 - **MAVSDK** for drone connection and offboard control (installed via pip in the project venv).
-- For **simulation**: PX4 SITL and Gazebo (e.g. `make px4_sitl gz_x500_mono_cam` from PX4-Autopilot).
+- For **simulation**: PX4 SITL and Gazebo (e.g. `make px4_sitl gz_x500_mono_cam` from PX4-Autopilot). See [PX4 Ubuntu Dev Environment Setup](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu) for toolchain installation.
 - For **real drone**: PX4 (or compatible) firmware and a connection (e.g. USB or UDP).
 
 ### Steps
