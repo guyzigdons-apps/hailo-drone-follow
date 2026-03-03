@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const POLL_INTERVAL = 100; // ms
 const LOG_POLL_INTERVAL = 500; // ms
 const DEBOUNCE_MS = 250;
 
@@ -18,29 +17,20 @@ export default function App() {
   const logSinceRef = useRef(0);
   const logEndRef = useRef(null);
 
-  // Poll detections
+  // Frame-synced detections via SSE (replaces polling)
   useEffect(() => {
-    let active = true;
-    const poll = async () => {
-      while (active) {
-        try {
-          const res = await fetch("/api/detections");
-          if (res.ok) {
-            const data = await res.json();
-            setDetections(data.detections || []);
-            setFollowingId(data.following_id);
-            setVelocity(data.velocity || null);
-          }
-        } catch {
-          // server not ready
-        }
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+    const es = new EventSource("/api/detections/stream");
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setDetections(data.detections || []);
+        setFollowingId(data.following_id);
+        setVelocity(data.velocity || null);
+      } catch {
+        // malformed event
       }
     };
-    poll();
-    return () => {
-      active = false;
-    };
+    return () => es.close();
   }, []);
 
   // Poll recording status
