@@ -13,7 +13,7 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
   const [recording, setRecording] = useState(false);
-  const imgRef = useRef(null);
+  const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
   const logEndRef = useRef(null);
@@ -111,12 +111,103 @@ export default function App() {
     }
   }, [logs]);
 
-  // Track image natural dimensions
-  const onImgLoad = useCallback(() => {
-    const img = imgRef.current;
-    if (img) {
-      setVideoDims({ width: img.naturalWidth, height: img.naturalHeight });
-    }
+  // MJPEG stream via fetch + ReadableStream → canvas
+  useEffect(() => {
+    const controller = new AbortController();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+
+    const BOUNDARY = "--frame\r\n";
+    const HEADER_END = "\r\n\r\n";
+
+    (async () => {
+      try {
+        const res = await fetch("/api/video", { signal: controller.signal });
+        const reader = res.body.getReader();
+        let buffer = new Uint8Array(0);
+
+        const concat = (a, b) => {
+          const c = new Uint8Array(a.length + b.length);
+          c.set(a);
+          c.set(b, a.length);
+          return c;
+        };
+
+        const indexOf = (buf, pattern) => {
+          const enc = new TextEncoder();
+          const pat = enc.encode(pattern);
+          outer: for (let i = 0; i <= buf.length - pat.length; i++) {
+            for (let j = 0; j < pat.length; j++) {
+              if (buf[i + j] !== pat[j]) continue outer;
+            }
+            return i;
+          }
+          return -1;
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer = concat(buffer, value);
+
+          // Process all complete frames in the buffer
+          while (true) {
+            // Find the first boundary
+            const bStart = indexOf(buffer, BOUNDARY);
+            if (bStart === -1) break;
+
+            // Find the end of headers after the boundary
+            const headerStart = bStart + BOUNDARY.length;
+            const headerEnd = indexOf(
+              buffer.subarray(headerStart),
+              HEADER_END
+            );
+            if (headerEnd === -1) break;
+
+            const jpegStart = headerStart + headerEnd + HEADER_END.length;
+
+            // Find the next boundary to determine the end of JPEG data
+            const nextBoundary = indexOf(
+              buffer.subarray(jpegStart),
+              BOUNDARY
+            );
+            if (nextBoundary === -1) break;
+
+            // Extract JPEG bytes (strip trailing \r\n before next boundary)
+            let jpegEnd = jpegStart + nextBoundary;
+            while (jpegEnd > jpegStart && (buffer[jpegEnd - 1] === 0x0a || buffer[jpegEnd - 1] === 0x0d)) {
+              jpegEnd--;
+            }
+            const jpegData = buffer.slice(jpegStart, jpegEnd);
+
+            // Advance buffer past the current frame (keep from next boundary)
+            buffer = buffer.slice(jpegStart + nextBoundary);
+
+            // Draw the frame
+            try {
+              const blob = new Blob([jpegData], { type: "image/jpeg" });
+              const bmp = await createImageBitmap(blob);
+              if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+                canvas.width = bmp.width;
+                canvas.height = bmp.height;
+                setVideoDims({ width: bmp.width, height: bmp.height });
+              }
+              ctx.drawImage(bmp, 0, 0);
+              bmp.close();
+            } catch {
+              // skip corrupt frame
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          console.error("MJPEG stream error:", err);
+        }
+      }
+    })();
+
+    return () => controller.abort();
   }, []);
 
   const handleFollow = async (id) => {
@@ -403,12 +494,9 @@ export default function App() {
 
         <div className="video-column">
           <div className="video-container">
-        <img
-          ref={imgRef}
+        <canvas
+          ref={canvasRef}
           className="video-feed"
-          src="/api/video"
-          alt="Live feed"
-          onLoad={onImgLoad}
         />
         {vw > 0 && vh > 0 && (
           <svg className="overlay" viewBox={`0 0 ${vw} ${vh}`}>
