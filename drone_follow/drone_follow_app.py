@@ -27,7 +27,7 @@ from drone_follow.follow_api.state import FollowTargetState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
 from drone_follow.sim import WorldLoader
-from drone_follow.servers import FollowServer
+from drone_follow.servers import FollowServer, OpenHDBridge
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -164,6 +164,10 @@ def main():
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
     follow_server.start()
 
+    # Start OpenHD parameter bridge (allows QOpenHD to control follow params)
+    openhd_bridge = OpenHDBridge(controller_config, target_state=target_state)
+    openhd_bridge.start()
+
     # Start web UI server
     if ui_state is not None:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
@@ -244,6 +248,7 @@ def main():
         drone_thread.join(timeout=5.0)
         if web_server is not None:
             web_server.stop()
+        openhd_bridge.stop()
         follow_server.stop()
 
 
