@@ -201,6 +201,36 @@ def _openhd_stream_pipeline(port=5500, host="127.0.0.1", bitrate=5000, name="ope
     )
 
 
+def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, name="source"):
+    """Build a GStreamer source pipeline for OpenHD shared-memory NV12 passthrough.
+
+    shmsrc buffers are read-only (mmap'd shared memory).  Force an immediate
+    NV12->I420 conversion to create writable buffers (cheap UV deinterleave).
+    --width/--height MUST match the OpenHD camera resolution exactly.
+    """
+    from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
+
+    socket_path = "/tmp/openhd_raw_video"
+    if '://' in str(video_source):
+        socket_path = str(video_source).split('://', 1)[1]
+
+    source_element = (
+        f'shmsrc socket-path={socket_path} do-timestamp=true is-live=true name={name} ! '
+        f'video/x-raw,format=NV12,width={video_width},height={video_height},'
+        f'framerate={frame_rate}/1,pixel-aspect-ratio=1/1 ! '
+        f'videoconvert ! video/x-raw,format=I420 ! '
+    )
+    return (
+        f"{source_element} "
+        f"{QUEUE(name=f'{name}_scale_q')} ! "
+        f"videoscale name={name}_videoscale n-threads=2 ! "
+        f"{QUEUE(name=f'{name}_convert_q')} ! "
+        f"videoconvert n-threads=3 name={name}_convert qos=false ! "
+        f"video/x-raw, pixel-aspect-ratio=1/1, format=RGB, "
+        f"width={video_width}, height={video_height}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline app factory
 # ---------------------------------------------------------------------------
@@ -388,26 +418,33 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
         def get_pipeline_string(self):
             openhd_stream = getattr(self.options_menu, 'openhd_stream', False)
+            is_shm = str(self.video_source).startswith('shm')
 
             # If no custom output needed, delegate to parent
-            if not self._ui_enabled and not openhd_stream:
+            if not self._ui_enabled and not openhd_stream and not is_shm:
                 return super().get_pipeline_string()
 
             # Build pipeline with custom output (OpenHD stream and/or MJPEG UI)
             from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
                 SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-                TILE_CROPPER_PIPELINE,
+                TILE_CROPPER_PIPELINE, QUEUE,
             )
 
-            source_pipeline = SOURCE_PIPELINE(
-                video_source=self.video_source,
-                video_width=self.video_width,
-                video_height=self.video_height,
-                frame_rate=self.frame_rate,
-                sync=self.sync,
-                mirror_image=self.options_menu.horizontal_mirror,
-                vertical_mirror=self.options_menu.vertical_mirror,
-            )
+            if is_shm:
+                source_pipeline = _shm_source_pipeline(
+                    self.video_source, self.video_width, self.video_height,
+                    self.frame_rate,
+                )
+            else:
+                source_pipeline = SOURCE_PIPELINE(
+                    video_source=self.video_source,
+                    video_width=self.video_width,
+                    video_height=self.video_height,
+                    frame_rate=self.frame_rate,
+                    sync=self.sync,
+                    mirror_image=self.options_menu.horizontal_mirror,
+                    vertical_mirror=self.options_menu.vertical_mirror,
+                )
 
             detection_pipeline = INFERENCE_PIPELINE(
                 hef_path=self.hef_path,
