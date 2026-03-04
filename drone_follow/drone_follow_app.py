@@ -165,7 +165,7 @@ def main():
     follow_server.start()
 
     # Start OpenHD parameter bridge (allows QOpenHD to control follow params)
-    openhd_bridge = OpenHDBridge(controller_config, target_state=target_state)
+    openhd_bridge = OpenHDBridge(controller_config, target_state=target_state, detection_state=shared_state)
     openhd_bridge.start()
 
     # Start web UI server

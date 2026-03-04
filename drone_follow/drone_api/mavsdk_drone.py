@@ -331,6 +331,11 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                     last_detection_time = now
                     last_valid_detection = detection
 
+            # IDLE mode: ignore all detections and hold position indefinitely
+            if target_state is not None and target_state.is_paused():
+                detection = None
+                last_detection_time = now  # reset so search/land timers never advance
+
             # Check search timeout
             time_since_detection = now - last_detection_time
             if time_since_detection > config.search_timeout_s:

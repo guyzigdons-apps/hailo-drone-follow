@@ -139,6 +139,11 @@ def app_callback(element, buffer, user_data):
                             target_id, sorted(available_ids) if available_ids else "none")
             return
     else:
+        # IDLE mode: hold position, do not select any target
+        if target_state is not None and target_state.is_paused():
+            user_data.shared_state.update(None, available_ids=available_ids)
+            _update_ui(ui_state, persons, person_to_id, None)
+            return
         best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
         best_tid = person_to_id.get(id(best))
         if best_tid is not None and target_state is not None:

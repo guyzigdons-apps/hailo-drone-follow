@@ -9,7 +9,18 @@ Int/bool params use MAVLink INT32.
 
 Wire protocol (JSON over UDP):
   OpenHD -> Python (port 5510): {"param": "<field_name>", "value": <number>}
-  Python -> OpenHD (port 5511): {"params": {"<field_name>": <number>, ...}}
+  Python -> OpenHD (port 5511): {"params": {<field_name>: <number>, ...},
+                                  "avail_ids": [<int>, ...]}
+
+follow_id semantics (DF_FOLLOW_ID):
+  -1  → IDLE: drone holds position, ignores all detections
+   0  → AUTO: system auto-follows largest person in frame
+   N  → LOCKED: operator explicitly selected person N
+
+active_id (DF_ACTIVE_ID):
+  The currently active tracking ID reported by FollowTargetState regardless of
+  whether it was auto-selected or operator-locked. 0 means no one being tracked.
+  QOpenHD uses this to distinguish AUTO-tracking-someone from no-one-in-view.
 """
 
 import json
@@ -42,17 +53,19 @@ _CONFIG_PARAMS = {
 # Fields where value 0 maps to Python None
 _NULLABLE_FIELDS = {"target_distance_m"}
 
-# Special param for follow target control (not in ControllerConfig)
+# Special params for follow target control (not in ControllerConfig)
 _FOLLOW_ID_PARAM = "follow_id"
+_ACTIVE_ID_PARAM = "active_id"
 
 
 class OpenHDBridge:
     """UDP bridge between OpenHD MAVLink params and ControllerConfig."""
 
-    def __init__(self, controller_config, target_state=None,
-                 listen_port=5510, report_port=5511, report_interval=2.0):
+    def __init__(self, controller_config, target_state=None, detection_state=None,
+                 listen_port=5510, report_port=5511, report_interval=0.5):
         self._config = controller_config
         self._target_state = target_state
+        self._detection_state = detection_state
         self._listen_port = listen_port
         self._report_port = report_port
         self._report_interval = report_interval
@@ -60,6 +73,12 @@ class OpenHDBridge:
         self._listen_thread = None
         self._report_thread = None
         self._sock = None
+
+        # Tracks operator's explicit follow_id intent:
+        #   -1 = IDLE (drone hold), 0 = AUTO, N = locked to person N
+        # Reported back to QOpenHD instead of target_state.get_target() so that
+        # the badge reflects the operator's choice, not the auto-selected ID.
+        self._explicit_follow_id = 0
 
     def start(self):
         """Start listener and reporter daemon threads."""
@@ -121,22 +140,39 @@ class OpenHDBridge:
 
             if param_name == _FOLLOW_ID_PARAM:
                 self._apply_follow_id(int(value))
+            elif param_name == _ACTIVE_ID_PARAM:
+                pass  # read-only from Python's side; ignore any set forwarded by OpenHD
             elif param_name in _CONFIG_PARAMS:
                 self._apply_config_param(param_name, value)
             else:
                 LOGGER.warning("[openhd_bridge] Unknown param: %s", param_name)
 
-    def _apply_follow_id(self, value):
-        """Handle follow target selection from ground station."""
+    def _apply_follow_id(self, value: int):
+        """Handle follow target selection from ground station.
+
+        -1 → IDLE (drone holds position, ignores detections)
+         0 → AUTO (follow largest)
+         N → LOCKED to person N
+        """
         if self._target_state is None:
             LOGGER.warning("[openhd_bridge] follow_id received but no target_state")
             return
-        if value <= 0:
+        self._explicit_follow_id = value
+        if value < 0:
+            self._target_state.set_paused(True)
             self._target_state.set_target(None)
-            LOGGER.info("[openhd_bridge] follow_id cleared (following largest)")
+            LOGGER.info("[openhd_bridge] IDLE mode (drone holding position)")
+        elif value == 0:
+            self._target_state.set_paused(False)
+            self._target_state.set_target(None)
+            LOGGER.info("[openhd_bridge] AUTO mode (following largest)")
         else:
+            self._target_state.set_paused(False)
             self._target_state.set_target(value)
-            LOGGER.info("[openhd_bridge] follow_id = %d", value)
+            LOGGER.info("[openhd_bridge] LOCKED to ID %d", value)
+        # Immediately push state back so QOpenHD badge updates without waiting
+        # for the next periodic report cycle.
+        self._send_immediate_report()
 
     def _apply_config_param(self, python_name, value):
         """Apply a single parameter change from OpenHD to ControllerConfig."""
@@ -165,6 +201,16 @@ class OpenHDBridge:
 
     # -- Reporter: Python -> OpenHD ------------------------------------------
 
+    def _send_immediate_report(self):
+        """Send a one-shot report on a transient socket (callable from any thread)."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self._send_report(sock)
+        except OSError:
+            pass
+        finally:
+            sock.close()
+
     def _report_loop(self):
         """Periodically send current config values to OpenHD for read-back sync."""
         report_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -191,12 +237,31 @@ class OpenHDBridge:
             else:
                 params[python_name] = py_value if py_value is not None else 0
 
-        # Report follow target state
         if self._target_state is not None:
-            target_id = self._target_state.get_target()
-            params[_FOLLOW_ID_PARAM] = target_id if target_id is not None else 0
+            actual_target = self._target_state.get_target()
 
-        msg = json.dumps({"params": params}).encode("utf-8")
+            # If tracking timeout auto-cleared an explicit lock, sync back to AUTO
+            # so the QOpenHD badge reflects the real state rather than a stale lock.
+            if self._explicit_follow_id > 0 and actual_target is None:
+                self._explicit_follow_id = 0
+                LOGGER.info("[openhd_bridge] Explicit lock auto-cleared (target lost)")
+
+            # Report operator's intent (not the auto-selected ID) as follow_id.
+            # This ensures QOpenHD badge shows AUTO when no explicit selection was made.
+            params[_FOLLOW_ID_PARAM] = self._explicit_follow_id
+
+            # Report the actual currently-tracked ID so QOpenHD can show
+            # "AUTO · #N" when in auto mode and a person is actively followed.
+            params[_ACTIVE_ID_PARAM] = actual_target if actual_target is not None else 0
+
+        payload = {"params": params}
+
+        # Report available tracking IDs so QOpenHD can show a selection list
+        if self._detection_state is not None:
+            avail = self._detection_state.get_available_ids()
+            payload["avail_ids"] = sorted(avail) if avail else []
+
+        msg = json.dumps(payload).encode("utf-8")
         try:
             sock.sendto(msg, ("127.0.0.1", self._report_port))
         except OSError as e:
