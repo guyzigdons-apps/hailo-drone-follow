@@ -285,6 +285,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self._record_dir = record_dir or os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
             self._record_lock = threading.Lock()
+            self._shm_rebuild_pending = False
             super().__init__(app_callback, user_data, parser=parser)
             # Connect appsink after pipeline is created by super().__init__
             if self._ui_enabled:
@@ -311,6 +312,30 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     self._ui_state.update_frame(bytes(map_info.data))
                     buf.unmap(map_info)
             return Gst.FlowReturn.OK
+
+        def bus_call(self, bus, message, loop):
+            """Override to rebuild pipeline on errors in SHM mode instead of shutting down."""
+            import gi
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst, GLib
+            t = message.type
+            if t == Gst.MessageType.ERROR:
+                err, debug = message.parse_error()
+                is_shm = str(getattr(self, 'video_source', '')).startswith('shm://')
+                if is_shm and not self._shm_rebuild_pending:
+                    self._shm_rebuild_pending = True
+                    LOGGER.warning("SHM pipeline error (%s) — rebuilding in 2s", err)
+                    GLib.timeout_add(2000, self._shm_rebuild)
+                    return True
+                elif is_shm:
+                    # Additional error while rebuild already pending — ignore
+                    return True
+            return super().bus_call(bus, message, loop)
+
+        def _shm_rebuild(self):
+            """Rebuild pipeline and clear the pending flag."""
+            self._shm_rebuild_pending = False
+            return self._rebuild_pipeline()
 
         def on_eos(self):
             if self._eos_reached is not None:
