@@ -9,11 +9,11 @@ Int/bool params use MAVLink INT32.
 
 Wire protocol (JSON over UDP):
   OpenHD -> Python (port 5510): {"param": "<field_name>", "value": <number>}
-  Python -> OpenHD (port 5511): {"params": {<field_name>: <number>, ...},
-                                  "avail_ids": [<int>, ...],
-                                  "bboxes": [{"id": <int>, "cx": <float>,
-                                              "cy": <float>, "w": <float>,
-                                              "h": <float>, "tracked": <bool>}]}
+  Python -> OpenHD (port 5511): {"params": {<field_name>: <number>, ...}}
+
+Detection/tracking state (follow_id, active_id, bboxes) is sent exclusively
+via the binary detection payload v3 on WFB port 40 — not in this JSON report.
+The JSON report carries only configuration parameters for bidirectional sync.
 
 follow_id semantics (DF_FOLLOW_ID):
   -1  → IDLE: drone holds position, ignores all detections
@@ -271,6 +271,10 @@ class OpenHDBridge:
             else:
                 params[python_name] = py_value if py_value is not None else 0
 
+        # Sync follow_id/active_id into params for OpenHD's HailoFollowBridge
+        # parameter cache (these are also in the binary v3 payload, but the
+        # bridge needs them here to populate the MAVLink DF_FOLLOW_ID /
+        # DF_ACTIVE_ID settings for QOpenHD parameter reads).
         if self._target_state is not None:
             actual_target = self._target_state.get_target()
 
@@ -281,22 +285,13 @@ class OpenHDBridge:
                             self._explicit_follow_id)
                 self._explicit_follow_id = -1
 
-            # Report operator's intent (not the auto-selected ID) as follow_id.
-            # This ensures QOpenHD badge shows AUTO when no explicit selection was made.
             params[_FOLLOW_ID_PARAM] = self._explicit_follow_id
-
-            # Report the actual currently-tracked ID so QOpenHD can show
-            # "AUTO · #N" when in auto mode and a person is actively followed.
             params[_ACTIVE_ID_PARAM] = actual_target if actual_target is not None else 0
 
         payload = {"params": params}
 
-        # Report available tracking IDs so QOpenHD can show a selection list
-        if self._detection_state is not None:
-            avail = self._detection_state.get_available_ids()
-            payload["avail_ids"] = sorted(avail) if avail else []
-
-        # Report all bounding boxes so QOpenHD can render a ground-side overlay
+        # Bounding boxes: sent here so OpenHD's HailoFollowBridge can build the
+        # binary detection payload v3 and transmit it via WFB port 40 to ground.
         if self._ui_state is not None:
             det_data = self._ui_state.get_detections()
             active_id = det_data.get("following_id")
