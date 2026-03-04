@@ -9,7 +9,6 @@ import logging
 import os
 import signal
 import subprocess
-import sys
 import time
 from typing import Optional
 from urllib.parse import urlparse
@@ -192,13 +191,6 @@ class DetachedMavsdkServer:
 # Offboard mode helpers
 # ---------------------------------------------------------------------------
 
-def _exit_if_not_offboard(reason: str) -> None:
-    """Exit the process immediately. Use when --no-takeoff-landing and drone must be OFFBOARD."""
-    LOGGER.error("[drone] %s", reason)
-    sys.stderr.flush()
-    os._exit(1)
-
-
 async def _wait_for_offboard_mode(drone: System, shutdown: asyncio.Event) -> None:
     """Block until the drone enters OFFBOARD mode, streaming zero setpoints as keep-alive.
 
@@ -241,15 +233,17 @@ async def _wait_for_offboard_mode(drone: System, shutdown: asyncio.Event) -> Non
         await _cancel_task(setpoint_task)
 
 
-async def _watch_offboard_mode(drone: System, shutdown: asyncio.Event) -> None:
-    """Background task: if flight mode ever leaves OFFBOARD, kill the app."""
+async def _watch_offboard_mode(drone: System, shutdown: asyncio.Event,
+                               offboard_lost: asyncio.Event) -> None:
+    """Background task: set *offboard_lost* when flight mode leaves OFFBOARD."""
     async for mode in drone.telemetry.flight_mode():
         if shutdown.is_set():
             return
         if mode != FlightMode.OFFBOARD:
-            _exit_if_not_offboard(
-                f"Drone left OFFBOARD mode (current: {mode.name}). Exiting."
-            )
+            LOGGER.warning("[drone] Drone left OFFBOARD mode (current: %s). "
+                           "Pausing control loop, waiting for OFFBOARD again...", mode.name)
+            offboard_lost.set()
+            return
 
 
 def _print_connection_error(prefix: str, e: Exception, hint: bool = False) -> None:
@@ -564,39 +558,84 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                             await asyncio.sleep(_ARM_SHUTDOWN_POLL_S)
                 await drone.action.takeoff()
                 await asyncio.sleep(15)
-            else:
-                await _wait_for_offboard_mode(drone, shutdown)
+
+                await _start_offboard(drone, vel_api, shutdown)
                 if shutdown.is_set():
                     return
-
-            await _start_offboard(drone, vel_api, shutdown)
-            if shutdown.is_set():
-                return
-
-            if manage_takeoff_landing:
                 await asyncio.sleep(3)
 
-            altitude_cache: dict = {}
-            alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
-            control_task = asyncio.create_task(
-                live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
-            if not manage_takeoff_landing:
-                watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
+                altitude_cache: dict = {}
+                alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
+                control_task = asyncio.create_task(
+                    live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
 
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.create_task(shutdown.wait()),
-                    asyncio.create_task(asyncio.sleep(args.mission_duration)),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                await _cancel_task(t)
-            if shutdown.is_set():
-                if manage_takeoff_landing:
+                done, pending = await asyncio.wait(
+                    [
+                        asyncio.create_task(shutdown.wait()),
+                        asyncio.create_task(asyncio.sleep(args.mission_duration)),
+                    ],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    await _cancel_task(t)
+                if shutdown.is_set():
                     LOGGER.warning("[drone] Shutdown requested, landing...")
-                else:
-                    LOGGER.warning("[drone] Shutdown requested, stopping control loop...")
+            else:
+                # --no-takeoff-landing: loop between waiting for OFFBOARD
+                # and running the control loop. When OFFBOARD is lost the
+                # app pauses and waits for the next OFFBOARD activation.
+                altitude_cache: dict = {}
+                alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
+
+                while not shutdown.is_set():
+                    await _wait_for_offboard_mode(drone, shutdown)
+                    if shutdown.is_set():
+                        break
+
+                    await _start_offboard(drone, vel_api, shutdown)
+                    if shutdown.is_set():
+                        break
+
+                    offboard_lost = asyncio.Event()
+                    vel_api.reset_filter()
+                    control_task = asyncio.create_task(
+                        live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
+                    watch_task = asyncio.create_task(
+                        _watch_offboard_mode(drone, shutdown, offboard_lost))
+
+                    done, pending = await asyncio.wait(
+                        [
+                            asyncio.create_task(shutdown.wait()),
+                            asyncio.create_task(offboard_lost.wait()),
+                            asyncio.create_task(asyncio.sleep(args.mission_duration)),
+                        ],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in pending:
+                        await _cancel_task(t)
+
+                    # Tear down this iteration's tasks
+                    await _cancel_task(control_task)
+                    control_task = None
+                    await _cancel_task(watch_task)
+                    watch_task = None
+
+                    try:
+                        await vel_api.send_zero()
+                    except Exception:
+                        pass
+                    try:
+                        await drone.offboard.stop()
+                    except Exception:
+                        pass
+
+                    if shutdown.is_set():
+                        LOGGER.warning("[drone] Shutdown requested, stopping control loop...")
+                        break
+
+                    if offboard_lost.is_set():
+                        LOGGER.info("[drone] Control loop paused. Waiting for OFFBOARD again...")
+
         except asyncio.CancelledError:
             LOGGER.warning("[drone] Shutdown requested...")
         finally:
