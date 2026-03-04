@@ -10,7 +10,10 @@ Int/bool params use MAVLink INT32.
 Wire protocol (JSON over UDP):
   OpenHD -> Python (port 5510): {"param": "<field_name>", "value": <number>}
   Python -> OpenHD (port 5511): {"params": {<field_name>: <number>, ...},
-                                  "avail_ids": [<int>, ...]}
+                                  "avail_ids": [<int>, ...],
+                                  "bboxes": [{"id": <int>, "cx": <float>,
+                                              "cy": <float>, "w": <float>,
+                                              "h": <float>, "tracked": <bool>}]}
 
 follow_id semantics (DF_FOLLOW_ID):
   -1  → IDLE: drone holds position, ignores all detections
@@ -62,10 +65,12 @@ class OpenHDBridge:
     """UDP bridge between OpenHD MAVLink params and ControllerConfig."""
 
     def __init__(self, controller_config, target_state=None, detection_state=None,
+                 ui_state=None,
                  listen_port=5510, report_port=5511, report_interval=0.5):
         self._config = controller_config
         self._target_state = target_state
         self._detection_state = detection_state
+        self._ui_state = ui_state
         self._listen_port = listen_port
         self._report_port = report_port
         self._report_interval = report_interval
@@ -260,6 +265,28 @@ class OpenHDBridge:
         if self._detection_state is not None:
             avail = self._detection_state.get_available_ids()
             payload["avail_ids"] = sorted(avail) if avail else []
+
+        # Report all bounding boxes so QOpenHD can render a ground-side overlay
+        if self._ui_state is not None:
+            det_data = self._ui_state.get_detections()
+            active_id = det_data.get("following_id")
+            bboxes = []
+            for det in det_data.get("detections", []):
+                bbox = det.get("bbox", {})
+                x = bbox.get("x", 0.0)
+                y = bbox.get("y", 0.0)
+                w = bbox.get("w", 0.0)
+                h = bbox.get("h", 0.0)
+                det_id = det.get("id")
+                bboxes.append({
+                    "id": det_id if det_id is not None else 0,
+                    "cx": round(x + w / 2, 4),
+                    "cy": round(y + h / 2, 4),
+                    "w": round(w, 4),
+                    "h": round(h, 4),
+                    "tracked": det_id is not None and det_id == active_id,
+                })
+            payload["bboxes"] = bboxes
 
         msg = json.dumps(payload).encode("utf-8")
         try:
