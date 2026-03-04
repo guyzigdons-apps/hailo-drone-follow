@@ -355,13 +355,16 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return path
 
         def get_pipeline_string(self):
-            if not self._ui_enabled:
+            openhd_stream = getattr(self.options_menu, 'openhd_stream', False)
+
+            # If no custom output needed, delegate to parent
+            if not self._ui_enabled and not openhd_stream:
                 return super().get_pipeline_string()
 
-            # Build pipeline with tee: one branch for display, one for MJPEG appsink
+            # Build pipeline with custom output (OpenHD stream and/or MJPEG UI)
             from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
                 SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-                TILE_CROPPER_PIPELINE,
+                TILE_CROPPER_PIPELINE, OPENHD_STREAM_PIPELINE,
             )
 
             source_pipeline = SOURCE_PIPELINE(
@@ -400,36 +403,47 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-            display_branch = DISPLAY_PIPELINE(
-                video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
-            )
+            # Primary output branch: OpenHD stream, display, or fakesink
+            if openhd_stream:
+                openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
+                openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 5000)
+                primary_branch = OPENHD_STREAM_PIPELINE(
+                    port=openhd_port, bitrate=openhd_bitrate,
+                )
+            else:
+                primary_branch = DISPLAY_PIPELINE(
+                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                )
 
-            # MJPEG branch (raw video, no overlay — React draws bboxes)
-            mjpeg_branch = (
-                f"videoconvert n-threads=2 ! "
-                f"videorate max-rate={self._ui_fps} ! "
-                f"video/x-raw,framerate={self._ui_fps}/1 ! "
-                f"jpegenc quality=70 ! "
-                f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
-            )
+            if self._ui_enabled:
+                # MJPEG branch (raw video, no overlay — React draws bboxes)
+                mjpeg_branch = (
+                    f"videoconvert n-threads=2 ! "
+                    f"videorate max-rate={self._ui_fps} ! "
+                    f"video/x-raw,framerate={self._ui_fps}/1 ! "
+                    f"jpegenc quality=70 ! "
+                    f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
+                )
 
-            # Recording branch (valve drops by default; toggled at runtime)
-            record_branch = (
-                f"valve name=record_valve drop=true ! "
-                f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
-                f"videoconvert n-threads=2 ! "
-                f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
-                f"matroskamux name=record_mux ! filesink name=record_sink async=false location=/dev/null"
-            )
+                # Recording branch (valve drops by default; toggled at runtime)
+                record_branch = (
+                    f"valve name=record_valve drop=true ! "
+                    f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
+                    f"videoconvert n-threads=2 ! "
+                    f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
+                    f"matroskamux name=record_mux ! filesink name=record_sink async=false location=/dev/null"
+                )
 
-            # Tee splits into display + MJPEG + recording
-            # All branches use leaky queues so a slow branch never stalls the others
-            output_pipeline = (
-                f"tee name=ui_tee "
-                f"ui_tee. ! {QUEUE(name='display_branch_q', leaky='downstream')} ! {display_branch} "
-                f"ui_tee. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
-                f"ui_tee. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
-            )
+                # Tee splits into primary + MJPEG + recording
+                # All branches use leaky queues so a slow branch never stalls the others
+                output_pipeline = (
+                    f"tee name=ui_tee "
+                    f"ui_tee. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_branch} "
+                    f"ui_tee. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
+                    f"ui_tee. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
+                )
+            else:
+                output_pipeline = primary_branch
 
             pipeline_parts = [source_pipeline, tile_cropper_pipeline]
             pipeline_parts.extend([user_callback_pipeline, output_pipeline])

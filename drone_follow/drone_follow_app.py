@@ -74,6 +74,14 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--record", action="store_true",
                        help="Record raw video + detections for the entire session (requires --ui)")
 
+    # OpenHD integration
+    group.add_argument("--openhd-stream", action="store_true",
+                       help="Send overlay video to OpenHD via UDP RTP instead of display sink")
+    group.add_argument("--openhd-port", type=int, default=5500,
+                       help="OpenHD UDP input port (default: 5500)")
+    group.add_argument("--openhd-bitrate", type=int, default=5000,
+                       help="H264 encoding bitrate in kbps for OpenHD stream (default: 5000)")
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the full CLI parser, assembling args from every domain.
