@@ -41,6 +41,7 @@ class FollowTargetState:
         self._target_id: Optional[int] = None
         self._last_seen: Optional[float] = None
         self._paused: bool = False
+        self._explicit_lock: bool = False
 
     def set_paused(self, paused: bool):
         """Pause or resume drone follow. When paused the control loop holds position."""
@@ -51,6 +52,16 @@ class FollowTargetState:
         """Return True if drone follow is paused (IDLE mode)."""
         with self._lock:
             return self._paused
+
+    def set_explicit_lock(self, locked: bool):
+        """Mark whether the current target was explicitly chosen by the operator."""
+        with self._lock:
+            self._explicit_lock = locked
+
+    def is_explicit_lock(self) -> bool:
+        """Return True if the current target was explicitly locked by the operator."""
+        with self._lock:
+            return self._explicit_lock
 
     def set_target(self, detection_id: Optional[int]):
         """Set the target detection ID to follow."""

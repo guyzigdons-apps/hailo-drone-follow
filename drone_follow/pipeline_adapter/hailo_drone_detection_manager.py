@@ -109,10 +109,15 @@ def app_callback(element, buffer, user_data):
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
         user_data.shared_state.update(None, available_ids=set())
         if target_state is not None and target_state.get_target() is not None:
+            was_explicit = target_state.is_explicit_lock()
             target_state.set_target(None)
-        _update_ui(ui_state, [], {}, target_state.get_target() if target_state else None)
+            if was_explicit:
+                target_state.set_paused(True)
+                target_state.set_explicit_lock(False)
+                LOGGER.info("[IDLE FALLBACK] Explicit lock lost (no persons) — entering idle")
+        _update_ui(ui_state, [], {}, None)
         if target_state is None or target_state.get_target() is None:
-            LOGGER.debug("[SEARCH MODE] No person detected in frame - follow state cleared")
+            LOGGER.debug("[SEARCH MODE] No person detected in frame")
         return
 
     available_ids, person_by_id, person_to_id = _run_tracker(
@@ -131,12 +136,21 @@ def app_callback(element, buffer, user_data):
             follow_mode = f"ID {target_id}"
         else:
             user_data.shared_state.update(None, available_ids=available_ids)
+            was_explicit = target_state.is_explicit_lock()
             if target_state.get_target() is not None:
                 target_state.set_target(None)
-            _update_ui(ui_state, persons, person_to_id, target_state.get_target())
-            if target_state.get_target() is None:
-                LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
+            if was_explicit:
+                # Operator locked to a specific ID that is now lost — fall back
+                # to idle so the drone holds position instead of auto-following
+                # a random person.
+                target_state.set_paused(True)
+                target_state.set_explicit_lock(False)
+                LOGGER.info("[IDLE FALLBACK] Explicit lock on ID %s lost — entering idle. Available: %s",
                             target_id, sorted(available_ids) if available_ids else "none")
+            else:
+                LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s",
+                            target_id, sorted(available_ids) if available_ids else "none")
+            _update_ui(ui_state, persons, person_to_id, None)
             return
     else:
         # IDLE mode: hold position, do not select any target

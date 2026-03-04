@@ -166,14 +166,17 @@ class OpenHDBridge:
         if value < 0:
             self._target_state.set_paused(True)
             self._target_state.set_target(None)
+            self._target_state.set_explicit_lock(False)
             LOGGER.info("[openhd_bridge] IDLE mode (drone holding position)")
         elif value == 0:
             self._target_state.set_paused(False)
             self._target_state.set_target(None)
+            self._target_state.set_explicit_lock(False)
             LOGGER.info("[openhd_bridge] AUTO mode (following largest)")
         else:
             self._target_state.set_paused(False)
             self._target_state.set_target(value)
+            self._target_state.set_explicit_lock(True)
             LOGGER.info("[openhd_bridge] LOCKED to ID %d", value)
         # Immediately push state back so QOpenHD badge updates without waiting
         # for the next periodic report cycle.
@@ -245,11 +248,12 @@ class OpenHDBridge:
         if self._target_state is not None:
             actual_target = self._target_state.get_target()
 
-            # If tracking timeout auto-cleared an explicit lock, sync back to AUTO
-            # so the QOpenHD badge reflects the real state rather than a stale lock.
-            if self._explicit_follow_id > 0 and actual_target is None:
-                self._explicit_follow_id = 0
-                LOGGER.info("[openhd_bridge] Explicit lock auto-cleared (target lost)")
+            # If the callback fell back to idle after losing an explicit lock,
+            # sync follow_id so QOpenHD badge shows IDLE instead of a stale lock.
+            if self._explicit_follow_id > 0 and self._target_state.is_paused():
+                LOGGER.info("[openhd_bridge] Explicit lock on #%d lost — syncing to IDLE",
+                            self._explicit_follow_id)
+                self._explicit_follow_id = -1
 
             # Report operator's intent (not the auto-selected ID) as follow_id.
             # This ensures QOpenHD badge shows AUTO when no explicit selection was made.
