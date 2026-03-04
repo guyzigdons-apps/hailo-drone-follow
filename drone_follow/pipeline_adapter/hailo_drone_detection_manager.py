@@ -175,6 +175,33 @@ def app_callback(element, buffer, user_data):
 
 
 # ---------------------------------------------------------------------------
+# OpenHD pipeline helpers (local to drone-follow; not in hailo-apps core)
+# ---------------------------------------------------------------------------
+
+def _openhd_stream_pipeline(port=5500, host="127.0.0.1", bitrate=5000, name="openhd_stream"):
+    """H264 SW encode + RTP + UDP sink for OpenHD input.
+
+    Uses x264enc with ultrafast/zerolatency settings.
+    RPi5 has no hardware H264 encoder; Hailo inference runs on the accelerator,
+    leaving CPU available for software encoding.
+    """
+    from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
+    encoder = (
+        f"x264enc name={name}_encoder bitrate={bitrate} "
+        f"speed-preset=ultrafast tune=zerolatency "
+        f"sliced-threads=false threads=2 key-int-max=5"
+    )
+    return (
+        f"{QUEUE(name=f'{name}_convert_q')} ! "
+        f"videoconvert n-threads=2 ! video/x-raw,format=I420 ! "
+        f"{QUEUE(name=f'{name}_enc_q')} ! "
+        f"{encoder} ! "
+        f"rtph264pay config-interval=1 pt=96 mtu=1440 ! "
+        f"udpsink host={host} port={port} sync=false async=false"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pipeline app factory
 # ---------------------------------------------------------------------------
 
@@ -369,7 +396,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # Build pipeline with custom output (OpenHD stream and/or MJPEG UI)
             from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
                 SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-                TILE_CROPPER_PIPELINE, OPENHD_STREAM_PIPELINE,
+                TILE_CROPPER_PIPELINE,
             )
 
             source_pipeline = SOURCE_PIPELINE(
@@ -412,7 +439,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             if openhd_stream:
                 openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
                 openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 5000)
-                primary_branch = OPENHD_STREAM_PIPELINE(
+                primary_branch = _openhd_stream_pipeline(
                     port=openhd_port, bitrate=openhd_bitrate,
                 )
             else:
