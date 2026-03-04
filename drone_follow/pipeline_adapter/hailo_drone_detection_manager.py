@@ -289,6 +289,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     return None
 
                 valve = self.pipeline.get_by_name("record_valve")
+                encoder = self.pipeline.get_by_name("record_enc")
+                muxer = self.pipeline.get_by_name("record_mux")
                 filesink = self.pipeline.get_by_name("record_sink")
                 if valve is None or filesink is None:
                     LOGGER.error("[record] Recording elements not found in pipeline")
@@ -296,10 +298,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
                 record_path = path or self._generate_record_path()
 
-                # Set filesink to NULL to change location, then back to PLAYING
-                filesink.set_state(Gst.State.NULL)
+                # Cycle encoder, muxer, and filesink through NULL to clear
+                # any leftover EOS state from a previous recording session
+                for el in (filesink, muxer, encoder):
+                    if el is not None:
+                        el.set_state(Gst.State.NULL)
                 filesink.set_property("location", record_path)
-                filesink.sync_state_with_parent()
+                for el in (encoder, muxer, filesink):
+                    if el is not None:
+                        el.sync_state_with_parent()
 
                 valve.set_property("drop", False)
                 self._recording = True
@@ -308,7 +315,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return record_path
 
         def stop_recording(self):
-            """Stop recording and finalize the file."""
+            """Stop recording and finalize the file.
+
+            Closes the valve, then transitions the recording elements
+            (encoder → muxer → filesink) to NULL.  matroskamux writes its
+            seek index and duration during its PLAYING→NULL transition,
+            so no EOS is sent — this keeps the main pipeline untouched.
+            """
             import gi
             gi.require_version("Gst", "1.0")
             from gi.repository import Gst
@@ -318,20 +331,26 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     return None
 
                 valve = self.pipeline.get_by_name("record_valve")
+                encoder = self.pipeline.get_by_name("record_enc")
+                muxer = self.pipeline.get_by_name("record_mux")
+                filesink = self.pipeline.get_by_name("record_sink")
                 if valve is None:
                     self._recording = False
                     return None
 
-                # Close the valve (stop new buffers)
-                valve.set_property("drop", True)
-
-                # Send EOS downstream from valve's src pad to finalize the muxer
-                src_pad = valve.get_static_pad("src")
-                if src_pad:
-                    src_pad.send_event(Gst.Event.new_eos())
-
                 self._recording = False
                 path = getattr(self, "_current_record_path", None)
+
+                # Close the valve first to stop new buffers entering
+                valve.set_property("drop", True)
+
+                # Transition encoder → muxer → filesink to NULL.
+                # matroskamux finalises the file (writes Cues/SeekHead/duration)
+                # during its state change — no EOS needed.
+                for el in (encoder, muxer, filesink):
+                    if el is not None:
+                        el.set_state(Gst.State.NULL)
+
                 LOGGER.info("[record] Stopped recording: %s", path)
                 return path
 
@@ -395,13 +414,12 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             )
 
             # Recording branch (valve drops by default; toggled at runtime)
-            default_record_path = self._generate_record_path()
             record_branch = (
                 f"valve name=record_valve drop=true ! "
                 f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
                 f"videoconvert n-threads=2 ! "
-                f"x264enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
-                f"matroskamux ! filesink name=record_sink async=false location={default_record_path}"
+                f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
+                f"matroskamux name=record_mux ! filesink name=record_sink async=false location=/dev/null"
             )
 
             # Tee splits into display + MJPEG + recording

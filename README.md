@@ -14,7 +14,8 @@
 
 1. **Create a virtual environment and install dependencies**:
    ```bash
-   python -m venv venv
+   python -m venv venv --system-site-packages
+   ./install.sh
    source setup_env.sh
    pip install -e .
    ```
@@ -137,7 +138,7 @@ By default (no target set), the drone follows the person with the **largest boun
 
 - `GET /status` - Get current tracking status
   - Returns: `{"following_id": <id or null>, "last_seen": <timestamp or null>, "available_ids": [list of IDs]}`
-  
+
 - `POST /follow/<detection_id>` - Start following a specific tracked person
   - Returns 200: `{"status": "success", "following_id": <id>}` if the ID is found in the current frame
   - Returns 404: `{"status": "error", "message": "...", "available_ids": [...]}` if the ID is not in the current frame
