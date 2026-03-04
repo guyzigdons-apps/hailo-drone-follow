@@ -74,6 +74,9 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--record", action="store_true",
                        help="Record raw video + detections for the entire session (requires --ui)")
 
+    group.add_argument("--no-display", action="store_true",
+                       help="Disable display window (headless mode)")
+
     # OpenHD integration
     group.add_argument("--openhd-stream", action="store_true",
                        help="Send overlay video to OpenHD via UDP RTP instead of display sink")

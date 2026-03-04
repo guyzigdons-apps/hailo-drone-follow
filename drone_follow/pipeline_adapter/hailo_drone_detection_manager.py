@@ -418,10 +418,11 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
         def get_pipeline_string(self):
             openhd_stream = getattr(self.options_menu, 'openhd_stream', False)
+            no_display = getattr(self.options_menu, 'no_display', False)
             is_shm = str(self.video_source).startswith('shm')
 
             # If no custom output needed, delegate to parent
-            if not self._ui_enabled and not openhd_stream and not is_shm:
+            if not self._ui_enabled and not openhd_stream and not is_shm and not no_display:
                 return super().get_pipeline_string()
 
             # Build pipeline with custom output (OpenHD stream and/or MJPEG UI)
@@ -479,6 +480,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 primary_branch = _openhd_stream_pipeline(
                     port=openhd_port, bitrate=openhd_bitrate,
                 )
+            elif no_display:
+                primary_branch = f"fakesink sync={self.sync}"
             else:
                 primary_branch = DISPLAY_PIPELINE(
                     video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
