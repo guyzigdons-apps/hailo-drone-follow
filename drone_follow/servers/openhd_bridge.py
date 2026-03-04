@@ -66,7 +66,7 @@ class OpenHDBridge:
 
     def __init__(self, controller_config, target_state=None, detection_state=None,
                  ui_state=None,
-                 listen_port=5510, report_port=5511, report_interval=0.5):
+                 listen_port=5510, report_port=5511, report_interval=0.1):
         self._config = controller_config
         self._target_state = target_state
         self._detection_state = detection_state
