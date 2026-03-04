@@ -41,8 +41,8 @@ def add_drone_args(parser) -> None:
                             "Optionally specify device path (default: /dev/ttyACM0)")
     group.add_argument("--serial-baud", type=int, default=57600,
                        help="Baud rate for serial connection (default: 57600)")
-    group.add_argument("--no-takeoff-landing", action="store_true",
-                       help="Do not take off or land; assume drone is already in offboard mode")
+    group.add_argument("--takeoff-landing", action="store_true",
+                       help="Enable auto arm/takeoff/land (default: off — drone must already be airborne)")
     group.add_argument("--takeoff-altitude", type=float, default=3.0)
     group.add_argument("--mission-duration", type=float, default=300.0)
 
@@ -86,7 +86,8 @@ class VelocityCommandAPI:
         """
         # Clamp each axis to configured maximums
         forward = max(-self._config.max_backward, min(self._config.max_forward, cmd.forward_m_s))
-        right = max(-1.0, min(1.0, cmd.right_m_s))  # lateral not heavily used; keep bounded
+        max_lat = self._config.max_orbit_speed
+        right = max(-max_lat, min(max_lat, cmd.right_m_s))
         down = max(-self._config.max_down_speed, min(self._config.max_down_speed, cmd.down_m_s))
         yaw_raw = max(-self._config.max_yawspeed, min(self._config.max_yawspeed, cmd.yawspeed_deg_s))
 
@@ -164,7 +165,18 @@ class DetachedMavsdkServer:
             LOGGER.warning("[drone] mavsdk_server not found at %s, using default System() behavior", server_path)
             return self.connection_url  # Fallback to default behavior
 
-        cmd = [server_path, "-u", self.connection_url, "-p", str(self.port)]
+        # Kill any stale mavsdk_server on our port (from previous runs that
+        # survived due to start_new_session=True).
+        try:
+            subprocess.run(
+                ["fuser", "-k", f"{self.port}/tcp"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+            )
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+        cmd = [server_path, "-p", str(self.port), self.connection_url]
         LOGGER.info("[drone] Starting detached mavsdk_server: %s", " ".join(cmd))
 
         self.process = subprocess.Popen(
@@ -174,8 +186,13 @@ class DetachedMavsdkServer:
             start_new_session=True,
         )
 
-        # Give server a moment to start before returning
-        time.sleep(0.5)
+        # Wait for server to start and verify it's still running
+        time.sleep(1.0)
+        if self.process.poll() is not None:
+            LOGGER.warning("[drone] Detached mavsdk_server exited immediately (code=%s), "
+                           "falling back to direct connection", self.process.returncode)
+            self.process = None
+            return self.connection_url
         return self._grpc_address_from_connection()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -194,7 +211,7 @@ class DetachedMavsdkServer:
 async def _wait_for_offboard_mode(drone: System, shutdown: asyncio.Event) -> None:
     """Block until the drone enters OFFBOARD mode, streaming zero setpoints as keep-alive.
 
-    In --no-takeoff-landing mode the user switches to OFFBOARD externally (e.g. via
+    In the default (no --takeoff-landing) mode the user switches to OFFBOARD externally (e.g. via
     a GCS).  We stream zero-velocity setpoints so PX4 accepts the transition, and
     wait patiently instead of killing the process.
     """
@@ -383,8 +400,15 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                      f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
                      f"Down:{cmd.down_m_s:+5.2f}m/s", level=logging.INFO)
             if ui_state is not None:
-                mode = "TRACK" if detection is not None else ("SEARCH" if time_since_detection >= config.search_enter_delay_s else "SEARCH-WAIT")
-                ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
+                if detection is not None and config.follow_mode == "orbit":
+                    mode = "ORBIT"
+                elif detection is not None:
+                    mode = "TRACK"
+                elif time_since_detection >= config.search_enter_delay_s:
+                    mode = "SEARCH"
+                else:
+                    mode = "SEARCH-WAIT"
+                ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode, right_m_s=cmd.right_m_s)
             _prev_cmd = cmd
 
             # Periodic status log to UI
@@ -484,6 +508,15 @@ async def _cancel_task(task: asyncio.Task) -> None:
 _ARM_MAX_ATTEMPTS = 6
 _ARM_RETRY_DELAY_S = 5
 _ARM_SHUTDOWN_POLL_S = 0.5
+_CONNECTION_TIMEOUT_S = 15
+
+
+async def _wait_for_connection(drone: System) -> bool:
+    """Wait until MAVSDK reports the drone is connected. Returns True on success."""
+    async for state in drone.core.connection_state():
+        if state.is_connected:
+            return True
+    return False
 
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
@@ -512,19 +545,36 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
             shutdown.set()
         loop.add_reader(shutdown_read_fd, _on_shutdown_pipe)
 
-    manage_takeoff_landing = not getattr(args, 'no_takeoff_landing', False)
+    manage_takeoff_landing = getattr(args, 'takeoff_landing', False)
 
     with DetachedMavsdkServer(args.connection) as connection_url:
-        drone = System()
-        await drone.connect(system_address=connection_url)
+        if connection_url.startswith("grpc://"):
+            # Tell System() about the already-running detached server so it
+            # doesn't auto-start its own (which would get the wrong MAVLink URL).
+            parsed = urlparse(connection_url)
+            drone = System(mavsdk_server_address=parsed.hostname or "127.0.0.1",
+                           port=parsed.port or 50051)
+            await drone.connect()
+        else:
+            drone = System()
+            await drone.connect(system_address=connection_url)
 
         if manage_takeoff_landing:
             LOGGER.info("[drone] Connecting and taking off...")
         else:
-            LOGGER.info("[drone] Connecting (drone must already be in OFFBOARD)...")
-        async for state in drone.core.connection_state():
-            if state.is_connected:
-                break
+            LOGGER.info("[drone] Connecting (switch to OFFBOARD via GCS when ready)...")
+
+        # Wait for connection with a timeout so the pipeline can run without a drone
+        connected = False
+        try:
+            connected = await asyncio.wait_for(
+                _wait_for_connection(drone), timeout=_CONNECTION_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            pass
+        if not connected:
+            raise ConnectionError(
+                f"No drone detected on {args.connection} after {_CONNECTION_TIMEOUT_S}s. "
+                "Pipeline continues without drone control.")
 
         if on_connected_cb is not None:
             on_connected_cb()
@@ -581,18 +631,15 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                 if shutdown.is_set():
                     LOGGER.warning("[drone] Shutdown requested, landing...")
             else:
-                # --no-takeoff-landing: loop between waiting for OFFBOARD
-                # and running the control loop. When OFFBOARD is lost the
-                # app pauses and waits for the next OFFBOARD activation.
+                # Default (no --takeoff-landing): stream zero setpoints so PX4
+                # sees an offboard signal, then wait for the pilot to switch to
+                # OFFBOARD via GCS/RC.  The app must NEVER command the mode
+                # switch itself — only the pilot decides when to hand over.
                 altitude_cache: dict = {}
                 alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
 
                 while not shutdown.is_set():
                     await _wait_for_offboard_mode(drone, shutdown)
-                    if shutdown.is_set():
-                        break
-
-                    await _start_offboard(drone, vel_api, shutdown)
                     if shutdown.is_set():
                         break
 

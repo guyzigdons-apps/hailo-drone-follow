@@ -304,8 +304,11 @@ export default function App() {
         </span>
         {velocity && (
           <span className="velocity-text">
-            {velocity.mode} | Fwd {velocity.forward_m_s.toFixed(2)} m/s | Down{" "}
-            {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
+            {velocity.mode} | Fwd {velocity.forward_m_s.toFixed(2)} m/s
+            {velocity.right_m_s != null && velocity.right_m_s !== 0
+              ? ` | Lat ${velocity.right_m_s.toFixed(2)} m/s`
+              : ""}{" "}
+            | Down {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
             {velocity.yawspeed_deg_s.toFixed(1)} deg/s
           </span>
         )}
@@ -446,16 +449,71 @@ export default function App() {
                   </div>
                 </label>
                 <label className="control-row">
-                  <span className="control-label">Fixed Alt</span>
+                  <span className="control-label">Mode</span>
                   <div className="toggle-wrapper">
                     <button
-                      className={`toggle-btn ${config.fixed_altitude ? "toggle-on" : ""}`}
-                      onClick={() => onToggle("fixed_altitude")}
+                      className={`toggle-btn ${config.follow_mode === "follow" ? "toggle-on" : ""}`}
+                      onClick={() => {
+                        const updated = { ...config, follow_mode: "follow" };
+                        setConfig(updated);
+                        postConfig({ follow_mode: "follow" });
+                      }}
                     >
-                      {config.fixed_altitude ? "ON" : "OFF"}
+                      FOLLOW
+                    </button>
+                    <button
+                      className={`toggle-btn ${config.follow_mode === "orbit" ? "toggle-on" : ""}`}
+                      onClick={() => {
+                        const updated = { ...config, follow_mode: "orbit" };
+                        setConfig(updated);
+                        postConfig({ follow_mode: "orbit" });
+                      }}
+                    >
+                      ORBIT
                     </button>
                   </div>
                 </label>
+                {config.follow_mode === "orbit" && (
+                  <>
+                    <label className="control-row">
+                      <span className="control-label">Orbit Speed</span>
+                      <input
+                        type="range"
+                        min="0.2"
+                        max="3.0"
+                        step="0.1"
+                        value={config.orbit_speed_m_s}
+                        onChange={(e) => onSlider("orbit_speed_m_s", e.target.value)}
+                      />
+                      <span className="control-value">{config.orbit_speed_m_s.toFixed(1)} m/s</span>
+                    </label>
+                    <label className="control-row">
+                      <span className="control-label">Direction</span>
+                      <div className="toggle-wrapper">
+                        <button
+                          className={`toggle-btn ${config.orbit_direction === 1 ? "toggle-on" : ""}`}
+                          onClick={() => {
+                            const updated = { ...config, orbit_direction: 1 };
+                            setConfig(updated);
+                            postConfig({ orbit_direction: 1 });
+                          }}
+                        >
+                          CW
+                        </button>
+                        <button
+                          className={`toggle-btn ${config.orbit_direction === -1 ? "toggle-on" : ""}`}
+                          onClick={() => {
+                            const updated = { ...config, orbit_direction: -1 };
+                            setConfig(updated);
+                            postConfig({ orbit_direction: -1 });
+                          }}
+                        >
+                          CCW
+                        </button>
+                      </div>
+                    </label>
+                  </>
+                )}
                 <label className="control-row">
                   <span className="control-label">Takeoff Alt</span>
                   <input

@@ -92,7 +92,7 @@ class TestYaw:
 
 
 # ---- Altitude (vertical centering) ----
-# Default config has fixed_altitude=False.
+# Default config has fixed_altitude=True; tests below explicitly set False where needed.
 
 class TestAltitude:
     def test_centered_within_dead_zone(self, config):
@@ -165,8 +165,9 @@ class TestForward:
         )
         assert cmd.forward_m_s == 0.0
 
-    def test_right_always_zero(self, config):
-        """right_m_s should always be zero (no lateral movement)."""
+    def test_right_always_zero_in_follow_mode(self, config):
+        """right_m_s should always be zero in follow mode (no lateral movement)."""
+        config.follow_mode = "follow"
         for cx in [0.1, 0.5, 0.9]:
             for cy in [0.1, 0.5, 0.9]:
                 for bh in [0.1, 0.3, 0.8]:
@@ -318,10 +319,10 @@ class TestConfigValidation:
 
 class TestConfigFromArgsMutualExclusivity:
     def test_defaults_use_bbox_height_mode(self):
-        """No explicit args -> defaults to using target-bbox-height parameter, variable altitude (target_distance_m=None, fixed_altitude=False)."""
+        """No explicit args -> defaults to using target-bbox-height parameter, fixed altitude (target_distance_m=None, fixed_altitude=True)."""
         cfg = ControllerConfig.from_args(SimpleNamespace())
         assert cfg.target_distance_m is None
-        assert cfg.fixed_altitude is False
+        assert cfg.fixed_altitude is True
 
     def test_explicit_bbox_height_disables_distance(self):
         """Passing --target-bbox-height should set target_distance_m=None."""
@@ -330,9 +331,9 @@ class TestConfigFromArgsMutualExclusivity:
         assert cfg.target_bbox_height == 0.4
 
     def test_explicit_distance_without_fixed_altitude_raises(self):
-        """--target-distance without --fixed-altitude raises (invalid combination)."""
+        """--target-distance with --no-fixed-altitude raises (invalid combination)."""
         with pytest.raises(ValueError, match="--target-distance requires --fixed-altitude"):
-            ControllerConfig.from_args(SimpleNamespace(target_distance=12.0))
+            ControllerConfig.from_args(SimpleNamespace(target_distance=12.0, fixed_altitude=False))
 
     def test_explicit_distance_with_fixed_altitude_keeps_distance_mode(self):
         cfg = ControllerConfig.from_args(SimpleNamespace(target_distance=12.0, fixed_altitude=True))
@@ -344,3 +345,38 @@ class TestConfigFromArgsMutualExclusivity:
             ControllerConfig.from_args(SimpleNamespace(
                 target_distance=8.0, target_bbox_height=0.3,
             ))
+
+
+class TestOrbitMode:
+    def test_orbit_adds_lateral_velocity(self):
+        """In orbit mode, tracking a target should produce lateral velocity."""
+        cfg = ControllerConfig(follow_mode="orbit", orbit_speed_m_s=1.5, orbit_direction=1)
+        cmd = compute_velocity_command(_det(cx=0.5, cy=0.5, bh=0.3), cfg)
+        assert cmd.right_m_s == 1.5
+
+    def test_orbit_ccw_negative_lateral(self):
+        """Counter-clockwise orbit should produce negative lateral velocity."""
+        cfg = ControllerConfig(follow_mode="orbit", orbit_speed_m_s=1.0, orbit_direction=-1)
+        cmd = compute_velocity_command(_det(cx=0.5, cy=0.5, bh=0.3), cfg)
+        assert cmd.right_m_s == -1.0
+
+    def test_follow_mode_no_lateral(self):
+        """In follow mode, there should be no lateral velocity."""
+        cfg = ControllerConfig(follow_mode="follow", orbit_speed_m_s=2.0)
+        cmd = compute_velocity_command(_det(cx=0.5, cy=0.5, bh=0.3), cfg)
+        assert cmd.right_m_s == 0.0
+
+    def test_search_mode_no_lateral_in_orbit(self):
+        """In orbit mode, search (no detection) should have no lateral velocity."""
+        cfg = ControllerConfig(follow_mode="orbit", orbit_speed_m_s=1.5)
+        cmd = compute_velocity_command(None, cfg)
+        assert cmd.right_m_s == 0.0
+
+    def test_orbit_preserves_yaw_and_forward(self):
+        """Orbit mode should still compute yaw and forward normally."""
+        cfg = ControllerConfig(follow_mode="orbit", orbit_speed_m_s=1.0,
+                               dead_zone_deg=0.0, dead_zone_height_percent=0.0)
+        cmd = compute_velocity_command(_det(cx=0.7, cy=0.5, bh=0.15), cfg)
+        assert cmd.yawspeed_deg_s > 0.0  # target right of center
+        assert cmd.forward_m_s > 0.0     # small bbox -> approach
+        assert cmd.right_m_s == 1.0      # lateral orbit velocity
