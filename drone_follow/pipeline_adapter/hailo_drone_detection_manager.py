@@ -210,9 +210,7 @@ def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, na
     """
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
 
-    socket_path = "/tmp/openhd_raw_video"
-    if '://' in str(video_source):
-        socket_path = str(video_source).split('://', 1)[1]
+    socket_path = str(video_source).split('://', 1)[1]
 
     source_element = (
         f'shmsrc socket-path={socket_path} do-timestamp=true is-live=true name={name} ! '
@@ -419,7 +417,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         def get_pipeline_string(self):
             openhd_stream = getattr(self.options_menu, 'openhd_stream', False)
             no_display = getattr(self.options_menu, 'no_display', False)
-            is_shm = str(self.video_source).startswith('shm')
+            is_shm = str(self.video_source).startswith('shm://')
 
             # If no custom output needed, delegate to parent
             if not self._ui_enabled and not openhd_stream and not is_shm and not no_display:
