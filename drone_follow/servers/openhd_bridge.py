@@ -59,18 +59,20 @@ _NULLABLE_FIELDS = {"target_distance_m"}
 # Special params for follow target control (not in ControllerConfig)
 _FOLLOW_ID_PARAM = "follow_id"
 _ACTIVE_ID_PARAM = "active_id"
+_BITRATE_PARAM = "bitrate_kbps"
 
 
 class OpenHDBridge:
     """UDP bridge between OpenHD MAVLink params and ControllerConfig."""
 
     def __init__(self, controller_config, target_state=None, detection_state=None,
-                 ui_state=None,
+                 ui_state=None, gst_app=None,
                  listen_port=5510, report_port=5511, report_interval=0.1):
         self._config = controller_config
         self._target_state = target_state
         self._detection_state = detection_state
         self._ui_state = ui_state
+        self._gst_app = gst_app  # GstApp for dynamic encoder control
         self._listen_port = listen_port
         self._report_port = report_port
         self._report_interval = report_interval
@@ -84,6 +86,7 @@ class OpenHDBridge:
         # Reported back to QOpenHD instead of target_state.get_target() so that
         # the badge reflects the operator's choice, not the auto-selected ID.
         self._explicit_follow_id = 0
+        self._current_bitrate_kbps = 0  # dedup repeated bitrate updates
 
     def start(self):
         """Start listener and reporter daemon threads."""
@@ -147,6 +150,8 @@ class OpenHDBridge:
                 self._apply_follow_id(int(value))
             elif param_name == _ACTIVE_ID_PARAM:
                 pass  # read-only from Python's side; ignore any set forwarded by OpenHD
+            elif param_name == _BITRATE_PARAM:
+                self._apply_bitrate(int(value))
             elif param_name in _CONFIG_PARAMS:
                 self._apply_config_param(param_name, value)
             else:
@@ -181,6 +186,27 @@ class OpenHDBridge:
         # Immediately push state back so QOpenHD badge updates without waiting
         # for the next periodic report cycle.
         self._send_immediate_report()
+
+    def _apply_bitrate(self, kbps: int):
+        """Dynamically set x264enc bitrate from WFB link recommendation.
+
+        Only applies in --openhd-stream mode where the drone-follow app owns the
+        x264enc encoder. In SHM mode OpenHD handles encoding directly.
+        """
+        if kbps == self._current_bitrate_kbps:
+            return
+        if self._gst_app is None or not hasattr(self._gst_app, 'pipeline'):
+            return
+        pipeline = self._gst_app.pipeline
+        if pipeline is None:
+            return
+        encoder = pipeline.get_by_name("openhd_stream_encoder")
+        if encoder is None:
+            # SHM mode — no local encoder; OpenHD handles bitrate directly
+            return
+        encoder.set_property("bitrate", kbps)
+        self._current_bitrate_kbps = kbps
+        LOGGER.info("[openhd_bridge] x264enc bitrate set to %d kbps", kbps)
 
     def _apply_config_param(self, python_name, value):
         """Apply a single parameter change from OpenHD to ControllerConfig."""

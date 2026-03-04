@@ -82,8 +82,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Send overlay video to OpenHD via UDP RTP instead of display sink")
     group.add_argument("--openhd-port", type=int, default=5500,
                        help="OpenHD UDP input port (default: 5500)")
-    group.add_argument("--openhd-bitrate", type=int, default=5000,
-                       help="H264 encoding bitrate in kbps for OpenHD stream (default: 5000)")
+    group.add_argument("--openhd-bitrate", type=int, default=3917,
+                       help="H264 encoding bitrate in kbps for OpenHD stream (default: 3917)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -172,7 +172,8 @@ def main():
 
     # Start OpenHD parameter bridge (allows QOpenHD to control follow params)
     openhd_bridge = OpenHDBridge(controller_config, target_state=target_state,
-                                 detection_state=shared_state, ui_state=ui_state)
+                                 detection_state=shared_state, ui_state=ui_state,
+                                 gst_app=app)
     openhd_bridge.start()
 
     # Start web UI server

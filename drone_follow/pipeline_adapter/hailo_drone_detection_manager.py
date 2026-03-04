@@ -192,7 +192,7 @@ def app_callback(element, buffer, user_data):
 # OpenHD pipeline helpers (local to drone-follow; not in hailo-apps core)
 # ---------------------------------------------------------------------------
 
-def _openhd_stream_pipeline(port=5500, host="127.0.0.1", bitrate=5000, name="openhd_stream"):
+def _openhd_stream_pipeline(port=5500, host="127.0.0.1", bitrate=3917, name="openhd_stream"):
     """H264 SW encode + RTP + UDP sink for OpenHD input.
 
     Uses x264enc with ultrafast/zerolatency settings.
@@ -513,7 +513,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # Primary output branch: OpenHD stream, display, or fakesink
             if openhd_stream:
                 openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
-                openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 5000)
+                openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 3917)
                 primary_branch = _openhd_stream_pipeline(
                     port=openhd_port, bitrate=openhd_bitrate,
                 )
