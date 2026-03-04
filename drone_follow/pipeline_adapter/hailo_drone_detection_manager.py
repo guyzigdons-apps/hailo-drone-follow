@@ -23,6 +23,19 @@ LOGGER = logging.getLogger("drone_follow.app")
 
 _EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
 
+_gst_module = None
+
+
+def _get_gst():
+    """Import and cache GStreamer bindings (deferred to avoid import at module level)."""
+    global _gst_module
+    if _gst_module is None:
+        import gi
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+        _gst_module = Gst
+    return _gst_module
+
 
 # ---------------------------------------------------------------------------
 # Callback helpers
@@ -199,6 +212,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     from hailo_apps.python.core.common.core import get_pipeline_parser
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
         QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
+        SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
+        TILE_CROPPER_PIPELINE,
     )
 
     if parser is None:
@@ -232,10 +247,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
         def _connect_mjpeg_sink(self):
             """Connect the MJPEG appsink's new-sample signal."""
-            import gi
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
-            self._Gst = Gst
+            self._Gst = _get_gst()
             mjpeg_sink = self.pipeline.get_by_name("mjpeg_sink")
             if mjpeg_sink:
                 mjpeg_sink.connect("new-sample", self._on_mjpeg_sample)
@@ -276,9 +288,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
         def start_recording(self, path=None):
             """Start GStreamer-native recording. Returns the output file path."""
-            import gi
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
+            Gst = _get_gst()
 
             with self._record_lock:
                 if self._recording:
@@ -315,16 +325,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return record_path
 
         def stop_recording(self):
-            """Stop recording and finalize the file.
-
-            Closes the valve, then transitions the recording elements
-            (encoder → muxer → filesink) to NULL.  matroskamux writes its
-            seek index and duration during its PLAYING→NULL transition,
-            so no EOS is sent — this keeps the main pipeline untouched.
-            """
-            import gi
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
+            """Stop recording and finalize the file."""
+            Gst = _get_gst()
 
             with self._record_lock:
                 if not self._recording:
@@ -359,11 +361,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return super().get_pipeline_string()
 
             # Build pipeline with tee: one branch for display, one for MJPEG appsink
-            from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
-                SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-                TILE_CROPPER_PIPELINE,
-            )
-
             source_pipeline = SOURCE_PIPELINE(
                 video_source=self.video_source,
                 video_width=self.video_width,

@@ -7,7 +7,7 @@
 - **Hailo application infrastructure** (hailort, hailo-tappas-core, Python bindings).
 - **Python 3.9+** with the project virtual environment activated (`source setup_env.sh`).
 - **MAVSDK** for drone connection and offboard control (installed via pip in the project venv).
-- For **simulation**: PX4 SITL and Gazebo (e.g. `make px4_sitl gz_x500_mono_cam` from PX4-Autopilot).
+- For **simulation**: PX4 SITL and Gazebo (e.g. `make px4_sitl gz_x500_mono_cam` from PX4-Autopilot). See [PX4 Ubuntu Dev Environment Setup](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu) for toolchain installation.
 - For **real drone**: PX4 (or compatible) firmware and a connection (e.g. USB or UDP).
 
 ### Steps
@@ -161,7 +161,7 @@ Tracking IDs are available by default, so you can select a specific person to fo
 
 1. Run the app:
    ```bash
-   drone-follow --input udp://0.0.0.0:5600 --target-bbox-height 0.5 --enable-tracking
+   drone-follow --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
 
 2. Check which people are visible:
@@ -194,3 +194,38 @@ Tracking IDs are available by default, so you can select a specific person to fo
 Use `--yaw-only` to disable all forward/backward and altitude movement. The drone will only rotate to keep the person centered in the frame. This is also available as a toggle in the web UI.
 
 Note: `--forward-gain 0` now also fully disables forward/backward motion (including the safety backward retreat).
+
+## Architecture
+
+```
+drone_follow/
+  follow_api/          Pure domain logic (no HW deps) — types, config, controller math, shared state
+  drone_api/           MAVSDK flight controller adapter — offboard velocity commands, takeoff/landing
+  pipeline_adapter/    Hailo/GStreamer pipeline + ByteTracker — detection, tracking, target selection
+  servers/             HTTP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001)
+  tools/               Standalone utilities (Gazebo video bridge)
+  sim/                 Simulation helpers (PX4 world loading)
+  ui/                  React web dashboard (built separately with npm)
+  drone_follow_app.py  Composition root and CLI entrypoint
+```
+
+**Data flow:** Camera → GStreamer → Hailo-8L inference → ByteTracker (in callback) → `SharedDetectionState` → Control loop (10 Hz) → MAVSDK offboard velocity command.
+
+The `follow_api` package has zero external dependencies, making the controller logic easy to test without hardware.
+
+## Key Configuration Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--target-bbox-height` | `0.3` | Desired person size in frame (0–1) |
+| `--target-distance` | — | Desired horizontal distance in metres (requires `--fixed-altitude`) |
+| `--forward-gain` | `3.0` | Proportional gain for forward/backward |
+| `--backward-gain` | `5.0` | Proportional gain for backward (retreat) |
+| `--yaw-gain` | `5` | Proportional gain for yaw |
+| `--max-forward` | `2.0` | Max forward speed (m/s) |
+| `--max-backward` | `3.0` | Max backward speed (m/s) |
+| `--search-enter-delay` | `2.0` | Seconds without detection before search starts |
+| `--search-timeout` | `60` | Seconds of search before auto-landing |
+| `--smooth-forward` / `--no-smooth-forward` | on | Enable/disable forward velocity smoothing |
+
+Run `drone-follow --help` for the full list.
