@@ -50,13 +50,6 @@ def _calculate_forward_speed(
     else:
         forward = -config.kp_backward * math.sqrt(-height_delta)
 
-    # Bottom-of-frame backward: bbox bottom edge past threshold means drone is above and too close
-    max_y = detection.center_y + detection.bbox_height / 2
-    if max_y > config.bottom_y_threshold:
-        y_excess = max_y - config.bottom_y_threshold
-        bottom_backward = config.kp_backward * math.sqrt(y_excess)
-        forward = min(forward, -bottom_backward)
-
     return forward
 
 
@@ -164,7 +157,8 @@ def compute_velocity_command(
 
     forward = _calculate_forward_speed(detection, config, target_bh)
 
-    return VelocityCommand(forward, 0.0, down, yawspeed)
+    right = config.orbit_speed_m_s * config.orbit_direction if config.follow_mode == "orbit" else 0.0
+    return VelocityCommand(forward, right, down, yawspeed)
 
 
 def _effective_target_bbox_height(

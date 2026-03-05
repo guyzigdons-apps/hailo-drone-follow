@@ -1,2 +1,2 @@
-export PYTHONPATH="/home/hailo/hailo-drone-follow:$PYTHONPATH"
-source "/home/hailo/hailo-drone-follow/venv/bin/activate"
+export PYTHONPATH="/home/giladn/projects/hailo-drone-follow:$PYTHONPATH"
+source "/home/giladn/projects/hailo-drone-follow/venv/bin/activate"

@@ -65,7 +65,7 @@
 Use `--world` to automatically load a custom Gazebo world (SDF) before PX4 starts. This symlinks your world as PX4's `default.sdf`, so `make px4_sitl gz_x500_mono_cam` picks it up with no extra configuration. The original world is restored after the drone connects.
 
 ```bash
-drone-follow --input udp://0.0.0.0:5600 --target-distance 8 --fixed-altitude \
+drone-follow --input udp://0.0.0.0:5600 --target-distance 8 \
     --px4-path ~/PX4-Autopilot --world 2_person_world
 ```
 
@@ -88,8 +88,8 @@ drone-follow --input udp://0.0.0.0:5600 --target-distance 8 --fixed-altitude \
 ### Key options (match the app)
 
 - **Target size:** Use either `--target-bbox-height <0–1>` (target height in the image) or `--target-distance <metres>` (real-world distance). They are mutually exclusive. `--target-distance` requires `--fixed-altitude`.
-- **`--fixed-altitude`** – Hold altitude constant; use with `--target-distance` for distance-based following.
-- **`--no-takeoff-landing`** – Do not take off or land; assume the drone is already in offboard mode (e.g. when you arm and switch to offboard yourself).
+- **`--fixed-altitude`** (default) – Hold altitude constant. Use `--no-fixed-altitude` for vertical following.
+- **`--takeoff-landing`** – Enable automatic arm/takeoff/land. Without this flag (default), the app waits for the pilot to switch to OFFBOARD mode via GCS or RC.
 - **`--yaw-only`** – Only yaw to center the person; no forward/backward or altitude movement (see Yaw-Only Mode below).
 - **`--ui`** – Enable web UI with live video and click-to-follow (requires UI built; see Optional – Web UI above).
 - **Input/connection:** Pipeline input is set with `--input` (e.g. `udp://0.0.0.0:5600`, `rpi`, `usb`). MAVLink connection defaults to `udpin://0.0.0.0:14540`; override with `--connection` or use `--serial` for a serial link.
@@ -194,6 +194,51 @@ Tracking IDs are available by default, so you can select a specific person to fo
 Use `--yaw-only` to disable all forward/backward and altitude movement. The drone will only rotate to keep the person centered in the frame. This is also available as a toggle in the web UI.
 
 Note: `--forward-gain 0` now also fully disables forward/backward motion (including the safety backward retreat).
+
+## Web UI Controls
+
+The web UI (`--ui`, served on port 5001) provides live video, detection overlays, and real-time tuning of the controller. All changes take effect immediately.
+
+### Status Bar
+
+- **Following indicator** — Shows which person is being tracked (by ID) or "Auto (largest person)" if no specific target is selected.
+- **Velocity readout** — Current mode (TRACK/SEARCH/ORBIT) and commanded velocities: forward, lateral, down, and yaw.
+- **Record** — Start/stop recording the video stream.
+- **Clear Target** — Stop following a specific person and revert to auto (largest person).
+
+### Controller Parameters
+
+**Operational (top of panel):**
+
+| Control | Range | Default | Description |
+|---|---|---|---|
+| **Target Size** | 5% – 100% | 30% | Desired person bounding box height as percentage of frame. The drone approaches if the person is smaller than this, retreats if larger. Increase to keep the person closer, decrease for more distance. |
+| **Target Alt** | 1 – 20 m | 3.0 | Target altitude. Used as initial takeoff height (with `--takeoff-landing`) and as a go-to altitude when changed mid-flight. |
+| **Yaw Only** | ON/OFF | OFF | When ON, disables all forward/backward and altitude movement. The drone only rotates to keep the person centered. Useful for testing or when only rotation is safe (e.g. simulation with USB camera). |
+| **Mode: FOLLOW / ORBIT** | — | FOLLOW | FOLLOW: drone faces and approaches/retreats from the person. ORBIT: drone circles around the person while maintaining yaw lock, adding lateral velocity. |
+| **Orbit Speed** | 0.2 – 3.0 m/s | 1.0 | Lateral speed during orbit mode. Only visible when Mode is ORBIT. |
+| **Direction: CW / CCW** | — | CW | Orbit direction: clockwise or counter-clockwise. Only visible when Mode is ORBIT. |
+
+**Tuning (below operational controls):**
+
+| Control | Range | Default | Description |
+|---|---|---|---|
+| **KP Yaw** | 0 – 10 | 5.0 | Yaw proportional gain. Higher = faster rotation to center the person. Uses sqrt response to avoid oscillation. |
+| **KP Forward** | 0 – 10 | 3.0 | Forward/approach proportional gain. Controls how aggressively the drone moves toward a distant person. Set to 0 to disable forward/backward movement entirely. |
+| **KP Backward** | 0 – 10 | 5.0 | Backward/retreat proportional gain. Controls retreat speed when too close. Higher than KP Forward by default for safety. |
+| **Yaw Smooth** | ON/OFF | ON | Low-pass filter on yaw commands. Reduces jitter but adds slight lag. |
+| **Yaw Alpha** | 0.05 – 1.0 | 0.3 | EMA smoothing factor for yaw. Lower = smoother (more lag), higher = more responsive. Only active when Yaw Smooth is ON. |
+| **Fwd Smooth** | ON/OFF | ON | EMA smoothing on forward velocity. Reduces sudden speed changes. |
+| **Fwd Alpha** | 0.05 – 1.0 | 0.1 | EMA factor for forward smoothing. Lower = smoother, higher = more responsive. |
+
+### How Target Size Works
+
+The controller compares the detected person's bounding box height (0–1, fraction of frame) against the Target Size value:
+- **Person smaller than target** → drone flies forward (approach)
+- **Person larger than target** → drone flies backward (retreat)
+- **Person matches target (within dead zone)** → no forward/backward movement
+
+A 5% dead zone (relative to target size) prevents oscillation around the setpoint.
 
 ## Architecture
 

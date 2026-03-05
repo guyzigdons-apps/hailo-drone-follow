@@ -18,6 +18,9 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--connection URL` — MAVSDK connection string (default: `udpin://0.0.0.0:14540` for simulation)
 - `--takeoff-landing` — Enable auto arm/takeoff/land (default: off — drone must already be airborne)
 - `--fixed-altitude` / `--no-fixed-altitude` — Keep altitude fixed (default: on)
+- `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
+- `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
+- `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
 
 ## Drone Connection
 

@@ -28,7 +28,7 @@ class ControllerConfig:
     control_loop_hz: float = 10.0
     fixed_altitude: bool = True
     max_bbox_height_safety: float = 0.8  # Safety limit: if bbox height > 0.8, we are too close
-    yaw_only: bool = False
+    yaw_only: bool = True
     reference_altitude_m: float = 3.0  # target_bbox_height is defined at this altitude; scales by (ref_alt/current_alt)
     # Bottom-of-frame backward: bbox bottom edge beyond this triggers backward
     bottom_y_threshold: float = 0.7
@@ -49,7 +49,7 @@ class ControllerConfig:
     orbit_direction: int = 1          # +1 = clockwise, -1 = counter-clockwise
     max_orbit_speed: float = 3.0      # max lateral speed limit
 
-    takeoff_altitude: float = 3.0
+    target_altitude: float = 3.0
     log_verbosity: str = "normal"  # quiet | normal | debug
 
     def __post_init__(self):
@@ -95,8 +95,8 @@ class ControllerConfig:
         # Flight mode
         group.add_argument("--fixed-altitude", action=argparse.BooleanOptionalAction, default=defaults.fixed_altitude,
                            help="Keep altitude fixed (default: True). Use --no-fixed-altitude for vertical following.")
-        group.add_argument("--yaw-only", action="store_true",
-                           help="Yaw only mode: no forward/backward or altitude movement")
+        group.add_argument("--yaw-only", action=argparse.BooleanOptionalAction, default=defaults.yaw_only,
+                           help="Yaw only mode: no forward/backward or altitude movement (default: True). Use --no-yaw-only for full follow.")
 
         # Search/follow behavior
         group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
@@ -200,6 +200,6 @@ class ControllerConfig:
             orbit_speed_m_s=_arg("orbit_speed", "orbit_speed_m_s", default=defaults.orbit_speed_m_s),
             orbit_direction=_arg("orbit_direction", default=defaults.orbit_direction),
             max_orbit_speed=_arg("max_orbit_speed", default=defaults.max_orbit_speed),
-            takeoff_altitude=_arg("takeoff_altitude", default=defaults.takeoff_altitude),
+            target_altitude=_arg("target_altitude", default=defaults.target_altitude),
             log_verbosity=_arg("log_verbosity", default=defaults.log_verbosity),
         )

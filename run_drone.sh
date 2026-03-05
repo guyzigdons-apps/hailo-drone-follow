@@ -1,1 +1,1 @@
-export DISPLAY=:0 ; source venv/bin/activate ; drone-follow --input rpi --tiles-x 1 --tiles-y 1 --target-distance 8 --ui --takeoff-altitude 2 --vertical-mirror --record --serial
+export DISPLAY=:0 ; source venv/bin/activate ; drone-follow --input rpi --tiles-x 1 --tiles-y 1 --ui --vertical-mirror --record --serial

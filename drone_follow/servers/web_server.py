@@ -71,11 +71,12 @@ class SharedUIState:
                 "velocity": dict(self._velocity),
             }
 
-    def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str):
+    def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str, right_m_s: float = 0.0):
         """Called from control loop to expose current command velocity in UI."""
         with self._lock:
             self._velocity = {
                 "forward_m_s": float(forward_m_s),
+                "right_m_s": float(right_m_s),
                 "down_m_s": float(down_m_s),
                 "yawspeed_deg_s": float(yawspeed_deg_s),
                 "mode": str(mode),
@@ -209,12 +210,16 @@ class _WebHandler(BaseHTTPRequestHandler):
         "yaw_only": bool,
         "fixed_altitude": bool,
         "target_distance_m": float,
+        "target_bbox_height": float,
         "dead_zone_height_percent": float,
         "smooth_yaw": bool,
         "yaw_alpha": float,
         "smooth_forward": bool,
         "forward_alpha": float,
-        "takeoff_altitude": float,
+        "target_altitude": float,
+        "follow_mode": str,
+        "orbit_speed_m_s": float,
+        "orbit_direction": int,
     }
 
     def _handle_get_config(self):

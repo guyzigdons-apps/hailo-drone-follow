@@ -43,7 +43,8 @@ def add_drone_args(parser) -> None:
                        help="Baud rate for serial connection (default: 57600)")
     group.add_argument("--takeoff-landing", action="store_true",
                        help="Enable auto arm/takeoff/land (default: off — drone must already be airborne)")
-    group.add_argument("--takeoff-altitude", type=float, default=3.0)
+    group.add_argument("--target-altitude", type=float, default=3.0,
+                       help="Target altitude in metres (default: 3.0). Also used as takeoff height with --takeoff-landing.")
     group.add_argument("--mission-duration", type=float, default=300.0)
 
 
@@ -319,7 +320,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     period = 1.0 / max(0.1, config.control_loop_hz)
     last_detection_time = time.monotonic()
     last_valid_detection: Optional[VelocityCommand] = None
-    _prev_takeoff_alt = config.takeoff_altitude
+    _prev_target_alt = config.target_altitude
     _goto_altitude = None
     _prev_cmd: Optional[VelocityCommand] = None
     _fwd_smoother = ForwardSmoother()
@@ -355,18 +356,14 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 shutdown.set()
                 break
 
-            # Detect takeoff_altitude changes and start goto
-            if config.takeoff_altitude != _prev_takeoff_alt:
-                _goto_altitude = config.takeoff_altitude
+            # Detect target_altitude changes and start goto
+            if config.target_altitude != _prev_target_alt:
+                _goto_altitude = config.target_altitude
                 _log(f"[drone] Altitude changed: going to {_goto_altitude:.1f}m", level=logging.INFO)
-                _prev_takeoff_alt = config.takeoff_altitude
+                _prev_target_alt = config.target_altitude
 
-            target_override = None
-            if altitude_cache and altitude_cache.get("m") is not None:
-                target_override = _effective_target_bbox_height(config, altitude_cache["m"])
             cmd = compute_velocity_command(
                 detection, config,
-                target_bbox_height_override=target_override,
                 last_detection=last_valid_detection,
                 search_active=(time_since_detection >= config.search_enter_delay_s),
                 hold_velocity=_prev_cmd,
@@ -388,7 +385,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
 
             # Forward-velocity log (throttled)
             if now - _last_fwd_log_time >= _FWD_LOG_INTERVAL and detection is not None:
-                target_bh = target_override if target_override is not None else config.target_bbox_height
+                target_bh = config.target_bbox_height
                 _log(f"[FWD] target={target_bh:.2f} bbox={detection.bbox_height:.2f} "
                      f"final={cmd.forward_m_s:+.2f}", level=logging.DEBUG)
                 _last_fwd_log_time = now
@@ -415,11 +412,10 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
             if now - _last_log_time >= _LOG_INTERVAL:
                 _last_log_time = now
                 alt_str = f" alt={altitude_cache['m']:.1f}m" if altitude_cache and altitude_cache.get("m") is not None else ""
-                eff_str = f" eff_target={target_override:.2f}" if target_override is not None else ""
                 if detection is not None:
                     _log(f"[TRACK] Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+5.2f} Down:{cmd.down_m_s:+5.2f}"
                          f" pos=({detection.center_x:.2f},{detection.center_y:.2f}) bbox_h={detection.bbox_height:.2f}"
-                         f"{eff_str}{alt_str}", level=logging.INFO)
+                         f" target={config.target_bbox_height:.2f}{alt_str}", level=logging.INFO)
                 elif time_since_detection < config.search_enter_delay_s:
                     _log(f"[SEARCH-WAIT] entering search in {config.search_enter_delay_s - time_since_detection:.1f}s{alt_str}", level=logging.INFO)
                 else:
@@ -586,7 +582,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
         watch_task = None
         try:
             if manage_takeoff_landing:
-                await drone.action.set_takeoff_altitude(args.takeoff_altitude)
+                await drone.action.set_takeoff_altitude(args.target_altitude)
                 # Retry arm() — PX4 may need time to pass pre-arm checks
                 for attempt in range(_ARM_MAX_ATTEMPTS):
                     if shutdown.is_set():
