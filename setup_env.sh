@@ -1,2 +1,3 @@
-export PYTHONPATH="/home/giladn/projects/hailo-drone-follow:$PYTHONPATH"
-source "/home/giladn/projects/hailo-drone-follow/venv/bin/activate"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+source "$SCRIPT_DIR/venv/bin/activate"

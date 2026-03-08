@@ -36,8 +36,17 @@ def _get_source_type(input_source):
         return "usb"
     elif s.startswith("rpi"):
         return "rpi"
+    elif s.startswith("udp://"):
+        return "udp"
     else:
         return "file"
+
+
+def _parse_udp_uri(uri):
+    """Parse udp://host:port into (host, port)."""
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    return parsed.hostname or "0.0.0.0", parsed.port or 5600
 
 
 def _get_camera_resolution(video_width=640, video_height=640):
@@ -102,6 +111,16 @@ def _source_pipeline(
         source_element = (
             f"appsrc name=app_source is-live=true leaky-type=downstream max-buffers=3 ! "
             f"video/x-raw, format={video_format}, width={video_width}, height={video_height} ! "
+        )
+    elif source_type == "udp":
+        host, port = _parse_udp_uri(video_source)
+        source_element = (
+            f"udpsrc address={host} port={port} name={name} "
+            f"caps=\"application/x-rtp, media=video, encoding-name=H264, payload=96\" ! "
+            f"rtpjitterbuffer latency=50 ! "
+            f"rtph264depay ! "
+            f"{_QUEUE(name=f'{name}_queue_decode')} ! "
+            f"decodebin name={name}_decodebin ! "
         )
     else:
         source_element = (
