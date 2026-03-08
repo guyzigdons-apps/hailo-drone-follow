@@ -322,6 +322,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     last_valid_detection: Optional[VelocityCommand] = None
     _prev_target_alt = config.target_altitude
     _goto_altitude = None
+    _hold_altitude: Optional[float] = None  # captured altitude for fixed-altitude hold
     _prev_cmd: Optional[VelocityCommand] = None
     _fwd_smoother = ForwardSmoother()
 
@@ -329,6 +330,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     _GOTO_KP = 0.5
     _GOTO_MAX_SPEED = 1.5
     _GOTO_TOLERANCE = 0.3
+    _HOLD_KP = 0.5
+    _HOLD_MAX_SPEED = 1.0
     _LOG_INTERVAL = 1.0
     _FWD_LOG_INTERVAL = 0.5
 
@@ -359,6 +362,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
             # Detect target_altitude changes and start goto
             if config.target_altitude != _prev_target_alt:
                 _goto_altitude = config.target_altitude
+                _hold_altitude = None  # will be set when goto completes
                 _log(f"[drone] Altitude changed: going to {_goto_altitude:.1f}m", level=logging.INFO)
                 _prev_target_alt = config.target_altitude
 
@@ -378,9 +382,19 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 alt_error = _goto_altitude - altitude_cache["m"]
                 if abs(alt_error) < _GOTO_TOLERANCE:
                     _log(f"[drone] Reached target altitude {_goto_altitude:.1f}m", level=logging.INFO)
+                    _hold_altitude = _goto_altitude
                     _goto_altitude = None
                 else:
                     down_speed = max(-_GOTO_MAX_SPEED, min(_GOTO_MAX_SPEED, -_GOTO_KP * alt_error))
+                    cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
+
+            # Fixed-altitude hold: compensate for drift when no goto is active
+            elif config.fixed_altitude and altitude_cache.get("m") is not None:
+                if _hold_altitude is None:
+                    _hold_altitude = altitude_cache["m"]
+                alt_error = _hold_altitude - altitude_cache["m"]
+                if abs(alt_error) > 0.1:  # small dead zone to avoid jitter
+                    down_speed = max(-_HOLD_MAX_SPEED, min(_HOLD_MAX_SPEED, -_HOLD_KP * alt_error))
                     cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
 
             # Forward-velocity log (throttled)
