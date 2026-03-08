@@ -258,6 +258,63 @@ drone_follow/
 
 The `follow_api` package has zero external dependencies, making the controller logic easy to test without hardware.
 
+## JSON Config Files
+
+Instead of passing many CLI flags, you can store controller settings in a JSON file and load them with `--config`. CLI flags still override JSON values.
+
+### Usage
+
+```bash
+# Save current defaults to a file, then edit it
+drone-follow --save-config my_config.json
+
+# Run with a config file
+drone-follow --config configs/simulation.json --input usb --serial --ui
+
+# CLI flags override JSON values
+drone-follow --config configs/outdoor_follow.json --target-altitude 8 --input rpi --serial --ui
+```
+
+### Bundled Presets
+
+The `configs/` directory includes ready-to-use presets:
+
+| Preset | Mode | Description |
+|---|---|---|
+| `simulation.json` | Yaw-only | Safe for SITL testing with USB camera. Forward/backward disabled, longer search timeout, debug logging. |
+| `simulation_follow.json` | Full follow (sim) | SITL with forward/backward enabled. Reduced speeds and gains for safe indoor/sim testing, debug logging. |
+| `outdoor_follow.json` | Full follow | Real drone outdoor flight. Approaches/retreats to maintain target size, 5m altitude, conservative speeds. |
+| `outdoor_yaw_only.json` | Yaw-only (outdoor) | Real drone, rotation only. Safe for first outdoor tests — no translation, 5m altitude. |
+| `outdoor_orbit.json` | Orbit | Cinematic circling at 1.5 m/s, 5m altitude. Keeps target at 20% frame height for wider shots. |
+
+### Examples
+
+**Simulation** (USB camera + PX4 SITL via Docker):
+```bash
+drone-follow --config configs/simulation.json \
+    --input usb --connection tcp://127.0.0.1:5760 --ui
+```
+
+**Real drone — follow mode** (RPi camera + Cube Orange+ over USB serial):
+```bash
+drone-follow --config configs/outdoor_follow.json \
+    --input rpi --serial --ui
+```
+
+**Real drone — orbit mode**:
+```bash
+drone-follow --config configs/outdoor_orbit.json \
+    --input rpi --serial --ui
+```
+
+### Creating Your Own Config
+
+Only include the fields you want to change — anything omitted uses the built-in defaults. For a complete list of fields, run:
+
+```bash
+drone-follow --save-config full_defaults.json
+```
+
 ## Key Configuration Parameters
 
 | Parameter | Default | Description |

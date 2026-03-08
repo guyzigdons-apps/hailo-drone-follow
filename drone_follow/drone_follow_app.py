@@ -144,6 +144,13 @@ def main():
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
 
+    # --save-config: dump effective config to JSON and exit
+    save_path = getattr(args, "save_config", None)
+    if save_path:
+        controller_config.save_json(save_path)
+        LOGGER.info("[app] Config saved to %s", save_path)
+        raise SystemExit(0)
+
     # Validate --world / --px4-path pair early (before starting servers)
     world_loader = None
     if args.world is not None:
