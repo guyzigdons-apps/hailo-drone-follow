@@ -65,7 +65,7 @@ def _source_pipeline(
     frame_rate=30,
     sync=True,
     video_format="RGB",
-    horizontal_mirror=True,
+    horizontal_mirror=False,
     vertical_mirror=False,
 ):
     """Build a GStreamer source pipeline string.
@@ -74,7 +74,7 @@ def _source_pipeline(
     (= 180° rotation, for upside-down mounted cameras).
 
     Args:
-        horizontal_mirror: Flip left-right (default True for selfie-style camera).
+        horizontal_mirror: Flip left-right.
         vertical_mirror: Flip top-bottom (True when camera is mounted upside down).
     """
     source_type = _get_source_type(video_source)

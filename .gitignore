@@ -13,3 +13,5 @@ recordings/
 drone_follow/ui/node_modules/
 drone_follow/ui/build/
 hailo-apps/
+setup_env.sh
+start_drone.sh
