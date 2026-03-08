@@ -32,7 +32,7 @@ def config():
 class TestSearchMode:
     def test_no_detection_returns_search_yaw(self, config):
         cmd = compute_velocity_command(None, config)
-        assert cmd.yawspeed_deg_s == config.search_yawspeed_slow
+        assert cmd.yawspeed_deg_s == -config.search_yawspeed_slow
 
     def test_no_detection_zero_velocity(self, config):
         cmd = compute_velocity_command(None, config)
@@ -49,15 +49,15 @@ class TestYaw:
         cmd = compute_velocity_command(_det(cx=0.51), config)
         assert cmd.yawspeed_deg_s == 0.0
 
-    def test_target_right_positive_yaw(self, config):
-        """Detection right of center -> positive yaw (clockwise)."""
+    def test_target_right_negative_yaw(self, config):
+        """Detection right of center -> negative yaw (PX4: clockwise)."""
         cmd = compute_velocity_command(_det(cx=0.75), config)
-        assert cmd.yawspeed_deg_s > 0.0
-
-    def test_target_left_negative_yaw(self, config):
-        """Detection left of center -> negative yaw (counter-clockwise)."""
-        cmd = compute_velocity_command(_det(cx=0.25), config)
         assert cmd.yawspeed_deg_s < 0.0
+
+    def test_target_left_positive_yaw(self, config):
+        """Detection left of center -> positive yaw (PX4: counter-clockwise)."""
+        cmd = compute_velocity_command(_det(cx=0.25), config)
+        assert cmd.yawspeed_deg_s > 0.0
 
     def test_symmetry(self, config):
         """Equal offsets left and right should produce equal magnitude."""
@@ -196,7 +196,7 @@ class TestCombined:
         cmd = compute_velocity_command(
             _det(cx=0.7, cy=0.3, bh=0.15), config
         )
-        assert cmd.yawspeed_deg_s > 0.0    # right -> positive yaw
+        assert cmd.yawspeed_deg_s < 0.0    # right -> negative yaw (PX4 convention)
         assert cmd.down_m_s < 0.0           # above center -> fly up
         assert cmd.forward_m_s > 0.0        # small bbox -> approach
 
@@ -253,7 +253,7 @@ class TestSafetyAndFollowing:
         """Yaw-only mode still tracks yaw but zeroes forward/down commands."""
         cfg = ControllerConfig(yaw_only=True, fixed_altitude=False, target_distance_m=None, dead_zone_deg=0.0)
         cmd = compute_velocity_command(_det(cx=0.8, cy=0.2, bh=0.1), cfg)
-        assert cmd.yawspeed_deg_s > 0.0
+        assert cmd.yawspeed_deg_s < 0.0
         assert cmd.forward_m_s == 0.0
         assert cmd.down_m_s == 0.0
 
@@ -264,8 +264,8 @@ class TestSafetyAndFollowing:
         last_left = _det(cx=0.2, bh=0.2)
         cmd_right = compute_velocity_command(None, cfg, last_detection=last_right)
         cmd_left = compute_velocity_command(None, cfg, last_detection=last_left)
-        assert cmd_right.yawspeed_deg_s > 0.0
-        assert cmd_left.yawspeed_deg_s < 0.0
+        assert cmd_right.yawspeed_deg_s < 0.0
+        assert cmd_left.yawspeed_deg_s > 0.0
 
     def test_search_wait_holds_previous_velocity(self):
         """Before active search, controller should hold last velocity."""
@@ -379,6 +379,6 @@ class TestOrbitMode:
         cfg = ControllerConfig(follow_mode="orbit", orbit_speed_m_s=1.0,
                                dead_zone_deg=0.0, dead_zone_height_percent=0.0, yaw_only=False)
         cmd = compute_velocity_command(_det(cx=0.7, cy=0.5, bh=0.15), cfg)
-        assert cmd.yawspeed_deg_s > 0.0  # target right of center
+        assert cmd.yawspeed_deg_s < 0.0  # target right of center
         assert cmd.forward_m_s > 0.0     # small bbox -> approach
         assert cmd.right_m_s == 1.0      # lateral orbit velocity

@@ -74,6 +74,10 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="MJPEG stream frame rate (default: 10)")
     group.add_argument("--record", action="store_true",
                        help="Record raw video + detections for the entire session (requires --ui)")
+    group.add_argument("--horizontal-mirror", action="store_true", default=False,
+                       help="Flip video left-right (selfie-style)")
+    group.add_argument("--vertical-mirror", action="store_true", default=False,
+                       help="Flip video top-bottom (for upside-down mounted cameras)")
 
 
 def _build_parser() -> argparse.ArgumentParser:

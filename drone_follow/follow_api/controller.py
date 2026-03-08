@@ -127,9 +127,9 @@ def compute_velocity_command(
         if not search_active:
             return hold_velocity if hold_velocity is not None else VelocityCommand(0.0, 0.0, 0.0, 0.0)
         # Derive search direction from last seen position.
-        search_direction = 1.0
+        search_direction = -1.0
         if last_detection is not None:
-            search_direction = 1.0 if last_detection.center_x > 0.5 else -1.0
+            search_direction = -1.0 if last_detection.center_x > 0.5 else 1.0
         # Spin toward last seen direction with damped forward correction
         search_forward = 0.0
         if last_detection is not None:
@@ -143,10 +143,12 @@ def compute_velocity_command(
     error_y_deg = (detection.center_y - 0.5) * config.vfov
 
     # Yaw: signed square-root response
+    # Negative sign: person right of center (positive error) → yaw left (negative)
+    # because PX4 positive yawspeed = counter-clockwise (nose turns left)
     if abs(error_x_deg) < config.dead_zone_deg:
         yawspeed = 0.0
     else:
-        yawspeed = math.copysign(config.kp_yaw * math.sqrt(abs(error_x_deg)), error_x_deg)
+        yawspeed = -math.copysign(config.kp_yaw * math.sqrt(abs(error_x_deg)), error_x_deg)
     yawspeed = max(-config.max_yawspeed, min(config.max_yawspeed, yawspeed))
 
     # Altitude
