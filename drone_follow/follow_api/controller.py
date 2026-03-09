@@ -40,6 +40,13 @@ def _calculate_forward_speed(
     if detection.bbox_height > config.max_bbox_height_safety:
         return -config.max_backward
 
+    # Bottom-of-frame safety: if the bbox bottom edge is too low in the frame,
+    # the person is directly beneath the drone — command backward to retreat.
+    bbox_bottom = detection.center_y + detection.bbox_height / 2.0
+    if bbox_bottom > config.bottom_y_threshold:
+        overshoot = bbox_bottom - config.bottom_y_threshold
+        return -config.kp_backward * math.sqrt(overshoot)
+
     height_delta = target_bh - detection.bbox_height
     dead_zone_height = (config.dead_zone_height_percent / 100.0) * target_bh
 

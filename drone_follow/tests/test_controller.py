@@ -238,14 +238,38 @@ class TestSafetyAndFollowing:
         cmd = compute_velocity_command(_det(bh=0.75), cfg)
         assert cmd.forward_m_s == -cfg.max_backward
 
-    def test_bottom_of_frame_does_not_force_backward(self):
-        """A low-in-frame target within dead zone should not command backward."""
+    def test_bottom_of_frame_triggers_backward(self):
+        """When bbox bottom edge exceeds bottom_y_threshold, drone should retreat."""
         cfg = ControllerConfig(
             target_bbox_height=0.3,
             dead_zone_height_percent=30.0,
+            bottom_y_threshold=0.7,
             yaw_only=False,
         )
-        # bbox at target height, within dead zone — should not back up
+        # cy=0.8, bh=0.3 -> bbox_bottom = 0.95, well above 0.7 threshold
+        cmd = compute_velocity_command(_det(cy=0.8, bh=0.3), cfg)
+        assert cmd.forward_m_s < 0.0
+
+    def test_bottom_of_frame_no_retreat_when_above_threshold(self):
+        """When bbox bottom edge is above threshold, normal forward logic applies."""
+        cfg = ControllerConfig(
+            target_bbox_height=0.3,
+            dead_zone_height_percent=30.0,
+            bottom_y_threshold=0.7,
+            yaw_only=False,
+        )
+        # cy=0.4, bh=0.3 -> bbox_bottom = 0.55, below 0.7 threshold
+        # bh matches target within dead zone -> forward = 0
+        cmd = compute_velocity_command(_det(cy=0.4, bh=0.3), cfg)
+        assert cmd.forward_m_s == 0.0
+
+    def test_bottom_of_frame_ignored_in_yaw_only(self):
+        """Yaw-only mode should not trigger bottom-of-frame backward."""
+        cfg = ControllerConfig(
+            bottom_y_threshold=0.7,
+            yaw_only=True,
+        )
+        # bbox_bottom = 0.95, but yaw_only -> forward stays 0
         cmd = compute_velocity_command(_det(cy=0.8, bh=0.3), cfg)
         assert cmd.forward_m_s == 0.0
 
