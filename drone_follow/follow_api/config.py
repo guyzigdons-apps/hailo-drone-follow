@@ -1,7 +1,8 @@
 """Controller configuration — pure dataclass, no third-party dependencies."""
 
 import argparse
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, fields, asdict
 from typing import Optional
 
 
@@ -63,11 +64,37 @@ class ControllerConfig:
                 "with variable altitude, use target_bbox_height instead"
             )
 
+    # ── JSON serialization ──────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        """Return config as a plain dict (JSON-safe)."""
+        return asdict(self)
+
+    def save_json(self, path: str) -> None:
+        """Write current config to a JSON file."""
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def from_json(cls, path: str) -> "ControllerConfig":
+        """Load config from a JSON file.  Unknown keys are silently ignored."""
+        with open(path) as f:
+            data = json.load(f)
+        valid_names = {field.name for field in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_names}
+        return cls(**filtered)
+
     @staticmethod
     def add_args(parser: argparse.ArgumentParser) -> None:
         """Register controller-related CLI flags on *parser*."""
         defaults = ControllerConfig()
         group = parser.add_argument_group("follow-controller")
+
+        group.add_argument("--config", default=None, metavar="JSON",
+                           help="Path to a JSON config file. CLI flags override JSON values. "
+                                "Use --save-config to dump current defaults.")
+        group.add_argument("--save-config", default=None, metavar="JSON",
+                           help="Save the effective config to a JSON file and exit.")
 
         # Framing and target geometry
         group.add_argument("--hfov", type=float, default=defaults.hfov)
@@ -134,8 +161,12 @@ class ControllerConfig:
 
     @classmethod
     def from_args(cls, args):
-        # Single source of defaults: dataclass values.
-        defaults = cls()
+        # If a JSON config was supplied, use it as the base defaults.
+        json_path = getattr(args, "config", None)
+        if json_path:
+            defaults = cls.from_json(json_path)
+        else:
+            defaults = cls()
 
         def _arg(*names, default):
             for name in names:
