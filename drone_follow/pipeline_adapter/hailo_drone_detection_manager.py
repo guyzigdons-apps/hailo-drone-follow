@@ -18,6 +18,7 @@ import numpy as np
 from drone_follow.follow_api.types import Detection
 
 from .byte_tracker import ByteTrackerAdapter
+from .tracker import MetricsTracker
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -180,6 +181,13 @@ def app_callback(element, buffer, user_data):
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
     LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
                 follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
+
+    # Periodic tracker metrics log (~every 10 s at 30 fps)
+    metrics = getattr(user_data.tracker, "metrics", None)
+    if metrics is not None and metrics.total_frames % 300 == 0:
+        LOGGER.info("[tracker] fps=%.1f  update=%.1fms  match=%.0f%%  tracks=%d  id_sw=%d",
+                    metrics.fps, metrics.update_ms, metrics.match_ratio * 100,
+                    metrics.active_tracks, metrics.id_switches)
 
 
 # ---------------------------------------------------------------------------
@@ -433,10 +441,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             return ' ! '.join(pipeline_parts)
 
-    tracker = ByteTrackerAdapter(
+    t0 = time.monotonic()
+    inner_tracker = ByteTrackerAdapter(
         track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
     )
-    LOGGER.info("[tracking] ByteTracker running synchronously in callback")
+    init_ms = (time.monotonic() - t0) * 1000.0
+    tracker = MetricsTracker(inner_tracker, init_time_ms=init_ms)
+    LOGGER.info("[tracking] ByteTracker ready (init %.1f ms), running synchronously in callback", init_ms)
+
+    shared_state.tracker_metrics = tracker.metrics
 
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, tracker=tracker,
