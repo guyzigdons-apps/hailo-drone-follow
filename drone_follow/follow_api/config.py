@@ -9,6 +9,8 @@ from typing import Optional
 class ControllerConfig:
     hfov: float = 66.0
     vfov: float = 41.0
+    # kp = proportional gain (P term of a PID controller).
+    # Higher kp → faster response but more overshoot.
     kp_yaw: float = 5
     dead_zone_deg: float = 2.0
     max_yawspeed: float = 90.0
