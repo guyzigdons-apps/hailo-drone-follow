@@ -23,127 +23,6 @@ LOGGER = logging.getLogger("drone_follow.app")
 
 _EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
 
-
-# ---------------------------------------------------------------------------
-# Local SOURCE_PIPELINE — replaces the hailo-apps version to support
-# both horizontal mirror and vertical mirror (= 180° rotation when combined).
-# ---------------------------------------------------------------------------
-
-def _get_source_type(input_source):
-    """Determine source type from input string."""
-    s = str(input_source)
-    if s.startswith("/dev/video"):
-        return "usb"
-    elif s.startswith("rpi"):
-        return "rpi"
-    elif s.startswith("udp://"):
-        return "udp"
-    else:
-        return "file"
-
-
-def _parse_udp_uri(uri):
-    """Parse udp://host:port into (host, port)."""
-    from urllib.parse import urlparse
-    parsed = urlparse(uri)
-    return parsed.hostname or "0.0.0.0", parsed.port or 5600
-
-
-def _get_camera_resolution(video_width=640, video_height=640):
-    """Return the closest standard resolution >= requested."""
-    if video_width <= 640 and video_height <= 480:
-        return 640, 480
-    elif video_width <= 1280 and video_height <= 720:
-        return 1280, 720
-    elif video_width <= 1920 and video_height <= 1080:
-        return 1920, 1080
-    else:
-        return 3840, 2160
-
-
-def _QUEUE(name, max_size_buffers=3, max_size_bytes=0, max_size_time=0, leaky="no"):
-    return (f"queue name={name} leaky={leaky} max-size-buffers={max_size_buffers} "
-            f"max-size-bytes={max_size_bytes} max-size-time={max_size_time} ")
-
-
-def _source_pipeline(
-    video_source,
-    video_width=640,
-    video_height=640,
-    name="source",
-    frame_rate=30,
-    sync=True,
-    video_format="RGB",
-    horizontal_mirror=True,
-    vertical_mirror=False,
-):
-    """Build a GStreamer source pipeline string.
-
-    Supports horizontal mirror, vertical mirror, and the combination of both
-    (= 180° rotation, for upside-down mounted cameras).
-
-    Args:
-        horizontal_mirror: Flip left-right (default True for selfie-style camera).
-        vertical_mirror: Flip top-bottom (True when camera is mounted upside down).
-    """
-    source_type = _get_source_type(video_source)
-
-    # Determine the videoflip element(s) needed
-    if horizontal_mirror and vertical_mirror:
-        # Both = 180° rotation: use method property (more compatible than video-direction)
-        flip_str = f"videoflip name=videoflip_{name} method=rotate-180 ! "
-    elif horizontal_mirror:
-        flip_str = f"videoflip name=videoflip_{name} video-direction=horiz ! "
-    elif vertical_mirror:
-        flip_str = f"videoflip name=videoflip_{name} method=vertical-flip ! "
-    else:
-        flip_str = ""
-
-    if source_type == "usb":
-        width, height = _get_camera_resolution(video_width, video_height)
-        source_element = (
-            f"v4l2src device={video_source} name={name} ! "
-            f"image/jpeg, framerate=30/1, width={width}, height={height} ! "
-            f"{_QUEUE(name=f'{name}_queue_decode')} ! "
-            f"decodebin name={name}_decodebin ! "
-        )
-    elif source_type == "rpi":
-        source_element = (
-            f"appsrc name=app_source is-live=true leaky-type=downstream max-buffers=3 ! "
-            f"video/x-raw, format={video_format}, width={video_width}, height={video_height} ! "
-        )
-    elif source_type == "udp":
-        host, port = _parse_udp_uri(video_source)
-        source_element = (
-            f"udpsrc address={host} port={port} name={name} "
-            f"caps=\"application/x-rtp, media=video, encoding-name=H264, payload=96\" ! "
-            f"rtpjitterbuffer latency=50 ! "
-            f"rtph264depay ! "
-            f"{_QUEUE(name=f'{name}_queue_decode')} ! "
-            f"decodebin name={name}_decodebin ! "
-        )
-    else:
-        source_element = (
-            f'filesrc location="{video_source}" name={name} ! '
-            f"{_QUEUE(name=f'{name}_queue_decode')} ! "
-            f"decodebin name={name}_decodebin ! "
-        )
-
-    fps_caps = f"video/x-raw, framerate={frame_rate}/1" if sync else "video/x-raw"
-
-    # Place videoflip AFTER videoconvert so the element always gets a known format
-    return (
-        f"{source_element} "
-        f"{_QUEUE(name=f'{name}_scale_q')} ! "
-        f"videoscale name={name}_videoscale n-threads=2 ! "
-        f"{_QUEUE(name=f'{name}_convert_q')} ! "
-        f"videoconvert n-threads=3 name={name}_convert qos=false ! "
-        f"video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, "
-        f"width={video_width}, height={video_height} ! "
-        f"{flip_str}"
-        f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
-    )
-
 _gst_module = None
 
 
@@ -334,7 +213,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
         QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-        TILE_CROPPER_PIPELINE,
+        TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
     )
 
     if parser is None:
@@ -482,13 +361,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return super().get_pipeline_string()
 
             # Build pipeline with tee: one branch for display, one for MJPEG appsink
-            source_pipeline = _source_pipeline(
+            source_pipeline = SOURCE_PIPELINE(
                 video_source=self.video_source,
                 video_width=self.video_width,
                 video_height=self.video_height,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
-                horizontal_mirror=self.options_menu.horizontal_mirror,
+                mirror_image=self.options_menu.horizontal_mirror,
                 vertical_mirror=self.options_menu.vertical_mirror,
             )
 
