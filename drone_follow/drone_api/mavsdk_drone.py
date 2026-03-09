@@ -321,17 +321,12 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     last_detection_time = time.monotonic()
     last_valid_detection: Optional[VelocityCommand] = None
     _prev_target_alt = config.target_altitude
-    _goto_altitude = None
-    _hold_altitude: Optional[float] = None  # captured altitude for fixed-altitude hold
     _prev_cmd: Optional[VelocityCommand] = None
     _fwd_smoother = ForwardSmoother()
 
     # Constants
-    _GOTO_KP = 0.5
-    _GOTO_MAX_SPEED = 1.5
-    _GOTO_TOLERANCE = 0.3
-    _HOLD_KP = 0.5
-    _HOLD_MAX_SPEED = 1.0
+    _ALT_HOLD_KP = 0.5
+    _ALT_HOLD_MAX_SPEED = 1.0
     _LOG_INTERVAL = 1.0
     _FWD_LOG_INTERVAL = 0.5
 
@@ -359,11 +354,9 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 shutdown.set()
                 break
 
-            # Detect target_altitude changes and start goto
+            # Log target_altitude changes
             if config.target_altitude != _prev_target_alt:
-                _goto_altitude = config.target_altitude
-                _hold_altitude = None  # will be set when goto completes
-                _log(f"[drone] Altitude changed: going to {_goto_altitude:.1f}m", level=logging.INFO)
+                _log(f"[drone] Target altitude changed: {_prev_target_alt:.1f}m -> {config.target_altitude:.1f}m", level=logging.INFO)
                 _prev_target_alt = config.target_altitude
 
             cmd = compute_velocity_command(
@@ -377,24 +370,11 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
                 cmd = VelocityCommand(smoothed_fwd, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
 
-            # Override vertical velocity when going to a new altitude
-            if _goto_altitude is not None and altitude_cache.get("m") is not None:
-                alt_error = _goto_altitude - altitude_cache["m"]
-                if abs(alt_error) < _GOTO_TOLERANCE:
-                    _log(f"[drone] Reached target altitude {_goto_altitude:.1f}m", level=logging.INFO)
-                    _hold_altitude = _goto_altitude
-                    _goto_altitude = None
-                else:
-                    down_speed = max(-_GOTO_MAX_SPEED, min(_GOTO_MAX_SPEED, -_GOTO_KP * alt_error))
-                    cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
-
-            # Fixed-altitude hold: compensate for drift when no goto is active
-            elif config.fixed_altitude and altitude_cache.get("m") is not None:
-                if _hold_altitude is None:
-                    _hold_altitude = altitude_cache["m"]
-                alt_error = _hold_altitude - altitude_cache["m"]
-                if abs(alt_error) > 0.1:  # small dead zone to avoid jitter
-                    down_speed = max(-_HOLD_MAX_SPEED, min(_HOLD_MAX_SPEED, -_HOLD_KP * alt_error))
+            # Fixed-altitude hold: proportional controller toward target_altitude
+            if config.fixed_altitude and altitude_cache.get("m") is not None:
+                alt_error = config.target_altitude - altitude_cache["m"]
+                if abs(alt_error) > 0.1:  # dead zone to avoid jitter
+                    down_speed = max(-_ALT_HOLD_MAX_SPEED, min(_ALT_HOLD_MAX_SPEED, -_ALT_HOLD_KP * alt_error))
                     cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
 
             # Forward-velocity log (throttled)
