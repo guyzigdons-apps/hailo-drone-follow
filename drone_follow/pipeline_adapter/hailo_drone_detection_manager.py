@@ -17,8 +17,8 @@ import numpy as np
 
 from drone_follow.follow_api.types import Detection
 
-from .byte_tracker import ByteTrackerAdapter
 from .tracker import MetricsTracker
+from .tracker_factory import create_tracker
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -441,13 +441,18 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             return ' ! '.join(pipeline_parts)
 
+    args = parser.parse_known_args()[0] if parser is not None else None
+    tracker_name = getattr(args, "tracker", "byte") if args is not None else "byte"
+
     t0 = time.monotonic()
-    inner_tracker = ByteTrackerAdapter(
-        track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
+    inner_tracker = create_tracker(
+        tracker_name, track_thresh=0.4, track_buffer=90,
+        match_thresh=0.5, frame_rate=30,
     )
     init_ms = (time.monotonic() - t0) * 1000.0
     tracker = MetricsTracker(inner_tracker, init_time_ms=init_ms)
-    LOGGER.info("[tracking] ByteTracker ready (init %.1f ms), running synchronously in callback", init_ms)
+    LOGGER.info("[tracking] %s ready (init %.1f ms), running synchronously in callback",
+                tracker_name, init_ms)
 
     shared_state.tracker_metrics = tracker.metrics
 

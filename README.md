@@ -12,12 +12,10 @@
 
 ### Steps
 
-1. **Create a virtual environment and install dependencies**:
+1. **Install dependencies**:
    ```bash
-   python -m venv venv --system-site-packages
    ./install.sh
    source setup_env.sh
-   pip install -e .
    ```
 
 2. **Optional – Web UI** (for `--ui` with live video and click-to-follow):
@@ -32,7 +30,12 @@
    The built UI is served from `drone_follow/ui/build` when you run with `--ui`.
    Running with `--ui` without building first will exit with an error message.
 
-3. **Verify** the app parses and shows help:
+3. **Optional – MOT evaluation dependencies**:
+   ```bash
+   pip install motmetrics opencv-python
+   ```
+
+4. **Verify** the app parses and shows help:
    ```bash
    drone-follow --help
    ```
@@ -50,12 +53,7 @@
    ./QGroundControl-x86_64.AppImage
    ```
 
-3. Run the video bridge:
-   ```bash
-   python drone_follow/tools/video_bridge.py
-   ```
-
-4. Run the drone follow application:
+3. Run the drone follow application:
    ```bash
    drone-follow --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
@@ -91,6 +89,7 @@ drone-follow --input udp://0.0.0.0:5600 --target-distance 8 \
 - **`--fixed-altitude`** (default) – Hold altitude constant. Use `--no-fixed-altitude` for vertical following.
 - **`--takeoff-landing`** – Enable automatic arm/takeoff/land. Without this flag (default), the app waits for the pilot to switch to OFFBOARD mode via GCS or RC.
 - **`--yaw-only`** – Only yaw to center the person; no forward/backward or altitude movement (see Yaw-Only Mode below).
+- **`--tracker {byte,fast}`** – Select the tracking algorithm (see Tracker Selection below).
 - **`--ui`** – Enable web UI with live video and click-to-follow (requires UI built; see Optional – Web UI above).
 - **Input/connection:** Pipeline input is set with `--input` (e.g. `udp://0.0.0.0:5600`, `rpi`, `usb`). MAVLink connection defaults to `udpin://0.0.0.0:14540`; override with `--connection` or use `--serial` for a serial link.
 
@@ -125,6 +124,83 @@ drone-follow --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:14560 --targe
 ```
 
 Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine's IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
+
+## Tracker Selection
+
+The app supports two tracking algorithms, selectable with `--tracker`:
+
+| Tracker | Flag | Description | Speed |
+|---|---|---|---|
+| **ByteTracker** | `--tracker byte` (default) | Lightweight two-stage tracker with high/low confidence matching | ~435 fps |
+| **FastTracker** | `--tracker fast` | Occlusion-aware tracker with velocity damping, ROI constraints, and IoU suppression | ~184 fps |
+
+FastTracker is vendored from [Hamidreza-Hashempoor/FastTracker](https://github.com/Hamidreza-Hashempoor/FastTracker) with heavy dependencies (torch, lap, cython_bbox) replaced by scipy/numpy equivalents. No extra installation needed.
+
+```bash
+# Run with ByteTracker (default):
+drone-follow --input usb --serial --ui
+
+# Run with FastTracker:
+drone-follow --input usb --serial --ui --tracker fast
+```
+
+## MOT Evaluation Tool
+
+A standalone tool for benchmarking trackers on MOT Challenge datasets (e.g. [MOT17](https://motchallenge.net/data/MOT17/)). No Hailo hardware needed — runs the tracker on pre-computed detections.
+
+### Quick start
+
+Point it at a MOT sequence directory:
+
+```bash
+python -m drone_follow.tools.mot_eval /path/to/MOT17/train/MOT17-04-SDP
+```
+
+This auto-detects `det/det.txt`, `gt/gt.txt`, `img1/`, and `seqinfo.ini` from the directory and produces:
+
+- **MOT metrics table** (MOTA, IDF1, HOTA, FP, FN, IDs) + performance stats (FPS, init time)
+- **Tracker video** (`MOT17-04-SDP.mp4`) with colored bounding boxes and track IDs
+- **Tracking results** (`results_MOT17-04-SDP.txt`) in MOT Challenge format
+
+### Comparing trackers
+
+```bash
+# ByteTracker:
+python -m drone_follow.tools.mot_eval /path/to/MOT17-04-SDP --tracker byte --visualize byte.mp4
+
+# FastTracker:
+python -m drone_follow.tools.mot_eval /path/to/MOT17-04-SDP --tracker fast --visualize fast.mp4
+```
+
+### Pipeline visualization (requires Hailo)
+
+Run the Hailo detection pipeline on the image sequence and visualize the tracked output:
+
+```bash
+python -m drone_follow.tools.mot_eval /path/to/MOT17-04-SDP \
+    --visualize-pipeline hailo_output.mp4
+```
+
+### Manual mode
+
+Override auto-detection with explicit paths:
+
+```bash
+python -m drone_follow.tools.mot_eval \
+    --detections /path/to/det.txt \
+    --gt /path/to/gt.txt \
+    --images-dir /path/to/img1 \
+    --tracker fast \
+    --frame-rate 30 \
+    -o results.txt \
+    --visualize output.mp4
+```
+
+### Metrics
+
+- **MOTA / IDF1** — Requires `pip install motmetrics`
+- **HOTA** — Always available (native implementation, no extra deps)
+- **Performance** — FPS, init time, average update time
 
 ## HTTP Control Server
 
@@ -246,15 +322,21 @@ A 5% dead zone (relative to target size) prevents oscillation around the setpoin
 drone_follow/
   follow_api/          Pure domain logic (no HW deps) — types, config, controller math, shared state
   drone_api/           MAVSDK flight controller adapter — offboard velocity commands, takeoff/landing
-  pipeline_adapter/    Hailo/GStreamer pipeline + ByteTracker — detection, tracking, target selection
+  pipeline_adapter/    Hailo/GStreamer pipeline + tracker — detection, tracking, target selection
+    byte_tracker.py    ByteTracker implementation + adapter
+    fast_tracker.py    FastTracker adapter (wraps vendored _fasttracker/)
+    _fasttracker/      Vendored FastTracker source (no torch/lap/cython_bbox deps)
+    tracker_factory.py Tracker factory — create_tracker("byte"|"fast", ...)
+    tracker.py         Tracker protocol, TrackedObject, MetricsTracker
   servers/             HTTP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001)
-  tools/               Standalone utilities (Gazebo video bridge)
+  tools/               Standalone utilities
+    mot_eval.py        MOT evaluation tool — benchmark trackers on MOT Challenge datasets
   sim/                 Simulation helpers (PX4 world loading)
   ui/                  React web dashboard (built separately with npm)
   drone_follow_app.py  Composition root and CLI entrypoint
 ```
 
-**Data flow:** Camera → GStreamer → Hailo-8L inference → ByteTracker (in callback) → `SharedDetectionState` → Control loop (10 Hz) → MAVSDK offboard velocity command.
+**Data flow:** Camera → GStreamer → Hailo-8L inference → Tracker (in callback) → `SharedDetectionState` → Control loop (10 Hz) → MAVSDK offboard velocity command.
 
 The `follow_api` package has zero external dependencies, making the controller logic easy to test without hardware.
 
@@ -262,6 +344,7 @@ The `follow_api` package has zero external dependencies, making the controller l
 
 | Parameter | Default | Description |
 |---|---|---|
+| `--tracker` | `byte` | Tracking algorithm: `byte` (ByteTracker) or `fast` (FastTracker) |
 | `--target-bbox-height` | `0.3` | Desired person size in frame (0–1) |
 | `--target-distance` | — | Desired horizontal distance in metres (requires `--fixed-altitude`) |
 | `--forward-gain` | `3.0` | Proportional gain for forward/backward |

@@ -80,8 +80,8 @@ def run_from_detections(det_path: str, output_path: str,
     Detection file format (per line):
         <frame>,<id_ignored>,<bb_left>,<bb_top>,<bb_width>,<bb_height>,<conf>
     """
-    from drone_follow.pipeline_adapter.byte_tracker import ByteTrackerAdapter
     from drone_follow.pipeline_adapter.tracker import MetricsTracker
+    from drone_follow.pipeline_adapter.tracker_factory import create_tracker
 
     raw = load_mot_file(det_path)
     if not raw:
@@ -89,7 +89,8 @@ def run_from_detections(det_path: str, output_path: str,
         return
 
     t_init = time.monotonic()
-    tracker = MetricsTracker(ByteTrackerAdapter(
+    tracker = MetricsTracker(create_tracker(
+        args.tracker,
         track_thresh=args.track_thresh,
         track_buffer=args.track_buffer,
         match_thresh=args.match_thresh,
@@ -149,6 +150,37 @@ def run_from_detections(det_path: str, output_path: str,
     else:
         _compute_metrics(results, {}, tracker_metrics=tracker,
                          wall_time=wall_time, seq_name=seq_name)
+
+
+# ---------------------------------------------------------------------------
+# Image sequence → video
+# ---------------------------------------------------------------------------
+
+def _images_to_video(images_dir: str, output_path: str, frame_rate: int = 30) -> str:
+    """Convert an image sequence to a video file using OpenCV.
+
+    Returns the path to the created video.
+    """
+    import cv2
+
+    img_files = sorted(Path(images_dir).glob("*.jpg"))
+    if not img_files:
+        img_files = sorted(Path(images_dir).glob("*.png"))
+    if not img_files:
+        raise FileNotFoundError(f"No images found in {images_dir}")
+
+    sample = cv2.imread(str(img_files[0]))
+    h, w = sample.shape[:2]
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_path, fourcc, frame_rate, (w, h))
+
+    LOGGER.info("Converting %d images to video %s ...", len(img_files), output_path)
+    for img_path in img_files:
+        writer.write(cv2.imread(str(img_path)))
+    writer.release()
+    LOGGER.info("Video created: %s (%dx%d @ %d fps)", output_path, w, h, frame_rate)
+    return output_path
 
 
 # ---------------------------------------------------------------------------
@@ -592,8 +624,16 @@ def build_parser() -> argparse.ArgumentParser:
     vis_group.add_argument(
         "--visualize", metavar="FILE",
         help="Output video file with tracker boxes drawn (e.g. output.mp4)")
+    vis_group.add_argument(
+        "--visualize-pipeline", metavar="FILE",
+        help="Run Hailo pipeline on images, track, and render video (requires Hailo HW)")
+    vis_group.add_argument(
+        "--run-pipeline-args", nargs=argparse.REMAINDER, default=[],
+        help="Extra args passed to the Hailo pipeline (e.g. --hef-path model.hef)")
 
     tracker_group = parser.add_argument_group("tracker")
+    tracker_group.add_argument("--tracker", choices=("byte", "fast"), default="byte",
+                               help="Tracker algorithm: byte (ByteTracker) or fast (FastTracker)")
     tracker_group.add_argument("--track-thresh", type=float, default=0.4,
                                help="Detection confidence threshold (default: 0.4)")
     tracker_group.add_argument("--track-buffer", type=int, default=90,
@@ -663,9 +703,10 @@ def _resolve_seq_dir(args, parser):
         args.output = f"results_{seq_name}.txt"
 
     # Auto-enable visualization: <seq_name>.mp4
+    seq_name = info.get("name", seq.name)
     if not args.visualize:
-        seq_name = info.get("name", seq.name)
         args.visualize = f"{seq_name}.mp4"
+    # Don't auto-enable pipeline visualization (requires Hailo HW)
 
 
 def main():
@@ -684,7 +725,8 @@ def main():
         # Detections-only mode — no Hailo hardware needed
         if not os.path.isfile(args.detections):
             parser.error(f"Detections file not found: {args.detections}")
-        LOGGER.info("Running tracker on pre-computed detections: %s", args.detections)
+        LOGGER.info("Running %s tracker on pre-computed detections: %s",
+                    args.tracker, args.detections)
         run_from_detections(args.detections, args.output, args.gt, args)
 
     elif any(a.startswith("--input") for a in remaining):
@@ -698,19 +740,42 @@ def main():
             "or --input <video> (full Hailo pipeline)")
 
     # --- Visualization ---
-    if args.visualize:
-        images_dir = args.images_dir
-        if not images_dir and args.detections:
-            # Auto-detect: .../MOT17-04-SDP/det/det.txt → .../MOT17-04-SDP/img1/
-            candidate = Path(args.detections).resolve().parent.parent / "img1"
-            if candidate.is_dir():
-                images_dir = str(candidate)
-                LOGGER.info("Auto-detected images dir: %s", images_dir)
-        if not images_dir:
-            LOGGER.warning("--visualize skipped: no --images-dir found")
-        else:
+    images_dir = args.images_dir
+    if not images_dir and args.detections:
+        # Auto-detect: .../MOT17-04-SDP/det/det.txt → .../MOT17-04-SDP/img1/
+        candidate = Path(args.detections).resolve().parent.parent / "img1"
+        if candidate.is_dir():
+            images_dir = str(candidate)
+            LOGGER.info("Auto-detected images dir: %s", images_dir)
+
+    if images_dir:
+        if args.visualize:
             _render_video(args.output, images_dir, args.visualize,
                           frame_rate=args.frame_rate, gt_path=args.gt)
+
+        # Pipeline visualization: run Hailo detector → tracker → render video
+        if getattr(args, "visualize_pipeline", None):
+            import tempfile
+            # Convert image sequence to temporary video for the Hailo pipeline
+            tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
+            try:
+                _images_to_video(images_dir, tmp_video, frame_rate=args.frame_rate)
+                # Run Hailo pipeline on the video to get detections
+                pipeline_output = args.visualize_pipeline.replace(".mp4", "_results.txt")
+                pipeline_args = ["--input", tmp_video] + (args.run_pipeline_args or [])
+                LOGGER.info("Running Hailo pipeline on %s ...", tmp_video)
+                run_from_pipeline(pipeline_output, args.gt, args, pipeline_args)
+                # Render the pipeline results as a video
+                _render_video(pipeline_output, images_dir, args.visualize_pipeline,
+                              frame_rate=args.frame_rate, gt_path=args.gt)
+            finally:
+                try:
+                    os.unlink(tmp_video)
+                except OSError:
+                    pass
+
+    elif args.visualize or getattr(args, "visualize_pipeline", None):
+        LOGGER.warning("Visualization skipped: no --images-dir found")
 
 
 if __name__ == "__main__":
