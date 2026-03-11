@@ -206,13 +206,8 @@ def run_from_pipeline(output_path: str, gt_path: str | None,
     app = create_app(shared_state, target_state=target_state,
                      eos_reached=eos_reached, parser=parser)
 
-    pipeline_args = app.options_menu
-    video_w = getattr(pipeline_args, "video_width", 1920)
-    video_h = getattr(pipeline_args, "video_height", 1080)
-
-    # Hook into the tracker to capture per-frame results
-    _hook_tracker_output(app, results={}, output_path=output_path,
-                         video_w=video_w, video_h=video_h)
+    # Hook into the tracker to capture per-frame results (normalized [0,1] coords)
+    _hook_tracker_output(app, results={}, output_path=output_path)
 
     def on_signal(*_):
         eos_reached.set()
@@ -253,18 +248,33 @@ def run_from_pipeline(output_path: str, gt_path: str | None,
                      seq_name=Path(output_path).stem)
 
 
+def _build_pipeline_args(input_source: str, args: argparse.Namespace,
+                         extra: list[str] | None = None) -> list[str]:
+    """Build the CLI args list to inject into the Hailo pipeline parser."""
+    pipeline_args = ["--input", input_source]
+    if getattr(args, "model", None) is not None:
+        pipeline_args += ["--hef-path", args.model]
+    if getattr(args, "tiles_x", None) is not None:
+        pipeline_args += ["--tiles-x", str(args.tiles_x)]
+    if getattr(args, "tiles_y", None) is not None:
+        pipeline_args += ["--tiles-y", str(args.tiles_y)]
+    if extra:
+        pipeline_args += extra
+    return pipeline_args
+
+
 def _inject_args(extra_args: list[str]):
     """Inject extra args into sys.argv for the pipeline parser."""
     # The pipeline parser reads sys.argv, so we append our extra args
     sys.argv = [sys.argv[0]] + extra_args
 
 
-def _hook_tracker_output(app, results: dict, output_path: str,
-                         video_w: int, video_h: int):
+def _hook_tracker_output(app, results: dict, output_path: str, **_kw):
     """Monkey-patch the tracker to intercept per-frame results.
 
     We wrap tracker.update() to capture every frame's output and write
-    MOT lines as they come in.
+    MOT lines as they come in.  Coordinates are stored as **normalized**
+    [0,1] values so they can be scaled to any resolution at render time.
     """
     from drone_follow.pipeline_adapter import hailo_drone_detection_manager as mgr
 
@@ -272,8 +282,6 @@ def _hook_tracker_output(app, results: dict, output_path: str,
     out_file = open(output_path, "w")
     frame_counter = [0]
     lock = threading.Lock()
-
-    SCALE = 1000.0  # same scale used in _run_tracker
 
     def patched_run_tracker(tracker, persons):
         available_ids, person_by_id, person_to_id = original_run_tracker(tracker, persons)
@@ -284,11 +292,11 @@ def _hook_tracker_output(app, results: dict, output_path: str,
 
             for tid, person in person_by_id.items():
                 bbox = person.get_bbox()
-                # Convert from normalized [0,1] to pixel coordinates
-                x = bbox.xmin() * video_w
-                y = bbox.ymin() * video_h
-                w = bbox.width() * video_w
-                h = bbox.height() * video_h
+                # Store normalized [0,1] coordinates — scaled at render time
+                x = bbox.xmin()
+                y = bbox.ymin()
+                w = bbox.width()
+                h = bbox.height()
                 conf = person.get_confidence()
                 write_mot_line(out_file, frame_num, tid, x, y, w, h, conf)
 
@@ -424,11 +432,40 @@ def _compute_hota(results: dict[int, list[tuple]],
     }
 
 
+def _scale_results_to_gt(results: dict[int, list[tuple]],
+                         gt: dict[int, list[tuple]]) -> dict[int, list[tuple]]:
+    """If results are normalized [0,1] and GT is in pixels, infer the GT
+    image size and scale results to match.  Returns a new dict."""
+    if not results or not gt:
+        return results
+    if not _is_normalized(results):
+        return results  # already in pixels
+    # Estimate GT image size from max coordinates
+    max_x = max_y = 0.0
+    for dets in gt.values():
+        for _, x, y, w, h, _ in dets:
+            max_x = max(max_x, x + w)
+            max_y = max(max_y, y + h)
+    if max_x <= 1.5 and max_y <= 1.5:
+        return results  # GT also looks normalized
+    LOGGER.info("Scaling normalized results to GT pixel space (%.0fx%.0f)", max_x, max_y)
+    scaled: dict[int, list[tuple]] = {}
+    for frame, dets in results.items():
+        scaled[frame] = [
+            (tid, x * max_x, y * max_y, w * max_x, h * max_y, conf)
+            for tid, x, y, w, h, conf in dets
+        ]
+    return scaled
+
+
 def _compute_metrics(results: dict[int, list[tuple]],
                      gt: dict[int, list[tuple]],
                      tracker_metrics=None, wall_time: float = 0.0,
                      seq_name: str = ""):
     """Compute and print MOTA, IDF1, HOTA, FP, FN, IDs in MOT Challenge table format."""
+    # Scale normalized results to GT pixel space if needed
+    results = _scale_results_to_gt(results, gt)
+
     all_frames = sorted(set(list(gt.keys()) + list(results.keys())))
 
     # --- HOTA (always available, no extra deps) ---
@@ -525,6 +562,52 @@ _COLORS = [
 ]
 
 
+def _draw_detections(frame, frame_num: int, results: dict, gt: dict,
+                     normalized: bool = False):
+    """Draw GT and tracker boxes on a single frame (in-place).
+
+    If *normalized* is True, result coordinates are in [0,1] and are scaled
+    to the actual frame dimensions.  GT coordinates are always in pixels.
+    """
+    import cv2
+
+    h_frame, w_frame = frame.shape[:2]
+
+    # Draw GT boxes (thin, gray) — always pixel coordinates
+    for gt_det in gt.get(frame_num, []):
+        tid, x, y, bw, bh, _ = gt_det
+        cv2.rectangle(frame, (int(x), int(y)), (int(x + bw), int(y + bh)),
+                      (180, 180, 180), 1)
+
+    # Draw tracker boxes (thick, colored by ID)
+    for det in results.get(frame_num, []):
+        tid, x, y, bw, bh, conf = det
+        if normalized:
+            x, y, bw, bh = x * w_frame, y * h_frame, bw * w_frame, bh * h_frame
+        color = _COLORS[tid % len(_COLORS)]
+        x1, y1, x2, y2 = int(x), int(y), int(x + bw), int(y + bh)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        label = f"ID {tid} {conf:.2f}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
+        cv2.putText(frame, label, (x1 + 2, y1 - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    # Frame counter
+    cv2.putText(frame, f"Frame {frame_num}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+
+def _is_normalized(results: dict[int, list[tuple]]) -> bool:
+    """Heuristic: if all bbox coordinates are in [0, 1], assume normalized."""
+    for dets in results.values():
+        for _, x, y, w, h, _ in dets:
+            if x + w > 1.5 or y + h > 1.5:
+                return False
+    return True
+
+
 def _render_video(results_path: str, images_dir: str, output_video: str,
                   frame_rate: int = 30, gt_path: str | None = None):
     """Draw tracker boxes on frame images and write a video."""
@@ -536,8 +619,8 @@ def _render_video(results_path: str, images_dir: str, output_video: str,
 
     results = load_mot_file(results_path)
     gt = load_mot_file(gt_path) if gt_path else {}
+    norm = _is_normalized(results)
 
-    # Find all images sorted
     img_files = sorted(Path(images_dir).glob("*.jpg"))
     if not img_files:
         img_files = sorted(Path(images_dir).glob("*.png"))
@@ -545,46 +628,66 @@ def _render_video(results_path: str, images_dir: str, output_video: str,
         LOGGER.error("No images found in %s", images_dir)
         return
 
-    # Read first frame to get dimensions
     sample = cv2.imread(str(img_files[0]))
     h, w = sample.shape[:2]
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_video, fourcc, frame_rate, (w, h))
 
-    LOGGER.info("Rendering %d frames to %s ...", len(img_files), output_video)
+    LOGGER.info("Rendering %d frames to %s (normalized=%s) ...",
+                len(img_files), output_video, norm)
 
     for idx, img_path in enumerate(img_files):
         frame_num = idx + 1
         frame = cv2.imread(str(img_path))
-
-        # Draw GT boxes (thin, gray)
-        for gt_det in gt.get(frame_num, []):
-            tid, x, y, bw, bh, _ = gt_det
-            cv2.rectangle(frame, (int(x), int(y)), (int(x + bw), int(y + bh)),
-                          (180, 180, 180), 1)
-
-        # Draw tracker boxes (thick, colored by ID)
-        for det in results.get(frame_num, []):
-            tid, x, y, bw, bh, conf = det
-            color = _COLORS[tid % len(_COLORS)]
-            x1, y1, x2, y2 = int(x), int(y), int(x + bw), int(y + bh)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-            label = f"ID {tid} {conf:.2f}"
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(frame, label, (x1 + 2, y1 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        # Frame counter
-        cv2.putText(frame, f"Frame {frame_num}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
+        _draw_detections(frame, frame_num, results, gt, normalized=norm)
         writer.write(frame)
 
     writer.release()
     LOGGER.info("Video saved: %s", output_video)
+
+
+def _render_video_from_video(results_path: str, input_video: str,
+                             output_video: str, gt_path: str | None = None):
+    """Draw tracker boxes on frames from an input video and write output video."""
+    try:
+        import cv2
+    except ImportError:
+        LOGGER.error("opencv-python not installed. Install with: pip install opencv-python")
+        return
+
+    results = load_mot_file(results_path)
+    gt = load_mot_file(gt_path) if gt_path else {}
+    norm = _is_normalized(results)
+
+    cap = cv2.VideoCapture(input_video)
+    if not cap.isOpened():
+        LOGGER.error("Cannot open video: %s", input_video)
+        return
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_video, fourcc, fps, (w, h))
+
+    LOGGER.info("Rendering %d frames from %s to %s (normalized=%s) ...",
+                total, input_video, output_video, norm)
+
+    frame_num = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_num += 1
+        _draw_detections(frame, frame_num, results, gt, normalized=norm)
+        writer.write(frame)
+
+    cap.release()
+    writer.release()
+    LOGGER.info("Video saved: %s (%d frames)", output_video, frame_num)
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +707,9 @@ def build_parser() -> argparse.ArgumentParser:
              "Auto-detects det/det.txt, gt/gt.txt, img1/, and seqinfo.ini.")
 
     input_group = parser.add_argument_group("input")
+    input_group.add_argument(
+        "--input", metavar="VIDEO",
+        help="Input video file for Hailo pipeline mode (e.g. video.mp4, udp://..., usb, rpi)")
     input_group.add_argument(
         "--detections", metavar="FILE",
         help="Pre-computed detections in MOT format (skip Hailo pipeline)")
@@ -642,6 +748,14 @@ def build_parser() -> argparse.ArgumentParser:
                                help="IOU matching threshold (default: 0.5)")
     tracker_group.add_argument("--frame-rate", type=int, default=30,
                                help="Video frame rate (default: 30)")
+
+    pipeline_group = parser.add_argument_group("pipeline (for --input and --visualize-pipeline)")
+    pipeline_group.add_argument("--model", default=None, metavar="NAME_OR_PATH",
+                                help="HEF model name or path (passed as --hef-path to the Hailo pipeline)")
+    pipeline_group.add_argument("--tiles-x", type=int, default=None,
+                                help="Number of tiles horizontally (passed to Hailo pipeline)")
+    pipeline_group.add_argument("--tiles-y", type=int, default=None,
+                                help="Number of tiles vertically (passed to Hailo pipeline)")
 
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable debug logging")
@@ -697,15 +811,15 @@ def _resolve_seq_dir(args, parser):
         # argparse default is 30; treat it as "not overridden" if still 30
         args.frame_rate = int(info["framerate"])
 
-    # Output file default: <seq_name>_results.txt
-    if args.output == "mot_results.txt":
-        seq_name = info.get("name", seq.name)
-        args.output = f"results_{seq_name}.txt"
-
-    # Auto-enable visualization: <seq_name>.mp4
+    # Output file default: results_<seq_name>-<tracker>.txt
     seq_name = info.get("name", seq.name)
+    tracker = args.tracker
+    if args.output == "mot_results.txt":
+        args.output = f"results_{seq_name}-{tracker}.txt"
+
+    # Auto-enable visualization: <seq_name>-<tracker>.mp4
     if not args.visualize:
-        args.visualize = f"{seq_name}.mp4"
+        args.visualize = f"{seq_name}-{tracker}.mp4"
     # Don't auto-enable pipeline visualization (requires Hailo HW)
 
 
@@ -721,7 +835,23 @@ def main():
     if args.seq_dir:
         _resolve_seq_dir(args, parser)
 
-    if args.detections:
+    # Default output naming for --input mode (no seq_dir)
+    if args.input and not args.seq_dir:
+        stem = Path(args.input).stem if os.path.isfile(args.input) else "pipeline"
+        tracker = args.tracker
+        if args.output == "mot_results.txt":
+            args.output = f"results_{stem}-{tracker}.txt"
+        if not args.visualize:
+            args.visualize = f"{stem}-{tracker}.mp4"
+
+    if args.input and not args.detections:
+        # Pipeline mode — run Hailo detection + tracking on video
+        pipeline_args = _build_pipeline_args(args.input, args, remaining)
+        LOGGER.info("Running Hailo pipeline (%s tracker) on: %s",
+                    args.tracker, args.input)
+        run_from_pipeline(args.output, args.gt, args, pipeline_args)
+
+    elif args.detections:
         # Detections-only mode — no Hailo hardware needed
         if not os.path.isfile(args.detections):
             parser.error(f"Detections file not found: {args.detections}")
@@ -729,17 +859,17 @@ def main():
                     args.tracker, args.detections)
         run_from_detections(args.detections, args.output, args.gt, args)
 
-    elif any(a.startswith("--input") for a in remaining):
-        # Pipeline mode — requires Hailo
-        LOGGER.info("Running full Hailo pipeline")
-        run_from_pipeline(args.output, args.gt, args, remaining)
-
     else:
         parser.error(
             "Provide either SEQ_DIR, --detections <file>, "
-            "or --input <video> (full Hailo pipeline)")
+            "or --input <video> (Hailo pipeline mode)")
 
-    # --- Visualization ---
+    # --- Render tracked video for --input mode (source is a video file) ---
+    if args.input and args.visualize and os.path.isfile(args.input):
+        _render_video_from_video(args.output, args.input, args.visualize,
+                                 gt_path=args.gt)
+
+    # --- Visualization from image sequences ---
     images_dir = args.images_dir
     if not images_dir and args.detections:
         # Auto-detect: .../MOT17-04-SDP/det/det.txt → .../MOT17-04-SDP/img1/
@@ -762,7 +892,8 @@ def main():
                 _images_to_video(images_dir, tmp_video, frame_rate=args.frame_rate)
                 # Run Hailo pipeline on the video to get detections
                 pipeline_output = args.visualize_pipeline.replace(".mp4", "_results.txt")
-                pipeline_args = ["--input", tmp_video] + (args.run_pipeline_args or [])
+                pipeline_args = _build_pipeline_args(
+                    tmp_video, args, args.run_pipeline_args or [])
                 LOGGER.info("Running Hailo pipeline on %s ...", tmp_video)
                 run_from_pipeline(pipeline_output, args.gt, args, pipeline_args)
                 # Render the pipeline results as a video
@@ -774,7 +905,7 @@ def main():
                 except OSError:
                     pass
 
-    elif args.visualize or getattr(args, "visualize_pipeline", None):
+    elif not args.input and (args.visualize or getattr(args, "visualize_pipeline", None)):
         LOGGER.warning("Visualization skipped: no --images-dir found")
 
 

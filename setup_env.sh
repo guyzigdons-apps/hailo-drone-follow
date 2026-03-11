@@ -1,3 +1,2 @@
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
-source "$SCRIPT_DIR/venv/bin/activate"
+export PYTHONPATH="/home/guyz/Desktop/hailo-pai/hailo-drone-follow:$PYTHONPATH"
+source "/home/guyz/Desktop/hailo-pai/hailo-drone-follow/venv/bin/activate"

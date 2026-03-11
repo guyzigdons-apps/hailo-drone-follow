@@ -20,3 +20,4 @@ mot = [
 
 [project.scripts]
 drone-follow = "drone_follow.drone_follow_app:main"
+mot-eval = "drone_follow.tools.mot_eval:main"
