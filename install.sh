@@ -4,7 +4,7 @@ set -e
 # Install script for drone-follow
 # Installs: hailo-apps (base platform), drone-specific Python deps, and UI
 #
-# Expects hailo-apps to be cloned as a sibling directory (../hailo-apps).
+# Expects hailo-apps to be cloned inside the project directory (./hailo-apps).
 # Override with --hailo-apps-dir or HAILO_APPS_DIR env var.
 #
 # Usage: ./install.sh [OPTIONS]
@@ -30,7 +30,7 @@ usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --hailo-apps-dir DIR   Path to hailo-apps checkout (default: ../hailo-apps)"
+    echo "  --hailo-apps-dir DIR   Path to hailo-apps checkout (default: ./hailo-apps)"
     echo "  --skip-hailo-apps      Skip hailo-apps installation (assume already installed)"
     echo "  --skip-ui              Skip UI npm install and build"
     echo "  --skip-python          Skip Python dependency installation"
@@ -61,7 +61,7 @@ echo ""
 
 # ─── Step 1: Install hailo-apps (base platform) ──────────────────────
 if ! $SKIP_HAILO_APPS; then
-    echo -e "${GREEN}[1/3] Checking hailo-apps base platform...${NC}"
+    echo -e "${GREEN}[1/4] Checking hailo-apps base platform...${NC}"
 
     if [ ! -d "$HAILO_APPS_DIR" ]; then
         echo -e "${YELLOW}  hailo-apps not found at: $HAILO_APPS_DIR${NC}"
@@ -71,12 +71,12 @@ if ! $SKIP_HAILO_APPS; then
 
     echo -e "  Using hailo-apps at: ${CYAN}$HAILO_APPS_DIR${NC}"
 else
-    echo -e "${YELLOW}[1/3] Skipping hailo-apps check (--skip-hailo-apps)${NC}"
+    echo -e "${YELLOW}[1/4] Skipping hailo-apps check (--skip-hailo-apps)${NC}"
 fi
 
-# ─── Step 1.5: Install System Dependencies ───────────────────────────
+# ─── Step 2: Install System Dependencies ─────────────────────────────
 if ! $SKIP_HAILO_APPS; then
-    echo -e "${GREEN}[1.5/3] Installing system dependencies...${NC}"
+    echo -e "${GREEN}[2/4] Installing system dependencies...${NC}"
     # List from hailo-apps config.yaml
     SYSTEM_PACKAGES=(
         "meson"
@@ -96,9 +96,9 @@ if ! $SKIP_HAILO_APPS; then
     sudo apt-get install -y "${SYSTEM_PACKAGES[@]}"
 fi
 
-# ─── Step 2: Install drone-follow Python dependencies ────────────────
+# ─── Step 3: Install drone-follow Python dependencies ────────────────
 if ! $SKIP_PYTHON; then
-    echo -e "${GREEN}[2/3] Installing Python dependencies...${NC}"
+    echo -e "${GREEN}[3/4] Installing Python dependencies...${NC}"
 
     # Create venv if not exists (WITH system site packages for gi)
     if [ ! -d "$VENV_DIR" ]; then
@@ -184,12 +184,12 @@ if ! $SKIP_PYTHON; then
 
     echo -e "${GREEN}  Python dependencies installed successfully in venv.${NC}"
 else
-    echo -e "${YELLOW}[2/3] Skipping Python dependencies (--skip-python)${NC}"
+    echo -e "${YELLOW}[3/4] Skipping Python dependencies (--skip-python)${NC}"
 fi
 
-# ─── Step 3: Install and build UI ────────────────────────────────────
+# ─── Step 4: Install and build UI ────────────────────────────────────
 if ! $SKIP_UI; then
-    echo -e "${GREEN}[3/3] Installing and building UI...${NC}"
+    echo -e "${GREEN}[4/4] Installing and building UI...${NC}"
 
     UI_DIR="$SCRIPT_DIR/drone_follow/ui"
     if [ ! -f "$UI_DIR/package.json" ]; then
@@ -210,12 +210,15 @@ if ! $SKIP_UI; then
         echo -e "${GREEN}  UI built successfully.${NC}"
     fi
 else
-    echo -e "${YELLOW}[3/3] Skipping UI installation (--skip-ui)${NC}"
+    echo -e "${YELLOW}[4/4] Skipping UI installation (--skip-ui)${NC}"
 fi
 
-# Create setup_env.sh for convenience
-echo "export PYTHONPATH=\"$SCRIPT_DIR:\$PYTHONPATH\"" > "$SCRIPT_DIR/setup_env.sh"
-echo "source \"$VENV_DIR/bin/activate\"" >> "$SCRIPT_DIR/setup_env.sh"
+# Regenerate setup_env.sh (portable, using SCRIPT_DIR)
+cat > "$SCRIPT_DIR/setup_env.sh" << 'SETUP_EOF'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+source "$SCRIPT_DIR/venv/bin/activate"
+SETUP_EOF
 chmod +x "$SCRIPT_DIR/setup_env.sh"
 
 echo ""

@@ -22,6 +22,7 @@ import signal
 import threading
 import time
 from contextlib import nullcontext
+from pathlib import Path
 
 from drone_follow.follow_api import ControllerConfig, SharedDetectionState
 from drone_follow.follow_api.state import FollowTargetState
@@ -31,6 +32,9 @@ from drone_follow.sim import WorldLoader
 from drone_follow.servers import FollowServer
 
 LOGGER = logging.getLogger("drone_follow.app")
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_BUNDLED_PX4 = _PROJECT_ROOT / "sim" / "PX4-Autopilot"
 
 
 def _configure_logging(verbosity: str) -> None:
@@ -56,8 +60,10 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("app")
 
     # World loading
-    group.add_argument("--px4-path", default=None, metavar="DIR",
-                       help="Path to PX4-Autopilot directory. Required when using --world.")
+    _px4_default = str(_BUNDLED_PX4) if _BUNDLED_PX4.is_dir() else None
+    group.add_argument("--px4-path", default=_px4_default, metavar="DIR",
+                       help="Path to PX4-Autopilot directory. "
+                            "Defaults to bundled sim/PX4-Autopilot submodule if present.")
     group.add_argument("--world", default=None, metavar="NAME_OR_PATH",
                        help="SDF world to load in Gazebo. Can be a name from sdf_examples/ "
                             "(e.g. '2_person_world') or a path to an .sdf file. "
@@ -155,7 +161,10 @@ def main():
     world_loader = None
     if args.world is not None:
         if args.px4_path is None:
-            LOGGER.error("--world requires --px4-path")
+            LOGGER.error(
+                "--world requires PX4-Autopilot. Either:\n"
+                "  1. Run sim/setup_sim.sh to set up the bundled submodule\n"
+                "  2. Pass --px4-path /path/to/PX4-Autopilot explicitly")
             raise SystemExit(1)
         world_loader = WorldLoader(args.px4_path, args.world)
         world_loader.validate()
