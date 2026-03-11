@@ -57,7 +57,7 @@ drone-follow --input usb --serial --ui
 
 # Simulation (see Simulation section for full setup):
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --world 2_person_world --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 ```
 
 ## Virtual Environment
@@ -102,8 +102,7 @@ source setup_env.sh
 drone-follow --input usb --serial --ui
 
 # With Gazebo camera + PX4 SITL (see Simulation section):
-drone-follow --input udp://0.0.0.0:5600 --world 2_person_world \
-    --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 
 # With USB camera + PX4 SITL (yaw only — forward commands unsafe with real webcam):
 drone-follow --input usb --yaw-only --ui
@@ -120,11 +119,11 @@ PX4 SITL + Gazebo Garden runs natively using a bundled PX4-Autopilot git submodu
 sim/setup_sim.sh
 
 # Terminal 1 — Start PX4 SITL + Gazebo + video bridge:
-sim/start_sim.sh --bridge
+sim/start_sim.sh --bridge --world 2_person_world
 
 # Terminal 2 — Run drone-follow:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --world 2_person_world --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 ```
 
 **Key ports:**
@@ -132,7 +131,6 @@ drone-follow --input udp://0.0.0.0:5600 --world 2_person_world --takeoff-landing
 - `5600/udp` — Video feed from Gazebo (via video bridge)
 
 **Bundled worlds** in `drone_follow/sdf_examples/`: `2_person_world`, `2_persons_diagonal`, `random_walk`
-
-**`--px4-path`** defaults to the bundled submodule if present. If `--world` is used and PX4 is not found, the app prints setup instructions.
+Pass `--world NAME` to `start_sim.sh` to load a custom world (uses PX4's native `PX4_GZ_WORLD` env var).
 
 **USB camera with sim:** If using `--input usb` instead of the Gazebo camera, always add `--yaw-only` — forward/altitude commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
