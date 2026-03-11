@@ -12,25 +12,18 @@
 
 ### Steps
 
-1. **Create a virtual environment and install dependencies**:
+1. **Install everything** (venv, Python deps, hailo-apps, UI):
    ```bash
-   python -m venv venv --system-site-packages
    ./install.sh
-   source setup_env.sh
-   pip install -e .
    ```
+   The script creates the virtual environment, installs all Python dependencies,
+   and builds the web UI automatically. Use `--skip-ui` or `--skip-hailo-apps`
+   to skip parts you don't need. Run `./install.sh --help` for all options.
 
-2. **Optional – Web UI** (for `--ui` with live video and click-to-follow):
-
-   Requires **Node.js / npm** to be installed.
+2. **Activate the environment**:
    ```bash
-   cd drone_follow/ui
-   npm install
-   npm run build
-   cd -
+   source setup_env.sh
    ```
-   The built UI is served from `drone_follow/ui/build` when you run with `--ui`.
-   Running with `--ui` without building first will exit with an error message.
 
 3. **Verify** the app parses and shows help:
    ```bash
@@ -50,12 +43,7 @@
    ./QGroundControl-x86_64.AppImage
    ```
 
-3. Run the video bridge:
-   ```bash
-   python drone_follow/tools/video_bridge.py
-   ```
-
-4. Run the drone follow application:
+3. Run the drone follow application:
    ```bash
    drone-follow --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
@@ -124,7 +112,7 @@ Run the app so it listens for video on UDP 5600 and MAVLink on UDP 14560:
 drone-follow --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:14560 --target-bbox-height 0.5
 ```
 
-Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine's IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
+Ensure the PX4 video stream and MAVLink are sent to this machine's IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
 
 ## HTTP Control Server
 
@@ -248,7 +236,7 @@ drone_follow/
   drone_api/           MAVSDK flight controller adapter — offboard velocity commands, takeoff/landing
   pipeline_adapter/    Hailo/GStreamer pipeline + ByteTracker — detection, tracking, target selection
   servers/             HTTP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001)
-  tools/               Standalone utilities (Gazebo video bridge)
+  tools/               Standalone utilities
   sim/                 Simulation helpers (PX4 world loading)
   ui/                  React web dashboard (built separately with npm)
   drone_follow_app.py  Composition root and CLI entrypoint
