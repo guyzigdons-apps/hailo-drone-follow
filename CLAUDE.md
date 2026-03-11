@@ -21,6 +21,7 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
+- `--horizontal-mirror` / `--vertical-mirror` — Both default to on (= 180° rotation for upside-down camera mount). The library uses a single `videoflip rotate-180` when both are set.
 
 ## Drone Connection
 

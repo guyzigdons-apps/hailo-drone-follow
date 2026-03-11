@@ -12,7 +12,7 @@ index 75f30e440d..36ca6d07ea 100644
 -        <dimensions>3</dimensions>
 -      </plugin>
 +    <link name="camera_link">
-+      <pose relative_to="base_link">.12 .03 .242 0 0 0</pose>
++      <pose relative_to="base_link">.12 .03 .242 3.14159 0 0</pose>
 +      <inertial>
 +        <mass>0.050</mass>
 +        <inertia>
