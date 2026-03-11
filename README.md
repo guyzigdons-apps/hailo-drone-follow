@@ -1,5 +1,9 @@
 # Drone Follow Demo
 
+## Setup Guide
+
+For complete setup and deployment instructions with OpenHD, see [SETUP_GUIDE.md](SETUP_GUIDE.md).
+
 ## Installation
 
 ### Prerequisites

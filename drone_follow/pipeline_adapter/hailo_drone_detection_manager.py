@@ -514,8 +514,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             if openhd_stream:
                 openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
                 openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 3917)
-                primary_branch = _openhd_stream_pipeline(
-                    port=openhd_port, bitrate=openhd_bitrate,
+                primary_branch = (
+                    f"{OVERLAY_PIPELINE(name='openhd_overlay')} ! " +
+                    _openhd_stream_pipeline(port=openhd_port, bitrate=openhd_bitrate)
                 )
             elif no_display:
                 primary_branch = f"fakesink sync={self.sync}"

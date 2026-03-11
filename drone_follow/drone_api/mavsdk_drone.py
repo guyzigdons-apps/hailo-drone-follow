@@ -164,7 +164,7 @@ class DetachedMavsdkServer:
             LOGGER.warning("[drone] mavsdk_server not found at %s, using default System() behavior", server_path)
             return self.connection_url  # Fallback to default behavior
 
-        cmd = [server_path, "-u", self.connection_url, "-p", str(self.port)]
+        cmd = [server_path, "-p", str(self.port), self.connection_url]
         LOGGER.info("[drone] Starting detached mavsdk_server: %s", " ".join(cmd))
 
         self.process = subprocess.Popen(
@@ -520,8 +520,11 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
     manage_takeoff_landing = not getattr(args, 'no_takeoff_landing', False)
 
     with DetachedMavsdkServer(args.connection) as connection_url:
-        drone = System()
-        await drone.connect(system_address=connection_url)
+        # Connect to the detached mavsdk_server via gRPC instead of
+        # starting a new internal server.  DetachedMavsdkServer already
+        # launched mavsdk_server with the MAVLink connection URL.
+        drone = System(mavsdk_server_address="127.0.0.1", port=50051)
+        await drone.connect()
 
         if manage_takeoff_landing:
             LOGGER.info("[drone] Connecting and taking off...")
