@@ -174,10 +174,10 @@ if ! $SKIP_PYTHON; then
 
     # ─── Run hailo-post-install ───
     # This downloads resources (HEF files) and compiles C++ bits
+    # Needs sudo because it writes to /usr/local/hailo/resources/
     if command -v hailo-post-install &> /dev/null; then
         echo -e "  Running hailo-post-install (downloading resources)..."
-        # We run with --all to ensure all models are present
-        hailo-post-install --all || echo -e "${YELLOW}  Warning: hailo-post-install failed. You may need to run it manually.${NC}"
+        sudo "$(command -v hailo-post-install)" --all || echo -e "${YELLOW}  Warning: hailo-post-install failed. You may need to run it manually.${NC}"
     else
         echo -e "${YELLOW}  hailo-post-install command not found. Verify hailo-apps installation.${NC}"
     fi
