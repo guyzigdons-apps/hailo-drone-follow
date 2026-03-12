@@ -2,6 +2,8 @@ import numpy as np
 from scipy.stats import chi2
 from scipy.optimize import linear_sum_assignment
 
+from drone_follow.pipeline_adapter.tracker import Tracker, TrackedObject
+
 class KalmanFilter:
     """
     A Kalman filter for tracking bounding boxes in image space.
@@ -496,3 +498,23 @@ class ByteTracker:
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         
         return [t for t in self.tracked_stracks if t.is_activated]
+
+
+class ByteTrackerAdapter(Tracker):
+    """Wraps :class:`ByteTracker` to conform to the :class:`Tracker` protocol."""
+
+    def __init__(self, **kwargs):
+        self._bt = ByteTracker(**kwargs)
+
+    def update(self, detections: np.ndarray) -> list[TrackedObject]:
+
+        stracks = self._bt.update(detections)
+        return [
+            TrackedObject(
+                track_id=t.track_id,
+                input_index=t.input_index,
+                is_activated=t.is_activated,
+                score=t.score,
+            )
+            for t in stracks
+        ]

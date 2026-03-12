@@ -90,6 +90,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ControllerConfig.add_args(parser)
     add_drone_args(parser)
 
+    from drone_follow.pipeline_adapter.tracker_factory import add_tracker_args
+    add_tracker_args(parser)
+
     _add_app_args(parser)
     return parser
 

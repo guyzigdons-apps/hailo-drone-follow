@@ -240,6 +240,9 @@ class _WebHandler(BaseHTTPRequestHandler):
             status = self.target_state.get_status()
         if self.shared_state is not None:
             status["available_ids"] = list(self.shared_state.get_available_ids())
+            metrics = getattr(self.shared_state, "tracker_metrics", None)
+            if metrics is not None:
+                status["tracker"] = metrics.snapshot()
         if self.recording_ctl is not None:
             status["recording"] = self.recording_ctl.is_recording
         self._send_json(status)

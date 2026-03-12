@@ -17,7 +17,8 @@ import numpy as np
 
 from drone_follow.follow_api.types import Detection
 
-from .byte_tracker import ByteTracker
+from .tracker import MetricsTracker
+from .tracker_factory import create_tracker
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -67,8 +68,8 @@ def _update_ui(ui_state, persons, person_to_id, following_id):
     ui_state.update_detections(all_dets, following_id)
 
 
-def _run_tracker(byte_tracker, persons):
-    """Run ByteTracker and return (available_ids, person_by_id, person_to_id).
+def _run_tracker(tracker, persons):
+    """Run tracker and return (available_ids, person_by_id, person_to_id).
 
     person_by_id:  {track_id -> person detection}
     person_to_id:  {id(person) -> track_id}  (reverse lookup)
@@ -86,7 +87,7 @@ def _run_tracker(byte_tracker, persons):
         det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
         det_array[i, 4] = person.get_confidence()
 
-    all_tracks = byte_tracker.update(det_array)
+    all_tracks = tracker.update(det_array)
 
     for t in all_tracks:
         if t.is_activated and 0 <= t.input_index < len(persons):
@@ -119,7 +120,7 @@ def app_callback(element, buffer, user_data):
     ui_state = user_data.ui_state
 
     if not persons:
-        user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
+        user_data.tracker.update(_EMPTY_DET_ARRAY)
         user_data.shared_state.update(None, available_ids=set())
         if target_state is not None and target_state.get_target() is not None:
             target_state.set_target(None)
@@ -129,7 +130,7 @@ def app_callback(element, buffer, user_data):
         return
 
     available_ids, person_by_id, person_to_id = _run_tracker(
-        user_data.byte_tracker, persons)
+        user_data.tracker, persons)
 
     # --- Target selection ---
     target_id = target_state.get_target() if target_state is not None else None
@@ -181,6 +182,13 @@ def app_callback(element, buffer, user_data):
     LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
                 follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
 
+    # Periodic tracker metrics log (~every 10 s at 30 fps)
+    metrics = getattr(user_data.tracker, "metrics", None)
+    if metrics is not None and metrics.total_frames % 300 == 0:
+        LOGGER.info("[tracker] fps=%.1f  update=%.1fms  match=%.0f%%  tracks=%d  id_sw=%d",
+                    metrics.fps, metrics.update_ms, metrics.match_ratio * 100,
+                    metrics.active_tracks, metrics.id_switches)
+
 
 # ---------------------------------------------------------------------------
 # Pipeline app factory
@@ -221,12 +229,12 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     byte_tracker=None):
+                     tracker=None):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
-            self.byte_tracker = byte_tracker
+            self.tracker = tracker
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -433,13 +441,23 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             return ' ! '.join(pipeline_parts)
 
-    tracker = ByteTracker(
-        track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
+    args = parser.parse_known_args()[0] if parser is not None else None
+    tracker_name = getattr(args, "tracker", "byte") if args is not None else "byte"
+
+    t0 = time.monotonic()
+    inner_tracker = create_tracker(
+        tracker_name, track_thresh=0.4, track_buffer=90,
+        match_thresh=0.5, frame_rate=30,
     )
-    LOGGER.info("[tracking] ByteTracker running synchronously in callback")
+    init_ms = (time.monotonic() - t0) * 1000.0
+    tracker = MetricsTracker(inner_tracker, init_time_ms=init_ms)
+    LOGGER.info("[tracking] %s ready (init %.1f ms), running synchronously in callback",
+                tracker_name, init_ms)
+
+    shared_state.tracker_metrics = tracker.metrics
 
     user_data = DroneFollowUserData(
-        shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
+        shared_state, target_state, ui_state=ui_state, tracker=tracker,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,

@@ -15,6 +15,7 @@ class SharedDetectionState:
         self._detection: Optional[Detection] = None
         self._frame_count: int = 0
         self._available_ids: set = set()
+        self.tracker_metrics = None  # set externally to a TrackerMetrics instance
 
     def update(self, detection: Optional[Detection], available_ids: set = None):
         with self._lock:

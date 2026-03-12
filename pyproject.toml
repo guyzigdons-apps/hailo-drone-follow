@@ -21,6 +21,11 @@ exclude = ["configs", "configs.*"]
 hailo = [
     "hailo-apps @ git+https://github.com/hailocs/hailo-apps-internal.git@feature/combined-fixes-and-features",
 ]
+mot = [
+    "motmetrics",
+    "opencv-python",
+]
 
 [project.scripts]
 drone-follow = "drone_follow.drone_follow_app:main"
+mot-eval = "drone_follow.tools.mot_eval:main"
