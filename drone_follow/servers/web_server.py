@@ -427,6 +427,7 @@ class WebServer:
         _WebHandler.follow_server_port = self.follow_server_port
         _WebHandler.recording_ctl = self.recording_ctl
 
+        ThreadingHTTPServer.allow_reuse_address = True
         self.server = ThreadingHTTPServer((self.host, self.port), _WebHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()

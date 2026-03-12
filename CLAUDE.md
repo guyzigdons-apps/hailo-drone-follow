@@ -21,6 +21,7 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
+- `--horizontal-mirror` / `--vertical-mirror` — Both default to on (= 180° rotation for upside-down camera mount). The library uses a single `videoflip rotate-180` when both are set.
 
 ## Drone Connection
 
@@ -55,9 +56,9 @@ By default (no `--takeoff-landing`), the app streams zero setpoints and waits fo
 source setup_env.sh
 drone-follow --input usb --serial --ui
 
-# Simulation (UDP, no --serial):
+# Simulation (see Simulation section for full setup):
 source setup_env.sh
-drone-follow --input rpi --connection udpin://0.0.0.0:14540 --takeoff-landing
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 ```
 
 ## Virtual Environment
@@ -71,41 +72,27 @@ This repo can also run on an x86_64 development machine instead of the RPi targe
 - **Camera:** Use `--input usb` instead of `--input rpi` (auto-detects USB webcam).
 - **Hailo:** Requires a Hailo-8 PCIe card with `hailort` and `hailo-tappas-core` system deb packages installed.
 - **Flight controller:** The Cube Orange+ connects via USB serial at `/dev/ttyACM0`, same as on the RPi.
-- **Simulation:** PX4 SITL + Gazebo Garden runs in Docker via the sibling `hailo_drone_control` project (see below).
+- **Simulation:** Bundled PX4 SITL + Gazebo Garden (see Simulation section below).
 
 ### Installation
 
 Prerequisites:
 - Ubuntu 22.04 with Python 3.10+
 - `hailort` and `hailo-tappas-core` deb packages installed (match your Hailo device)
-- `hailo-apps-internal` repo cloned (must be on the `feature/combined-fixes-and-features` branch)
-- Hailo Python wheel files for your platform (`.whl` for hailort and tappas-core)
 - Node.js / npm (optional, for the web UI)
 
 ```bash
-# 1. Create venv (--system-site-packages needed for GStreamer/gi bindings)
-python3 -m venv --system-site-packages venv
-source venv/bin/activate
-pip install --upgrade pip
+# Run the installer (clones hailo-apps, creates venv, installs everything, builds UI)
+./install.sh
 
-# 2. Install Hailo Python wheels (adjust paths and versions to match your setup)
-pip install /path/to/hailort-<version>-<cpXX>-<cpXX>-linux_x86_64.whl
-pip install /path/to/hailo_tappas_core_python_binding-<version>-py3-none-any.whl
-
-# 3. Install hailo-apps (provides the `hailo` Python module with compiled .so bindings)
-cd /path/to/hailo-apps-internal
-git checkout feature/combined-fixes-and-features
-pip install -e .
-cd -
-
-# 4. Install drone-follow
-pip install -e .
-
-# 5. Build the web UI (optional, for --ui flag)
-cd drone_follow/ui && npm install && npm run build && cd -
+# Options:
+#   --hailo-apps-dir DIR   Use existing hailo-apps checkout (default: ./hailo-apps)
+#   --skip-hailo-apps      Skip hailo-apps clone and system deps (if already set up)
+#   --skip-ui              Skip UI npm install and build
+#   --skip-python          Skip Python dependency installation
 ```
 
-Verify: `drone-follow --help`
+Verify: `source setup_env.sh && drone-follow --help`
 
 ### Running on a dev machine
 
@@ -115,51 +102,36 @@ source setup_env.sh
 # With USB camera + real flight controller over serial:
 drone-follow --input usb --serial --ui
 
-# With USB camera + PX4 SITL via Docker (see Simulation section):
-drone-follow --input usb --connection tcp://127.0.0.1:5760 \
-    --yaw-only --ui
+# With Gazebo camera + PX4 SITL (see Simulation section):
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+
+# With USB camera + PX4 SITL (yaw only — forward commands unsafe with real webcam):
+drone-follow --input usb --yaw-only --ui
 ```
 
-### Simulation (Docker-based PX4 SITL)
+### Simulation (Bundled PX4 SITL)
 
-PX4 SITL + Gazebo Garden runs in Docker via the `hailo_drone_control` sibling project. The Docker stack uses docker-compose profiles and includes these containers:
+PX4 SITL + Gazebo Garden runs natively using a bundled PX4-Autopilot git submodule (v1.14.0) at `sim/PX4-Autopilot`. A video bridge pipes the Gazebo camera feed to the Hailo pipeline via UDP.
 
-| Container | Role | Network IP |
-|-----------|------|------------|
-| `px4-sitl` | PX4 SITL + Gazebo + mavlink-routerd | 172.28.0.10 |
-| `qgroundcontrol` | Ground Control Station GUI | 172.28.0.20 |
-| `px4-control` | Python control scripts runner | 172.28.0.30 |
-| `px4-test-runner` | Integration test runner | 172.28.0.100 |
-
-**Exposed host ports** (from `px4-sitl`):
-- `5760/tcp` — MAVLink TCP server (recommended for drone-follow)
-- `14540/udp` — MAVSDK API for external clients
-- `14551/udp` — QGC for external GCS
-
-The `px4-sitl` container runs `mavlink-routerd` internally, which routes MAVLink telemetry to all other containers and external clients. The `full` profile starts all containers.
+**Prerequisites:** Gazebo Garden (`gz-garden`), `python3-gz-transport13`, `python3-gz-msgs10`
 
 ```bash
-# First time setup:
-cd /path/to/hailo_drone_control
-cp env.example .env
+# One-time setup (inits submodule + builds PX4 — takes 10-20 min first time):
+sim/setup_sim.sh
 
-# Start the simulator (full profile — SITL + QGC + control + test-runner):
-xhost +local:docker
-./scripts/px4ctl.sh start
+# Terminal 1 — Start PX4 SITL + Gazebo + video bridge:
+sim/start_sim.sh --bridge --world 2_person_world
 
-# Check status:
-./scripts/px4ctl.sh status
-
-# Stop the simulator:
-./scripts/px4ctl.sh stop
+# Terminal 2 — Run drone-follow:
+source setup_env.sh
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 ```
 
-Once the simulator is running, connect drone-follow using:
-```bash
-drone-follow --input usb --connection tcp://127.0.0.1:5760 \
-    --yaw-only --ui
-```
+**Key ports:**
+- `14540/udp` — MAVLink (PX4 MAVSDK API, default `--connection`)
+- `5600/udp` — Video feed from Gazebo (via video bridge)
 
-Then arm, take off, and switch to OFFBOARD mode from QGroundControl.
+**Bundled worlds** in `drone_follow/sdf_examples/`: `2_person_world`, `2_persons_diagonal`, `random_walk`
+Pass `--world NAME` to `start_sim.sh` to load a custom world (uses PX4's native `PX4_GZ_WORLD` env var).
 
-Note: `--input usb` uses the local USB webcam since Gazebo's camera feed is not bridged to the host. Because the USB camera sees the real world (not the sim), forward/altitude commands based on bbox size don't make sense — the drone will fly into the ground or backwards at max speed. Always use `--yaw-only` (rotation only) or `--fixed-altitude` in simulation. `--target-distance` should NOT be used with a USB camera in sim as the altitude/distance mismatch causes unsafe commands.
+**USB camera with sim:** If using `--input usb` instead of the Gazebo camera, always add `--yaw-only` — forward/altitude commands based on bbox size are unsafe because the webcam sees the real world, not the sim.

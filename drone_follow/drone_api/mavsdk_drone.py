@@ -510,13 +510,11 @@ async def _wait_for_connection(drone: System) -> bool:
 
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         config=None, ui_state=None, on_connected_cb=None):
+                         config=None, ui_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If config is provided, use it directly (allows live mutation from web UI).
     If ui_state is provided, logs are pushed to the web UI.
-    If on_connected_cb is provided, it is called once after the drone connects
-    (useful for simulation setup teardown, e.g. restoring a world file).
     """
     if config is None:
         config = ControllerConfig.from_args(args)
@@ -565,9 +563,6 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
             raise ConnectionError(
                 f"No drone detected on {args.connection} after {_CONNECTION_TIMEOUT_S}s. "
                 "Pipeline continues without drone control.")
-
-        if on_connected_cb is not None:
-            on_connected_cb()
 
         armed = False
         vel_api = VelocityCommandAPI(drone, config)

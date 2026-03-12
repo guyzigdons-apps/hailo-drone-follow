@@ -117,6 +117,7 @@ class FollowServer:
         FollowServerHandler.target_state = self.target_state
         FollowServerHandler.shared_state = self.shared_state
 
+        HTTPServer.allow_reuse_address = True
         self.server = HTTPServer((self.host, self.port), FollowServerHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
