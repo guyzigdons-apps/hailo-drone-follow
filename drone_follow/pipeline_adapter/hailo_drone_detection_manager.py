@@ -67,7 +67,7 @@ def _update_ui(ui_state, persons, person_to_id, following_id):
     ui_state.update_detections(all_dets, following_id)
 
 
-def _run_tracker(byte_tracker, persons):
+def _run_tracker(byte_tracker, persons, embeddings=None):
     """Run ByteTracker and return (available_ids, person_by_id, person_to_id).
 
     person_by_id:  {track_id -> person detection}
@@ -86,7 +86,7 @@ def _run_tracker(byte_tracker, persons):
         det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
         det_array[i, 4] = person.get_confidence()
 
-    all_tracks = byte_tracker.update(det_array)
+    all_tracks = byte_tracker.update(det_array, embeddings=embeddings)
 
     for t in all_tracks:
         if t.is_activated and 0 <= t.input_index < len(persons):
@@ -128,8 +128,17 @@ def app_callback(element, buffer, user_data):
             LOGGER.debug("[SEARCH MODE] No person detected in frame - follow state cleared")
         return
 
+    # Extract ReID embeddings from each person detection (if available)
+    embeddings = []
+    for person in persons:
+        matrices = person.get_objects_typed(hailo.HAILO_MATRIX)
+        if matrices:
+            embeddings.append(np.array(matrices[0].get_data()))
+        else:
+            embeddings.append(None)
+
     available_ids, person_by_id, person_to_id = _run_tracker(
-        user_data.byte_tracker, persons)
+        user_data.byte_tracker, persons, embeddings=embeddings)
 
     # --- Target selection ---
     target_id = target_state.get_target() if target_state is not None else None
@@ -209,11 +218,20 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         GStreamerTilingApp,
     )
     from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
-    from hailo_apps.python.core.common.core import get_pipeline_parser
+    from hailo_apps.python.core.common.core import get_pipeline_parser, get_resource_path
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
         QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
         TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
+        CROPPER_PIPELINE,
+    )
+    from hailo_apps.python.core.common.defines import (
+        RESOURCES_SO_DIR_NAME,
+        RESOURCES_MODELS_DIR_NAME,
+        REID_POSTPROCESS_SO_FILENAME,
+        ALL_DETECTIONS_CROPPER_POSTPROCESS_SO_FILENAME,
+        REID_CROPPER_POSTPROCESS_FUNCTION,
+        REID_POSTPROCESS_FUNCTION,
     )
 
     if parser is None:
@@ -356,9 +374,107 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 LOGGER.info("[record] Stopped recording: %s", path)
                 return path
 
+        def _build_reid_cropper_pipeline(self):
+            """Build the RepVGG body-ReID cropper+inference sub-pipeline.
+
+            Returns the pipeline string or None if the HEF is not found.
+            """
+            reid_hef = get_resource_path(
+                pipeline_name=None,
+                resource_type=RESOURCES_MODELS_DIR_NAME,
+                arch=self.arch,
+                model='repvgg_a0_person_reid_2048',
+            )
+            if reid_hef is None or not reid_hef.exists():
+                LOGGER.warning("[reid] RepVGG HEF not found (%s) — running without ReID", reid_hef)
+                return None
+
+            reid_so = get_resource_path(
+                pipeline_name=None,
+                resource_type=RESOURCES_SO_DIR_NAME,
+                model=REID_POSTPROCESS_SO_FILENAME,
+            )
+            cropper_so = get_resource_path(
+                pipeline_name=None,
+                resource_type=RESOURCES_SO_DIR_NAME,
+                model=ALL_DETECTIONS_CROPPER_POSTPROCESS_SO_FILENAME,
+            )
+
+            reid_inference = INFERENCE_PIPELINE(
+                hef_path=str(reid_hef),
+                post_process_so=str(reid_so),
+                post_function_name=REID_POSTPROCESS_FUNCTION,
+                batch_size=self.batch_size,
+                config_json=None,
+                name='reid_inference',
+            )
+
+            reid_cropper = CROPPER_PIPELINE(
+                inner_pipeline=reid_inference,
+                so_path=str(cropper_so),
+                function_name=REID_CROPPER_POSTPROCESS_FUNCTION,
+                internal_offset=True,
+                name='reid_cropper',
+            )
+
+            LOGGER.info("[reid] RepVGG body-ReID pipeline enabled (hef=%s)", reid_hef)
+            return reid_cropper
+
         def get_pipeline_string(self):
+            reid_cropper_pipeline = self._build_reid_cropper_pipeline()
+
             if not self._ui_enabled:
-                return super().get_pipeline_string()
+                # Non-UI path: build the same pipeline as the parent class
+                # but with the ReID cropper inserted after tile detection
+                if reid_cropper_pipeline is None:
+                    return super().get_pipeline_string()
+
+                source_pipeline = SOURCE_PIPELINE(
+                    video_source=self.video_source,
+                    video_width=self.video_width,
+                    video_height=self.video_height,
+                    frame_rate=self.frame_rate,
+                    sync=self.sync,
+                    horizontal_mirror=self.horizontal_mirror,
+                    vertical_mirror=self.vertical_mirror,
+                )
+
+                detection_pipeline = INFERENCE_PIPELINE(
+                    hef_path=self.hef_path,
+                    post_process_so=self.post_process_so,
+                    post_function_name=self.post_function,
+                    batch_size=self.batch_size,
+                    config_json=self.labels_json,
+                )
+
+                tiling_mode = 1 if self.use_multi_scale else 0
+                scale_level = self.scale_level if self.use_multi_scale else 0
+                tile_cropper_pipeline = TILE_CROPPER_PIPELINE(
+                    detection_pipeline,
+                    name='tile_cropper_wrapper',
+                    internal_offset=True,
+                    scale_level=scale_level,
+                    tiling_mode=tiling_mode,
+                    tiles_along_x_axis=self.tiles_x,
+                    tiles_along_y_axis=self.tiles_y,
+                    overlap_x_axis=self.overlap_x,
+                    overlap_y_axis=self.overlap_y,
+                    iou_threshold=self.iou_threshold,
+                    border_threshold=self.border_threshold,
+                )
+
+                user_callback_pipeline = USER_CALLBACK_PIPELINE()
+                display_pipeline = DISPLAY_PIPELINE(
+                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                )
+
+                return (
+                    f'{source_pipeline} ! '
+                    f'{tile_cropper_pipeline} ! '
+                    f'{reid_cropper_pipeline} ! '
+                    f'{user_callback_pipeline} ! '
+                    f'{display_pipeline}'
+                )
 
             # Build pipeline with tee: one branch for display, one for MJPEG appsink
             source_pipeline = SOURCE_PIPELINE(
@@ -429,6 +545,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             )
 
             pipeline_parts = [source_pipeline, tile_cropper_pipeline]
+            if reid_cropper_pipeline is not None:
+                pipeline_parts.append(reid_cropper_pipeline)
             pipeline_parts.extend([user_callback_pipeline, output_pipeline])
 
             return ' ! '.join(pipeline_parts)

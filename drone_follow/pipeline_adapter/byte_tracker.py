@@ -93,8 +93,22 @@ class KalmanFilter:
         new_covariance = covariance - np.linalg.multi_dot((kalman_gain, projected_cov, kalman_gain.T))
         return new_mean, new_covariance
 
+def cosine_distance_batch(embeddings_a, embeddings_b):
+    """Compute cosine distance between two sets of embeddings.
+    Returns cost matrix where 0 = identical, 2 = opposite."""
+    if len(embeddings_a) == 0 or len(embeddings_b) == 0:
+        return np.zeros((len(embeddings_a), len(embeddings_b)))
+    a = np.array(embeddings_a)
+    b = np.array(embeddings_b)
+    # Normalize
+    a_norm = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-8)
+    b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-8)
+    # Cosine distance = 1 - cosine_similarity
+    return 1.0 - np.dot(a_norm, b_norm.T)
+
+
 class STrack:
-    def __init__(self, tlwh, score):
+    def __init__(self, tlwh, score, embedding=None):
         self._tlwh = np.asarray(tlwh, dtype=float)
         self.mean, self.covariance = None, None
         self.is_activated = False
@@ -105,6 +119,8 @@ class STrack:
         self.frame_id = 0
         self.tracklet_len = 0
         self.input_index = -1
+        self.smooth_embedding = None
+        self._update_embedding(embedding)
 
     def activate(self, kalman_filter, frame_id):
         self.kalman_filter = kalman_filter
@@ -115,6 +131,18 @@ class STrack:
         self.start_frame = frame_id
         self.tracklet_len = 0
         self.is_activated = True
+
+    def _update_embedding(self, embedding, alpha=0.9):
+        if embedding is not None:
+            embedding = np.asarray(embedding, dtype=np.float32)
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            if self.smooth_embedding is None:
+                self.smooth_embedding = embedding
+            else:
+                self.smooth_embedding = alpha * self.smooth_embedding + (1 - alpha) * embedding
+                self.smooth_embedding /= (np.linalg.norm(self.smooth_embedding) + 1e-8)
 
     def re_activate(self, new_track, frame_id, new_id=False):
         self.mean, self.covariance = self.kalman_filter.update(
@@ -127,6 +155,7 @@ class STrack:
             self.track_id = self.next_id()
         self.score = new_track.score
         self.input_index = new_track.input_index
+        self._update_embedding(new_track.smooth_embedding)
 
     def update(self, new_track, frame_id):
         self.frame_id = frame_id
@@ -139,6 +168,7 @@ class STrack:
         self.is_activated = True
         self.score = new_track.score
         self.input_index = new_track.input_index
+        self._update_embedding(new_track.smooth_embedding)
 
     @property
     def tlwh(self):
@@ -317,8 +347,25 @@ def remove_duplicate_stracks(stracksa, stracksb):
     res_b = [t for i, t in enumerate(stracksb) if i not in dupb]
     return res_a, res_b
 
+def _embedding_cost(track_embs, det_embs):
+    """Compute embedding cost matrix, handling None entries gracefully."""
+    n, m = len(track_embs), len(det_embs)
+    cost = np.ones((n, m), dtype=np.float32)  # default = max cost
+    valid_t = [i for i, e in enumerate(track_embs) if e is not None]
+    valid_d = [j for j, e in enumerate(det_embs) if e is not None]
+    if valid_t and valid_d:
+        a = np.array([track_embs[i] for i in valid_t])
+        b = np.array([det_embs[j] for j in valid_d])
+        sub = cosine_distance_batch(a, b)
+        for ii, ti in enumerate(valid_t):
+            for jj, dj in enumerate(valid_d):
+                cost[ti, dj] = sub[ii, jj]
+    return cost
+
+
 class ByteTracker:
-    def __init__(self, track_thresh=0.5, track_buffer=30, match_thresh=0.5, frame_rate=30):
+    def __init__(self, track_thresh=0.5, track_buffer=30, match_thresh=0.5, frame_rate=30,
+                 gallery_thresh=0.35, gallery_max_size=100):
         self.tracked_stracks = []
         self.lost_stracks = []
         self.removed_stracks = []
@@ -329,7 +376,36 @@ class ByteTracker:
         self.match_thresh = match_thresh  # Lower for turns: allows matching with lower IOU
         self.kalman_filter = KalmanFilter()
 
-    def update(self, output_results, frame=None):
+        # Long-term embedding gallery: track_id → embedding (numpy array)
+        # Survives beyond track_buffer so a person who reappears gets the same ID
+        self._embedding_gallery = {}  # {track_id: np.ndarray}
+        self._gallery_thresh = gallery_thresh
+        self._gallery_max_size = gallery_max_size
+
+    def _gallery_lookup(self, embedding):
+        """Check if an embedding matches any entry in the long-term gallery.
+
+        Returns the matching track_id, or None if no match found.
+        """
+        if embedding is None or not self._embedding_gallery:
+            return None
+        # Collect gallery IDs that are NOT currently active (avoid ID collisions)
+        active_ids = {t.track_id for t in self.tracked_stracks}
+        active_ids |= {t.track_id for t in self.lost_stracks}
+        candidates = {tid: emb for tid, emb in self._embedding_gallery.items()
+                      if tid not in active_ids}
+        if not candidates:
+            return None
+        tids = list(candidates.keys())
+        gallery_embs = np.stack(list(candidates.values()))
+        query = embedding / (np.linalg.norm(embedding) + 1e-8)
+        scores = gallery_embs @ query  # cosine similarity (both are normalized)
+        best_idx = np.argmax(scores)
+        if scores[best_idx] > (1.0 - self._gallery_thresh):  # similarity > 1-thresh
+            return tids[best_idx]
+        return None
+
+    def update(self, output_results, embeddings=None, frame=None):
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
@@ -358,7 +434,11 @@ class ByteTracker:
 
         if len(dets) > 0:
             first_orig_indices = np.where(remain_inds)[0]
-            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for (tlbr, s) in zip(dets, scores_keep)]
+            detections = [
+                STrack(STrack.tlbr_to_tlwh(tlbr), s,
+                       embedding=embeddings[int(idx)] if embeddings is not None and embeddings[int(idx)] is not None else None)
+                for (tlbr, s), idx in zip(zip(dets, scores_keep), first_orig_indices)
+            ]
             for i, det in enumerate(detections):
                 det.input_index = int(first_orig_indices[i])
         else:
@@ -366,7 +446,11 @@ class ByteTracker:
 
         if len(dets_second) > 0:
             second_orig_indices = np.where(inds_second)[0]
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for (tlbr, s) in zip(dets_second, scores_second)]
+            detections_second = [
+                STrack(STrack.tlbr_to_tlwh(tlbr), s,
+                       embedding=embeddings[int(idx)] if embeddings is not None and embeddings[int(idx)] is not None else None)
+                for (tlbr, s), idx in zip(zip(dets_second, scores_second), second_orig_indices)
+            ]
             for i, det in enumerate(detections_second):
                 det.input_index = int(second_orig_indices[i])
         else:
@@ -394,11 +478,16 @@ class ByteTracker:
             if track.state == 2:
                 track.update(det, self.frame_id)
                 activated_starcks.append(track)
+                if track.smooth_embedding is not None:
+                    self._embedding_gallery[track.track_id] = track.smooth_embedding.copy()
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
+                if track.smooth_embedding is not None:
+                    self._embedding_gallery[track.track_id] = track.smooth_embedding.copy()
 
         # Center-distance fallback: catch tracks lost due to shape change (e.g. 90° turn)
+        # Enhanced with embedding similarity when available
         u_track_tracked = [i for i in u_track if strack_pool[i].state == 2]
         if len(u_track_tracked) > 0 and len(u_detection) > 0:
             fallback_tracks = [strack_pool[i] for i in u_track_tracked]
@@ -408,6 +497,15 @@ class ByteTracker:
                 [d.tlbr for d in fallback_dets],
                 alpha=0.6,
             )
+
+            # Fuse with embedding distance if available
+            track_embs = [t.smooth_embedding for t in fallback_tracks]
+            det_embs = [d.smooth_embedding for d in fallback_dets]
+            if any(e is not None for e in track_embs) and any(e is not None for e in det_embs):
+                emb_cost = _embedding_cost(track_embs, det_embs)
+                # Blend: 60% spatial, 40% appearance
+                cdist = 0.6 * cdist + 0.4 * emb_cost
+
             matches_fb, u_track_fb, u_det_fb = linear_assignment(cdist, thresh=0.4)
 
             for itracked, idet in matches_fb:
@@ -419,6 +517,8 @@ class ByteTracker:
                 else:
                     track.re_activate(det, self.frame_id, new_id=False)
                     refind_stracks.append(track)
+                    if track.smooth_embedding is not None:
+                        self._embedding_gallery[track.track_id] = track.smooth_embedding.copy()
 
             # Update unmatched lists to exclude fallback-matched items
             u_track_tracked = [u_track_tracked[i] for i in u_track_fb]
@@ -441,6 +541,8 @@ class ByteTracker:
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
+                if track.smooth_embedding is not None:
+                    self._embedding_gallery[track.track_id] = track.smooth_embedding.copy()
 
         for it in u_track_second:
             track = r_tracked_stracks[it]
@@ -459,8 +561,30 @@ class ByteTracker:
                 det = detections_second_left[idet]
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
+                if track.smooth_embedding is not None:
+                    self._embedding_gallery[track.track_id] = track.smooth_embedding.copy()
 
-        detections = [detections[i] for i in u_detection]
+        # Embedding-based re-identification: lost tracks vs remaining high-conf detections
+        # This helps recover identity after occlusion or brief disappearance
+        remaining_dets = [detections[i] for i in u_detection]
+        remaining_lost = [t for t in self.lost_stracks
+                         if t.smooth_embedding is not None and t not in r_lost_stracks]  # exclude already-tried lost
+        if remaining_lost and remaining_dets:
+            lost_embs = [t.smooth_embedding for t in remaining_lost]
+            rdet_embs = [d.smooth_embedding for d in remaining_dets]
+            if any(e is not None for e in rdet_embs):
+                emb_dists = _embedding_cost(lost_embs, rdet_embs)
+                matches_reid, u_lost_reid, u_det_reid = linear_assignment(emb_dists, thresh=0.3)
+                for itracked, idet in matches_reid:
+                    track = remaining_lost[itracked]
+                    det = remaining_dets[idet]
+                    track.re_activate(det, self.frame_id, new_id=False)
+                    refind_stracks.append(track)
+                    if track.smooth_embedding is not None:
+                        self._embedding_gallery[track.track_id] = track.smooth_embedding.copy()
+                # Update remaining detections list
+                remaining_dets = [remaining_dets[i] for i in u_det_reid]
+        detections = remaining_dets
         dists = iou_batch([t.tlbr for t in unconfirmed], [d.tlbr for d in detections])
         dists = 1.0 - dists
         matches, u_unconfirmed, u_detection = linear_assignment(dists, thresh=0.7)
@@ -478,11 +602,25 @@ class ByteTracker:
             track = detections[inew]
             if track.score < self.det_thresh:
                 continue
+            # Gallery lookup: check if this detection matches a previously-seen person
+            gallery_match_id = self._gallery_lookup(track.smooth_embedding)
             track.activate(self.kalman_filter, self.frame_id)
+            if gallery_match_id is not None:
+                track.track_id = gallery_match_id  # restore original ID
+            # Update gallery with latest embedding for this ID
+            if track.smooth_embedding is not None:
+                self._embedding_gallery[track.track_id] = track.smooth_embedding.copy()
             activated_starcks.append(track)
 
         for track in self.lost_stracks:
             if self.frame_id - track.frame_id > self.track_buffer:
+                # Save embedding to gallery before removing — enables long-term re-id
+                if track.smooth_embedding is not None:
+                    self._embedding_gallery[track.track_id] = track.smooth_embedding.copy()
+                    # Evict oldest entries if gallery exceeds max size
+                    if len(self._embedding_gallery) > self._gallery_max_size:
+                        oldest_id = next(iter(self._embedding_gallery))
+                        del self._embedding_gallery[oldest_id]
                 track.state = 4
                 removed_stracks.append(track)
 
