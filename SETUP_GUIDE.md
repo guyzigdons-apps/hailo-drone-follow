@@ -433,6 +433,7 @@ Deployed to: `/usr/local/share/openhd/df_params.json` (on both units)
 | `label`      | Display name in QOpenHD |
 | `description`| Tooltip / help text |
 | `read_only`  | If `true`, displayed as read-only text (no control) |
+| `hidden`     | If `true`, param is registered in MAVLink but not shown in the DroneFollow settings tab (e.g. controlled via OSD widget instead) |
 
 ---
 

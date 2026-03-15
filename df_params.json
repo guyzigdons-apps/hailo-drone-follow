@@ -204,7 +204,8 @@
       "order": 1,
       "label": "Active tracked ID",
       "description": "Read-only — the person ID currently being followed (0 = none)",
-      "read_only": true
+      "read_only": true,
+      "hidden": true
     },
     {
       "id": "follow_id",
@@ -218,7 +219,8 @@
       "order": 2,
       "label": "Follow ID",
       "description": "-1 = idle (hold position), 0 = auto (largest person), >0 = lock to specific ID",
-      "read_only": false
+      "read_only": false,
+      "hidden": true
     },
     {
       "id": "bitrate_kbps",
