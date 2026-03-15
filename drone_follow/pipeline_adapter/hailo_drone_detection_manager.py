@@ -196,7 +196,8 @@ def app_callback(element, buffer, user_data):
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
-               parser: Optional[argparse.ArgumentParser] = None, record_dir=None):
+               parser: Optional[argparse.ArgumentParser] = None, record_dir=None,
+               tracker_name: Optional[str] = None):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -436,13 +437,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 f"ui_tee. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
             )
 
-            pipeline_parts = [source_pipeline, tile_cropper_pipeline]
-            pipeline_parts.extend([user_callback_pipeline, output_pipeline])
+            pipeline_parts = [source_pipeline, tile_cropper_pipeline,
+                              user_callback_pipeline, output_pipeline]
 
             return ' ! '.join(pipeline_parts)
 
     args = parser.parse_known_args()[0] if parser is not None else None
-    tracker_name = getattr(args, "tracker", "byte") if args is not None else "byte"
+    if tracker_name is None:
+        tracker_name = getattr(args, "tracker", "byte") if args is not None else "byte"
 
     t0 = time.monotonic()
     inner_tracker = create_tracker(
