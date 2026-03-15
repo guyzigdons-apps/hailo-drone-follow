@@ -2,7 +2,7 @@
 
 Supported trackers:
     - ``byte`` (default): ByteTracker — lightweight, no extra deps
-    - ``fast``: FastTracker — occlusion-aware, requires ``yolox`` package
+    - ``fast``: FastTracker — occlusion-aware
 """
 
 from __future__ import annotations
@@ -31,15 +31,15 @@ def create_tracker(name: str, *, track_thresh: float = 0.4,
     Returns:
         A tracker satisfying the :class:`Tracker` protocol.
     """
-    kwargs = dict(track_thresh=track_thresh, track_buffer=track_buffer,
+    common = dict(track_thresh=track_thresh, track_buffer=track_buffer,
                   match_thresh=match_thresh, frame_rate=frame_rate)
 
     if name == "byte":
         from .byte_tracker import ByteTrackerAdapter
-        return ByteTrackerAdapter(**kwargs)
+        return ByteTrackerAdapter(**common)
     elif name == "fast":
         from .fast_tracker import FastTrackerAdapter
-        return FastTrackerAdapter(**kwargs)
+        return FastTrackerAdapter(**common)
     else:
         raise ValueError(f"Unknown tracker: {name!r}. Choose from {TRACKER_CHOICES}")
 
