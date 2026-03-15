@@ -45,8 +45,13 @@ LOGGER = logging.getLogger("mot_eval")
 # MOT I/O helpers
 # ---------------------------------------------------------------------------
 
-def load_mot_file(path: str) -> dict[int, list[tuple]]:
+def load_mot_file(path: str, is_gt: bool = False) -> dict[int, list[tuple]]:
     """Load a MOT Challenge format file.
+
+    Args:
+        path: Path to the MOT file.
+        is_gt: If True, apply MOT Challenge GT filtering:
+               keep only flag==1 (active) and class==1 (pedestrian).
 
     Returns {frame_number: [(id, x, y, w, h, conf), ...]}.
     """
@@ -60,6 +65,13 @@ def load_mot_file(path: str) -> dict[int, list[tuple]]:
             tid = int(row[1])
             x, y, w, h = float(row[2]), float(row[3]), float(row[4]), float(row[5])
             conf = float(row[6]) if len(row) > 6 else 1.0
+
+            if is_gt and len(row) >= 8:
+                flag = int(row[6])
+                cls = int(row[7])
+                if flag != 1 or cls != 1:
+                    continue
+
             data[frame].append((tid, x, y, w, h, conf))
     return dict(data)
 
@@ -74,7 +86,8 @@ def write_mot_line(f, frame: int, tid: int, x: float, y: float,
 # ---------------------------------------------------------------------------
 
 def run_from_detections(det_path: str, output_path: str,
-                        gt_path: str | None, args: argparse.Namespace):
+                        gt_path: str | None, args: argparse.Namespace,
+                        quiet: bool = False) -> dict | None:
     """Run tracker on pre-computed detections in MOT format.
 
     Detection file format (per line):
@@ -143,13 +156,10 @@ def run_from_detections(det_path: str, output_path: str,
     # Derive sequence name from detection path (e.g. .../MOT17-04-SDP/det/det.txt → MOT17-04-SDP)
     seq_name = Path(det_path).resolve().parent.parent.name
 
-    if gt_path:
-        gt = load_mot_file(gt_path)
-        _compute_metrics(results, gt, tracker_metrics=tracker,
-                         wall_time=wall_time, seq_name=seq_name)
-    else:
-        _compute_metrics(results, {}, tracker_metrics=tracker,
-                         wall_time=wall_time, seq_name=seq_name)
+    gt = load_mot_file(gt_path, is_gt=True) if gt_path else {}
+    return _compute_metrics(results, gt, tracker_metrics=tracker,
+                            wall_time=wall_time, seq_name=seq_name,
+                            quiet=quiet)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +198,10 @@ def _images_to_video(images_dir: str, output_path: str, frame_rate: int = 30) ->
 # ---------------------------------------------------------------------------
 
 def run_from_pipeline(output_path: str, gt_path: str | None,
-                      args: argparse.Namespace, remaining_args: list[str]):
+                      args: argparse.Namespace, remaining_args: list[str],
+                      reference_detections: dict[int, list[tuple]] | None = None,
+                      image_size: tuple[int, int] | None = None,
+                      quiet: bool = False) -> dict:
     """Run the full Hailo pipeline on a video, collect tracker output."""
     from drone_follow.follow_api import SharedDetectionState
     from drone_follow.follow_api.state import FollowTargetState
@@ -203,11 +216,16 @@ def run_from_pipeline(output_path: str, gt_path: str | None,
     _inject_args(remaining_args)
 
     from drone_follow.pipeline_adapter import create_app
+    tracker = getattr(args, "tracker", None)
     app = create_app(shared_state, target_state=target_state,
-                     eos_reached=eos_reached, parser=parser)
+                     eos_reached=eos_reached, parser=parser,
+                     tracker_name=tracker)
 
     # Hook into the tracker to capture per-frame results (normalized [0,1] coords)
-    _hook_tracker_output(app, results={}, output_path=output_path)
+    # Also capture raw detections (before tracking) for detection AP
+    raw_detections: dict[int, list[tuple]] = {}
+    _hook_tracker_output(app, results={}, output_path=output_path,
+                         raw_detections=raw_detections)
 
     def on_signal(*_):
         eos_reached.set()
@@ -242,10 +260,14 @@ def run_from_pipeline(output_path: str, gt_path: str | None,
 
     all_results = _read_back_results(output_path)
     tracker_metrics = getattr(shared_state, "tracker_metrics", None)
-    gt = load_mot_file(gt_path) if gt_path else {}
-    _compute_metrics(all_results, gt, tracker_metrics=tracker_metrics,
-                     wall_time=wall_time,
-                     seq_name=Path(output_path).stem)
+    gt = load_mot_file(gt_path, is_gt=True) if gt_path else {}
+    return _compute_metrics(all_results, gt, tracker_metrics=tracker_metrics,
+                            wall_time=wall_time,
+                            seq_name=Path(output_path).stem,
+                            raw_detections=raw_detections or None,
+                            reference_detections=reference_detections,
+                            image_size=image_size,
+                            quiet=quiet)
 
 
 def _build_pipeline_args(input_source: str, args: argparse.Namespace,
@@ -258,6 +280,18 @@ def _build_pipeline_args(input_source: str, args: argparse.Namespace,
         pipeline_args += ["--tiles-x", str(args.tiles_x)]
     if getattr(args, "tiles_y", None) is not None:
         pipeline_args += ["--tiles-y", str(args.tiles_y)]
+    if getattr(args, "multi_scale", False):
+        pipeline_args += ["--multi-scale"]
+    if getattr(args, "scale_levels", None) is not None:
+        pipeline_args += ["--scale-levels", str(args.scale_levels)]
+    if getattr(args, "iou_threshold", None) is not None:
+        pipeline_args += ["--iou-threshold", str(args.iou_threshold)]
+    if getattr(args, "min_overlap", None) is not None:
+        pipeline_args += ["--min-overlap", str(args.min_overlap)]
+    if getattr(args, "detection_threshold", None) is not None:
+        pipeline_args += ["--detection-threshold", str(args.detection_threshold)]
+    if getattr(args, "border_threshold", None) is not None:
+        pipeline_args += ["--border-threshold", str(args.border_threshold)]
     if extra:
         pipeline_args += extra
     return pipeline_args
@@ -269,12 +303,16 @@ def _inject_args(extra_args: list[str]):
     sys.argv = [sys.argv[0]] + extra_args
 
 
-def _hook_tracker_output(app, results: dict, output_path: str, **_kw):
+def _hook_tracker_output(app, results: dict, output_path: str,
+                         raw_detections: dict | None = None, **_kw):
     """Monkey-patch the tracker to intercept per-frame results.
 
     We wrap tracker.update() to capture every frame's output and write
     MOT lines as they come in.  Coordinates are stored as **normalized**
     [0,1] values so they can be scaled to any resolution at render time.
+
+    If *raw_detections* dict is provided, also captures raw detections
+    (before tracking) for detection-level mAP evaluation.
     """
     from drone_follow.pipeline_adapter import hailo_drone_detection_manager as mgr
 
@@ -299,6 +337,19 @@ def _hook_tracker_output(app, results: dict, output_path: str, **_kw):
                 h = bbox.height()
                 conf = person.get_confidence()
                 write_mot_line(out_file, frame_num, tid, x, y, w, h, conf)
+
+            # Capture raw detections (before tracking) for mAP
+            if raw_detections is not None:
+                frame_dets = []
+                for person in persons:
+                    bbox = person.get_bbox()
+                    frame_dets.append((
+                        -1,  # no track id for raw detections
+                        bbox.xmin(), bbox.ymin(),
+                        bbox.width(), bbox.height(),
+                        person.get_confidence(),
+                    ))
+                raw_detections[frame_num] = frame_dets
 
         return available_ids, person_by_id, person_to_id
 
@@ -432,27 +483,103 @@ def _compute_hota(results: dict[int, list[tuple]],
     }
 
 
-def _scale_results_to_gt(results: dict[int, list[tuple]],
-                         gt: dict[int, list[tuple]]) -> dict[int, list[tuple]]:
-    """If results are normalized [0,1] and GT is in pixels, infer the GT
-    image size and scale results to match.  Returns a new dict."""
-    if not results or not gt:
-        return results
-    if not _is_normalized(results):
-        return results  # already in pixels
-    # Estimate GT image size from max coordinates
-    max_x = max_y = 0.0
-    for dets in gt.values():
-        for _, x, y, w, h, _ in dets:
-            max_x = max(max_x, x + w)
-            max_y = max(max_y, y + h)
-    if max_x <= 1.5 and max_y <= 1.5:
-        return results  # GT also looks normalized
-    LOGGER.info("Scaling normalized results to GT pixel space (%.0fx%.0f)", max_x, max_y)
+def _compute_detection_ap(raw_detections: dict[int, list[tuple]],
+                          gt: dict[int, list[tuple]],
+                          iou_thresh: float = 0.5) -> dict:
+    """Compute detection-level AP (Average Precision) at a given IoU threshold.
+
+    Compares raw detections (before tracking) against ground truth.
+    Returns dict with AP, precision, recall, total_tp, total_fp, total_fn.
+    """
+    all_frames = sorted(set(list(gt.keys()) + list(raw_detections.keys())))
+
+    # Collect all predictions with scores for ranking
+    all_preds = []  # (score, is_tp)
+    total_gt = 0
+
+    for frame in all_frames:
+        gt_dets = gt.get(frame, [])
+        pred_dets = raw_detections.get(frame, [])
+        total_gt += len(gt_dets)
+
+        if not pred_dets:
+            continue
+
+        gt_boxes = _to_xyxy(gt_dets)
+        pred_boxes = _to_xyxy(pred_dets)
+        pred_scores = [d[5] for d in pred_dets]
+
+        if len(gt_boxes) == 0:
+            for s in pred_scores:
+                all_preds.append((s, False))
+            continue
+
+        iou = _iou_matrix(gt_boxes, pred_boxes)
+        gt_matched = set()
+
+        # Sort predictions by score (descending) for greedy matching
+        sorted_idx = sorted(range(len(pred_scores)),
+                            key=lambda i: pred_scores[i], reverse=True)
+        for pi in sorted_idx:
+            best_iou = 0.0
+            best_gi = -1
+            for gi in range(len(gt_boxes)):
+                if gi in gt_matched:
+                    continue
+                if iou[gi, pi] > best_iou:
+                    best_iou = iou[gi, pi]
+                    best_gi = gi
+            if best_iou >= iou_thresh and best_gi >= 0:
+                all_preds.append((pred_scores[pi], True))
+                gt_matched.add(best_gi)
+            else:
+                all_preds.append((pred_scores[pi], False))
+
+    if not all_preds or total_gt == 0:
+        return {"AP": 0.0, "precision": 0.0, "recall": 0.0,
+                "total_tp": 0, "total_fp": 0, "total_fn": total_gt}
+
+    # Sort by score descending and compute precision-recall curve
+    all_preds.sort(key=lambda x: x[0], reverse=True)
+    tp_cumsum = 0
+    fp_cumsum = 0
+    precisions = []
+    recalls = []
+
+    for score, is_tp in all_preds:
+        if is_tp:
+            tp_cumsum += 1
+        else:
+            fp_cumsum += 1
+        precisions.append(tp_cumsum / (tp_cumsum + fp_cumsum))
+        recalls.append(tp_cumsum / total_gt)
+
+    # 11-point interpolated AP
+    ap = 0.0
+    for t in np.arange(0.0, 1.1, 0.1):
+        p_at_r = max((p for p, r in zip(precisions, recalls) if r >= t), default=0.0)
+        ap += p_at_r / 11.0
+
+    return {
+        "AP": ap,
+        "precision": precisions[-1] if precisions else 0.0,
+        "recall": recalls[-1] if recalls else 0.0,
+        "total_tp": tp_cumsum,
+        "total_fp": fp_cumsum,
+        "total_fn": total_gt - tp_cumsum,
+    }
+
+
+def _scale_normalized_results(results: dict[int, list[tuple]],
+                              image_width: float, image_height: float,
+                              ) -> dict[int, list[tuple]]:
+    """Scale normalized [0,1] results to pixel coordinates."""
+    LOGGER.info("Scaling normalized results to %dx%d", int(image_width), int(image_height))
     scaled: dict[int, list[tuple]] = {}
     for frame, dets in results.items():
         scaled[frame] = [
-            (tid, x * max_x, y * max_y, w * max_x, h * max_y, conf)
+            (tid, x * image_width, y * image_height,
+             w * image_width, h * image_height, conf)
             for tid, x, y, w, h, conf in dets
         ]
     return scaled
@@ -461,10 +588,42 @@ def _scale_results_to_gt(results: dict[int, list[tuple]],
 def _compute_metrics(results: dict[int, list[tuple]],
                      gt: dict[int, list[tuple]],
                      tracker_metrics=None, wall_time: float = 0.0,
-                     seq_name: str = ""):
-    """Compute and print MOTA, IDF1, HOTA, FP, FN, IDs in MOT Challenge table format."""
-    # Scale normalized results to GT pixel space if needed
-    results = _scale_results_to_gt(results, gt)
+                     seq_name: str = "",
+                     raw_detections: dict[int, list[tuple]] | None = None,
+                     reference_detections: dict[int, list[tuple]] | None = None,
+                     image_size: tuple[int, int] | None = None,
+                     quiet: bool = False) -> dict:
+    """Compute and print MOTA, IDF1, HOTA, FP, FN, IDs in MOT Challenge table format.
+
+    Args:
+        raw_detections: Raw detections (before tracking) for AP computation.
+        reference_detections: Reference detections to compare against (e.g. det.txt).
+            If provided, detection AP is computed against these instead of GT.
+        image_size: (width, height) for scaling normalized results. If None,
+            inferred from seqinfo.ini or GT.
+        quiet: If True, suppress printing (just return the dict).
+
+    Returns:
+        Dict with all computed metrics.
+    """
+    # Scale normalized results to pixel space if needed
+    if _is_normalized(results) and results:
+        if image_size:
+            w, h = image_size
+        else:
+            # Fallback: estimate from reference detections or GT max coordinates
+            ref = reference_detections or gt
+            w = h = 0.0
+            for dets in ref.values():
+                for _, x, y, bw, bh, _ in dets:
+                    w = max(w, x + bw)
+                    h = max(h, y + bh)
+            if w <= 1.5 and h <= 1.5:
+                w = h = 1.0  # both normalized, no scaling needed
+        if w > 1.5 or h > 1.5:
+            results = _scale_normalized_results(results, w, h)
+            if raw_detections:
+                raw_detections = _scale_normalized_results(raw_detections, w, h)
 
     all_frames = sorted(set(list(gt.keys()) + list(results.keys())))
 
@@ -513,8 +672,36 @@ def _compute_metrics(results: dict[int, list[tuple]],
         m = getattr(tracker_metrics, "metrics", tracker_metrics)
         avg_update = m.update_ms
 
+    # --- Build result dict ---
+    det_ap = None
+    if raw_detections and reference_detections:
+        det_ap = _compute_detection_ap(raw_detections, reference_detections, iou_thresh=0.5)
+    elif raw_detections and gt:
+        det_ap = _compute_detection_ap(raw_detections, gt, iou_thresh=0.5)
+
+    result = {
+        "seq_name": seq_name or "Sequence",
+        "MOTA": mota,
+        "IDF1": idf1,
+        "HOTA": hota_pct,
+        "DetA": hota_scores["DetA"] * 100,
+        "AssA": hota_scores["AssA"] * 100,
+        "FP": fp,
+        "FN": fn,
+        "IDs": ids,
+        "frames": n_frames,
+        "wall_time": wall_time,
+        "fps": fps_val,
+        "init_ms": init_ms,
+        "avg_update_ms": avg_update,
+        "det_ap": det_ap,
+    }
+
+    if quiet:
+        return result
+
     # --- Print MOT Challenge style table ---
-    label = seq_name or "Sequence"
+    label = result["seq_name"]
 
     print()
     header = f"{'Dataset':<16} {'MOTA':>6} {'IDF1':>6} {'HOTA':>6} {'FP':>8} {'FN':>8} {'IDs':>6}"
@@ -545,7 +732,17 @@ def _compute_metrics(results: dict[int, list[tuple]],
 
     # HOTA breakdown
     print(f"  DetA: {hota_scores['DetA']*100:.1f}  |  AssA: {hota_scores['AssA']*100:.1f}")
+
+    # Detection-level AP
+    if det_ap is not None:
+        ap_label = "vs ref" if (raw_detections and reference_detections) else "vs GT"
+        print(f"  Detection AP@50 ({ap_label}): {det_ap['AP']*100:.1f}  |  "
+              f"Precision: {det_ap['precision']*100:.1f}  |  "
+              f"Recall: {det_ap['recall']*100:.1f}  |  "
+              f"TP: {det_ap['total_tp']}  FP: {det_ap['total_fp']}  FN: {det_ap['total_fn']}")
     print()
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -618,7 +815,7 @@ def _render_video(results_path: str, images_dir: str, output_video: str,
         return
 
     results = load_mot_file(results_path)
-    gt = load_mot_file(gt_path) if gt_path else {}
+    gt = load_mot_file(gt_path, is_gt=True) if gt_path else {}
     norm = _is_normalized(results)
 
     img_files = sorted(Path(images_dir).glob("*.jpg"))
@@ -657,7 +854,7 @@ def _render_video_from_video(results_path: str, input_video: str,
         return
 
     results = load_mot_file(results_path)
-    gt = load_mot_file(gt_path) if gt_path else {}
+    gt = load_mot_file(gt_path, is_gt=True) if gt_path else {}
     norm = _is_normalized(results)
 
     cap = cv2.VideoCapture(input_video)
@@ -696,7 +893,7 @@ def _render_video_from_video(results_path: str, input_video: str,
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run ByteTracker on video and compute MOT metrics.",
+        description="Run tracker on video and compute MOT metrics.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -756,6 +953,22 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="Number of tiles horizontally (passed to Hailo pipeline)")
     pipeline_group.add_argument("--tiles-y", type=int, default=None,
                                 help="Number of tiles vertically (passed to Hailo pipeline)")
+    pipeline_group.add_argument("--multi-scale", action="store_true", default=False,
+                                help="Enable multi-scale tiling (adds full-frame pass)")
+    pipeline_group.add_argument("--scale-levels", type=int, default=None, choices=[1, 2, 3],
+                                help="Scale levels for multi-scale: 1={1x1}, 2={1x1+2x2}, 3={1x1+2x2+3x3}")
+    pipeline_group.add_argument("--iou-threshold", type=float, default=None,
+                                help="NMS IOU threshold for tile aggregation (default: 0.3)")
+    pipeline_group.add_argument("--min-overlap", type=float, default=None,
+                                help="Minimum tile overlap ratio (default: 0.1)")
+    pipeline_group.add_argument("--detection-threshold", type=float, default=None,
+                                help="Override detection confidence threshold in post-processing")
+    pipeline_group.add_argument("--border-threshold", type=float, default=None,
+                                help="Border threshold for multi-scale mode (default: 0.15)")
+
+    parser.add_argument("--compare", action="store_true", default=False,
+                        help="Run both pre-computed detections and Hailo pipeline, "
+                             "then print a side-by-side gap analysis (requires SEQ_DIR with img1/)")
 
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable debug logging")
@@ -811,6 +1024,12 @@ def _resolve_seq_dir(args, parser):
         # argparse default is 30; treat it as "not overridden" if still 30
         args.frame_rate = int(info["framerate"])
 
+    # Image size from seqinfo.ini (for scaling normalized coords)
+    if "imwidth" in info and "imheight" in info:
+        args.image_size = (int(info["imwidth"]), int(info["imheight"]))
+    else:
+        args.image_size = None
+
     # Output file default: results_<seq_name>-<tracker>.txt
     seq_name = info.get("name", seq.name)
     tracker = args.tracker
@@ -821,6 +1040,95 @@ def _resolve_seq_dir(args, parser):
     if not args.visualize:
         args.visualize = f"{seq_name}-{tracker}.mp4"
     # Don't auto-enable pipeline visualization (requires Hailo HW)
+
+
+def _print_comparison(baseline: dict, pipeline: dict):
+    """Print a side-by-side gap analysis between baseline and pipeline metrics."""
+    def _fmt(v, fmt=".1f"):
+        if v is None:
+            return "N/A"
+        return f"{v:{fmt}}"
+
+    def _delta(base, pipe, fmt=".1f", invert=False):
+        """Format delta. invert=True means lower is better (FP, FN, IDs)."""
+        if base is None or pipe is None:
+            return ""
+        d = pipe - base
+        if invert:
+            d = -d
+        sign = "+" if d > 0 else ""
+        color = "" if d == 0 else (" ^^^" if d < 0 else "")
+        return f"{sign}{d:{fmt}}{color}"
+
+    print()
+    print("=" * 78)
+    print("  GAP ANALYSIS: Pre-computed Detections vs Hailo Pipeline")
+    print("=" * 78)
+
+    header = f"{'Metric':<22} {'Baseline':>10} {'Pipeline':>10} {'Delta':>12}  {'Note'}"
+    print(header)
+    print("-" * 78)
+
+    rows = [
+        ("MOTA",        baseline["MOTA"],  pipeline["MOTA"],  False, ".1f", "higher=better"),
+        ("IDF1",        baseline["IDF1"],  pipeline["IDF1"],  False, ".1f", "higher=better"),
+        ("HOTA",        baseline["HOTA"],  pipeline["HOTA"],  False, ".1f", "higher=better"),
+        ("  DetA",      baseline["DetA"],  pipeline["DetA"],  False, ".1f", "detection quality"),
+        ("  AssA",      baseline["AssA"],  pipeline["AssA"],  False, ".1f", "association quality"),
+        ("FP",          baseline["FP"],    pipeline["FP"],    True,  "d",   "lower=better"),
+        ("FN",          baseline["FN"],    pipeline["FN"],    True,  "d",   "lower=better"),
+        ("ID Switches", baseline["IDs"],   pipeline["IDs"],   True,  "d",   "lower=better"),
+    ]
+
+    for label, bv, pv, invert, fmt, note in rows:
+        print(f"{label:<22} {_fmt(bv, fmt):>10} {_fmt(pv, fmt):>10} "
+              f"{_delta(bv, pv, fmt, invert):>12}  {note}")
+
+    print("-" * 78)
+
+    # Performance
+    print(f"{'FPS':<22} {baseline['fps']:>10.1f} {pipeline['fps']:>10.1f}")
+    if baseline["avg_update_ms"] and pipeline["avg_update_ms"]:
+        print(f"{'Avg update (ms)':<22} {baseline['avg_update_ms']:>10.2f} "
+              f"{pipeline['avg_update_ms']:>10.2f}")
+
+    # Detection AP (pipeline only)
+    det_ap = pipeline.get("det_ap")
+    if det_ap:
+        print()
+        print(f"  Pipeline Detection AP@50: {det_ap['AP']*100:.1f}%")
+        print(f"  Precision: {det_ap['precision']*100:.1f}%  "
+              f"Recall: {det_ap['recall']*100:.1f}%  "
+              f"TP: {det_ap['total_tp']}  FP: {det_ap['total_fp']}  FN: {det_ap['total_fn']}")
+
+    # Diagnosis
+    print()
+    print("  DIAGNOSIS:")
+    if baseline["MOTA"] is not None and pipeline["MOTA"] is not None:
+        mota_gap = baseline["MOTA"] - pipeline["MOTA"]
+        deta_gap = baseline["DetA"] - pipeline["DetA"]
+        assa_gap = baseline["AssA"] - pipeline["AssA"]
+        fn_ratio = (pipeline["FN"] / max(baseline["FN"], 1)) if baseline["FN"] else 0
+
+        if deta_gap > assa_gap * 2:
+            print(f"  >> Detection is the bottleneck (DetA gap: {deta_gap:.1f} vs AssA gap: {assa_gap:.1f})")
+            print(f"     FN ratio: {fn_ratio:.1f}x — pipeline misses {fn_ratio:.1f}x more objects")
+            if det_ap and det_ap["recall"] < 0.7:
+                print(f"     Low recall ({det_ap['recall']*100:.0f}%) suggests:")
+                print(f"       - Try lowering --detection-threshold (currently in labels JSON)")
+                print(f"       - Try lowering --border-threshold for tile-edge detections")
+                print(f"       - Use a stronger model (yolov8s/m instead of nano)")
+        elif assa_gap > deta_gap * 2:
+            print(f"  >> Tracking association is the bottleneck (AssA gap: {assa_gap:.1f} vs DetA gap: {deta_gap:.1f})")
+            print(f"     Consider: longer --track-buffer or a different tracker")
+        else:
+            print(f"  >> Both detection ({deta_gap:.1f}) and association ({assa_gap:.1f}) contribute to the gap")
+
+        if mota_gap < 5:
+            print(f"  >> Gap is small ({mota_gap:.1f} MOTA points) — pipeline is competitive")
+
+    print("=" * 78)
+    print()
 
 
 def main():
@@ -844,12 +1152,56 @@ def main():
         if not args.visualize:
             args.visualize = f"{stem}-{tracker}.mp4"
 
+    image_size = getattr(args, "image_size", None)
+
+    # --- Compare mode: run both baseline and pipeline, print gap analysis ---
+    if args.compare:
+        if not args.seq_dir:
+            parser.error("--compare requires SEQ_DIR (a MOT sequence directory)")
+        if not args.detections or not args.gt:
+            parser.error("--compare requires detections (det/det.txt) and GT (gt/gt.txt)")
+        images_dir = getattr(args, "images_dir", None)
+        if not images_dir:
+            parser.error("--compare requires images (img1/) for Hailo pipeline")
+
+        import tempfile
+
+        # 1) Baseline: pre-computed detections
+        baseline_output = args.output
+        LOGGER.info("=== BASELINE: Running %s tracker on pre-computed detections ===",
+                    args.tracker)
+        baseline = run_from_detections(args.detections, baseline_output, args.gt, args)
+
+        # 2) Pipeline: Hailo detection + tracking
+        ref_dets = load_mot_file(args.detections)
+        tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
+        try:
+            _images_to_video(images_dir, tmp_video, frame_rate=args.frame_rate)
+            pipeline_output = baseline_output.replace(".txt", "_pipeline.txt")
+            pipeline_args = _build_pipeline_args(
+                tmp_video, args, args.run_pipeline_args or remaining)
+            LOGGER.info("=== PIPELINE: Running Hailo pipeline with %s tracker ===",
+                        args.tracker)
+            pipeline = run_from_pipeline(pipeline_output, args.gt, args, pipeline_args,
+                                         reference_detections=ref_dets,
+                                         image_size=image_size)
+        finally:
+            try:
+                os.unlink(tmp_video)
+            except OSError:
+                pass
+
+        # 3) Gap analysis
+        _print_comparison(baseline, pipeline)
+        return
+
     if args.input and not args.detections:
         # Pipeline mode — run Hailo detection + tracking on video
         pipeline_args = _build_pipeline_args(args.input, args, remaining)
         LOGGER.info("Running Hailo pipeline (%s tracker) on: %s",
                     args.tracker, args.input)
-        run_from_pipeline(args.output, args.gt, args, pipeline_args)
+        run_from_pipeline(args.output, args.gt, args, pipeline_args,
+                          image_size=image_size)
 
     elif args.detections:
         # Detections-only mode — no Hailo hardware needed
@@ -886,6 +1238,12 @@ def main():
         # Pipeline visualization: run Hailo detector → tracker → render video
         if getattr(args, "visualize_pipeline", None):
             import tempfile
+            # Load det.txt as reference for detection AP comparison
+            ref_dets = None
+            if args.detections:
+                ref_dets = load_mot_file(args.detections)
+                LOGGER.info("Using %s as reference for detection AP", args.detections)
+
             # Convert image sequence to temporary video for the Hailo pipeline
             tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
             try:
@@ -895,7 +1253,9 @@ def main():
                 pipeline_args = _build_pipeline_args(
                     tmp_video, args, args.run_pipeline_args or [])
                 LOGGER.info("Running Hailo pipeline on %s ...", tmp_video)
-                run_from_pipeline(pipeline_output, args.gt, args, pipeline_args)
+                run_from_pipeline(pipeline_output, args.gt, args, pipeline_args,
+                                  reference_detections=ref_dets,
+                                  image_size=image_size)
                 # Render the pipeline results as a video
                 _render_video(pipeline_output, images_dir, args.visualize_pipeline,
                               frame_rate=args.frame_rate, gt_path=args.gt)
