@@ -379,11 +379,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             Returns the pipeline string or None if the HEF is not found.
             """
+            if not getattr(self.options_menu, 'reid', True):
+                LOGGER.info("[reid] ReID disabled via --no-reid")
+                return None
+
             reid_hef = get_resource_path(
                 pipeline_name=None,
                 resource_type=RESOURCES_MODELS_DIR_NAME,
                 arch=self.arch,
-                model='repvgg_a0_person_reid_2048',
+                model='repvgg_a0_person_reid_512',
             )
             if reid_hef is None or not reid_hef.exists():
                 LOGGER.warning("[reid] RepVGG HEF not found (%s) — running without ReID", reid_hef)

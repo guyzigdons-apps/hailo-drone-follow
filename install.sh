@@ -172,6 +172,34 @@ if ! $SKIP_PYTHON; then
         echo -e "${RED}  Error: hailo_installer_python.sh not found at $INSTALLER_SCRIPT${NC}"
     fi
 
+    # # ─── Patch RepVGG ReID layer name for body-ReID pipeline ───
+    # # The upstream TAPPAS ships repvgg_reid.cpp with output layer name
+    # # "repvgg_a0_person_reid_2048/fc1", but the HEF model uses "..._512/fc1".
+    # # Patch both the hailo-apps source (compiled by hailo-post-install) and the
+    # # system TAPPAS header (used by other tools) before compilation.
+    # REPVGG_OLD="repvgg_a0_person_reid_2048"
+    # REPVGG_NEW="repvgg_a0_person_reid_512"
+
+    # HAILO_APPS_REPVGG="$HAILO_APPS_DIR/hailo_apps/postprocess/cpp/repvgg_reid.cpp"
+    # if [ -f "$HAILO_APPS_REPVGG" ]; then
+    #     if grep -q "$REPVGG_OLD" "$HAILO_APPS_REPVGG"; then
+    #         echo -e "  Patching hailo-apps repvgg_reid.cpp: ${CYAN}${REPVGG_OLD}${NC} → ${CYAN}${REPVGG_NEW}${NC}"
+    #         sed -i "s/${REPVGG_OLD}/${REPVGG_NEW}/g" "$HAILO_APPS_REPVGG"
+    #     else
+    #         echo -e "  hailo-apps repvgg_reid.cpp already patched."
+    #     fi
+    # fi
+
+    # SYSTEM_REPVGG="/usr/include/hailo/tappas/recognition/repvgg.cpp"
+    # if [ -f "$SYSTEM_REPVGG" ]; then
+    #     if grep -q "$REPVGG_OLD" "$SYSTEM_REPVGG"; then
+    #         echo -e "  Patching system repvgg.cpp: ${CYAN}${REPVGG_OLD}${NC} → ${CYAN}${REPVGG_NEW}${NC}"
+    #         sudo sed -i "s/${REPVGG_OLD}/${REPVGG_NEW}/g" "$SYSTEM_REPVGG"
+    #     else
+    #         echo -e "  System repvgg.cpp already patched."
+    #     fi
+    # fi
+
     # ─── Run hailo-post-install ───
     # This downloads resources (HEF files) and compiles C++ bits
     # Needs sudo because it writes to /usr/local/hailo/resources/
