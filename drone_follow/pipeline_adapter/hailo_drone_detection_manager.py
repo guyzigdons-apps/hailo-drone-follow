@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
+import cv2
 import hailo
 import numpy as np
 
@@ -22,6 +23,8 @@ from .byte_tracker import ByteTracker
 LOGGER = logging.getLogger("drone_follow.app")
 
 _EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
+
+_GALLERY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gallery")
 
 _gst_module = None
 
@@ -57,6 +60,35 @@ def _build_det_info(person, track_id=None):
     if track_id is not None:
         det_info["id"] = track_id
     return det_info
+
+
+def _save_gallery_crop(element, buffer, person, track_id):
+    """Extract the frame from the GStreamer buffer and save a cropped person image."""
+    try:
+        from hailo_apps.python.core.common.buffer_utils import (
+            get_caps_from_pad, get_numpy_from_buffer,
+        )
+        pad = element.get_static_pad("sink")
+        fmt, width, height = get_caps_from_pad(pad)
+        if fmt is None or width is None or height is None:
+            return
+        frame = get_numpy_from_buffer(buffer, fmt, width, height)
+        bbox = person.get_bbox()
+        x1 = max(0, int(bbox.xmin() * width))
+        y1 = max(0, int(bbox.ymin() * height))
+        x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
+        y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+        if x2 <= x1 or y2 <= y1:
+            return
+        crop = frame[y1:y2, x1:x2]
+        if crop.shape[2] == 3:
+            crop = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+        os.makedirs(_GALLERY_DIR, exist_ok=True)
+        path = os.path.join(_GALLERY_DIR, f"id_{track_id}.jpg")
+        cv2.imwrite(path, crop)
+        LOGGER.info("[gallery] Saved cropped image for ID %s to %s", track_id, path)
+    except Exception:
+        LOGGER.debug("[gallery] Failed to save crop for ID %s", track_id, exc_info=True)
 
 
 def _update_ui(ui_state, persons, person_to_id, following_id):
@@ -139,6 +171,14 @@ def app_callback(element, buffer, user_data):
 
     available_ids, person_by_id, person_to_id = _run_tracker(
         user_data.byte_tracker, persons, embeddings=embeddings)
+
+    # --- Save cropped images for newly gallery-added persons ---
+    if user_data.save_gallery_crops:
+        gallery = user_data.byte_tracker._embedding_gallery
+        for tid in gallery:
+            if tid not in user_data.saved_gallery_ids and tid in person_by_id:
+                _save_gallery_crop(element, buffer, person_by_id[tid], tid)
+                user_data.saved_gallery_ids.add(tid)
 
     # --- Target selection ---
     target_id = target_state.get_target() if target_state is not None else None
@@ -245,6 +285,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self.target_state = target_state
             self.ui_state = ui_state
             self.byte_tracker = byte_tracker
+            self.save_gallery_crops = False
+            self.saved_gallery_ids = set()
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -568,4 +610,5 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
         record_dir=record_dir,
     )
+    user_data.save_gallery_crops = getattr(app.options_menu, 'save_gallery_crops', False)
     return app
