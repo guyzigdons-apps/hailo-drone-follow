@@ -94,10 +94,13 @@ export default function App() {
     };
   }, [logsOpen]);
 
-  // Auto-scroll logs
+  // Auto-scroll logs within their container (not the page)
   useEffect(() => {
     if (logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+      const container = logEndRef.current.parentElement;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
     }
   }, [logs]);
 
@@ -244,7 +247,7 @@ export default function App() {
       })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
-          if (data) setConfig(data);
+          if (data) setConfig((prev) => ({ ...prev, ...data }));
         })
         .catch(() => {});
     }, DEBOUNCE_MS);
