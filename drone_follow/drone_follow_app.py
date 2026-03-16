@@ -62,6 +62,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="MJPEG stream frame rate (default: 10)")
     group.add_argument("--record", action="store_true",
                        help="Record raw video + detections for the entire session (requires --ui)")
+    group.add_argument("--gesture", action="store_true",
+                       help="Enable gesture control mode (extended pipeline with hand/gesture detection)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -101,6 +103,7 @@ def main():
     ui_pre.add_argument("--ui-port", type=int, default=5001)
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--record", action="store_true")
+    ui_pre.add_argument("--gesture", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
     ui_state = None
@@ -120,12 +123,23 @@ def main():
     # Build the full parser from all domains, then pass to pipeline adapter
     parser = _build_parser()
 
-    from drone_follow.pipeline_adapter import create_app
-
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
-    app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
-                     ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
-                     record_dir=recordings_dir)
+    gesture_state = None
+    if ui_pre_args.gesture:
+        from drone_follow.follow_api.state import SharedGestureState
+        from drone_follow.pipeline_adapter import create_gesture_app
+        gesture_state = SharedGestureState()
+        app = create_gesture_app(
+            shared_state, gesture_state, target_state=target_state,
+            eos_reached=eos_reached, ui_state=ui_state,
+            ui_fps=ui_pre_args.ui_fps, parser=parser,
+            record_dir=recordings_dir)
+    else:
+        from drone_follow.pipeline_adapter import create_app
+        app = create_app(shared_state, target_state=target_state,
+                         eos_reached=eos_reached, ui_state=ui_state,
+                         ui_fps=ui_pre_args.ui_fps, parser=parser,
+                         record_dir=recordings_dir)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
@@ -151,7 +165,8 @@ def main():
                                controller_config=controller_config,
                                port=args.ui_port, static_dir=static_dir,
                                follow_server_port=args.follow_server_port,
-                               recording_ctl=app)
+                               recording_ctl=app,
+                               gesture_enabled=gesture_state is not None)
 
         web_server.start()
 
@@ -173,9 +188,17 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(
-                run_live_drone(args, shared_state, shutdown,
-                              config=controller_config, ui_state=ui_state))
+            if gesture_state is not None:
+                from drone_follow.drone_api import run_unified_drone
+                loop.run_until_complete(
+                    run_unified_drone(
+                        args, shared_state, gesture_state, shutdown,
+                        config=controller_config, ui_state=ui_state,
+                        pipeline_app=app))
+            else:
+                loop.run_until_complete(
+                    run_live_drone(args, shared_state, shutdown,
+                                  config=controller_config, ui_state=ui_state))
         except Exception:
             LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
         finally:

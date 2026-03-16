@@ -2,11 +2,13 @@
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 
 class FollowMode(str, Enum):
     FOLLOW = "follow"
     ORBIT = "orbit"
+    GESTURE = "gesture"
 
 
 @dataclass
@@ -31,4 +33,33 @@ class Detection:
     center_x: float      # 0.0 to 1.0
     center_y: float      # 0.0 to 1.0
     bbox_height: float   # 0.0 to 1.0
+    timestamp: float
+
+
+@dataclass
+class FaceDetection:
+    center_x: float       # 0.0 to 1.0
+    center_y: float
+    bbox_width: float
+    bbox_height: float
+    confidence: float
+    timestamp: float
+
+
+@dataclass
+class HandDetection:
+    center_x: float       # palm center, 0.0 to 1.0
+    center_y: float
+    wrist_x: float
+    wrist_y: float
+    is_open: bool
+    confidence: float
+    timestamp: float
+
+
+@dataclass
+class GestureDetection:
+    face: FaceDetection
+    hand: Optional[HandDetection]   # None when no hand visible
+    person_bbox_height: float
     timestamp: float

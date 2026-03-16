@@ -4,7 +4,7 @@ import threading
 import time
 from typing import Optional
 
-from .types import Detection
+from .types import Detection, GestureDetection
 
 
 class SharedDetectionState:
@@ -31,6 +31,24 @@ class SharedDetectionState:
         """Get the set of currently visible detection IDs."""
         with self._lock:
             return self._available_ids.copy()
+
+
+class SharedGestureState:
+    """Thread-safe state for passing gesture detections from the pipeline to the control loop."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._gesture: Optional[GestureDetection] = None
+        self._frame_count: int = 0
+
+    def update(self, gesture: Optional[GestureDetection]):
+        with self._lock:
+            self._gesture = gesture
+            self._frame_count += 1
+
+    def get_latest(self):
+        with self._lock:
+            return self._gesture, self._frame_count
 
 
 class FollowTargetState:

@@ -381,6 +381,18 @@ export default function App() {
                     >
                       ORBIT
                     </button>
+                    {config.gesture_enabled && (
+                      <button
+                        className={`toggle-btn ${config.follow_mode === "gesture" ? "toggle-on" : ""}`}
+                        onClick={() => {
+                          const updated = { ...config, follow_mode: "gesture" };
+                          setConfig(updated);
+                          postConfig({ follow_mode: "gesture" });
+                        }}
+                      >
+                        GESTURE
+                      </button>
+                    )}
                   </div>
                 </label>
                 {config.follow_mode === "orbit" && (

@@ -52,6 +52,18 @@ class ControllerConfig:
     orbit_direction: int = 1          # +1 = clockwise, -1 = counter-clockwise
     max_orbit_speed: float = 3.0      # max lateral speed limit
 
+    # Gesture mode
+    gesture_wave_reversals: int = 3
+    gesture_wave_window_s: float = 1.5
+    gesture_ack_duration_s: float = 1.0
+    gesture_ack_amplitude_deg: float = 30.0
+    gesture_hand_dead_zone_deg: float = 5.0
+    gesture_kp_hand_yaw: float = 4.0
+    gesture_max_yawspeed: float = 60.0
+    gesture_kp_forward: float = 3.0
+    gesture_max_forward: float = 1.5
+    gesture_arm_dead_zone: float = 0.08
+
     target_altitude: float = 3.0
     log_verbosity: str = "normal"  # quiet | normal | debug
 
@@ -150,7 +162,7 @@ class ControllerConfig:
                            help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
 
         # Orbit mode
-        group.add_argument("--follow-mode", choices=["follow", "orbit"], default=defaults.follow_mode,
+        group.add_argument("--follow-mode", choices=["follow", "orbit", "gesture"], default=defaults.follow_mode,
                            help="Follow mode: 'follow' (default) or 'orbit' (circle around target)")
         group.add_argument("--orbit-speed", type=float, default=defaults.orbit_speed_m_s,
                            help=f"Lateral velocity for orbit mode in m/s (default: {defaults.orbit_speed_m_s})")

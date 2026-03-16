@@ -10,9 +10,11 @@ from .mavsdk_drone import (
     run_live_drone,
     add_drone_args,
 )
+from .gesture_drone import run_unified_drone
 
 __all__ = [
     "VelocityCommandAPI",
     "run_live_drone",
     "add_drone_args",
+    "run_unified_drone",
 ]

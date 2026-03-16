@@ -139,6 +139,7 @@ class _WebHandler(BaseHTTPRequestHandler):
     controller_config = None  # ControllerConfig
     follow_server_port: int = 8080
     recording_ctl = None  # object with start_recording/stop_recording/is_recording
+    gesture_enabled: bool = False
     def log_message(self, format, *args):
         pass
 
@@ -263,6 +264,12 @@ class _WebHandler(BaseHTTPRequestHandler):
         "follow_mode": str,
         "orbit_speed_m_s": float,
         "orbit_direction": int,
+        "gesture_hand_dead_zone_deg": float,
+        "gesture_kp_hand_yaw": float,
+        "gesture_max_yawspeed": float,
+        "gesture_kp_forward": float,
+        "gesture_max_forward": float,
+        "gesture_arm_dead_zone": float,
     }
 
     def _handle_get_config(self):
@@ -272,6 +279,7 @@ class _WebHandler(BaseHTTPRequestHandler):
             return
         data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}
         data["follow_server_port"] = self.follow_server_port
+        data["gesture_enabled"] = self.gesture_enabled
         self._send_json(data)
 
     def _handle_logs(self):
@@ -405,7 +413,7 @@ class WebServer:
 
     def __init__(self, ui_state, target_state=None, shared_state=None,
                  controller_config=None, host="0.0.0.0", port=5001, static_dir=None,
-                 follow_server_port=8080, recording_ctl=None):
+                 follow_server_port=8080, recording_ctl=None, gesture_enabled=False):
         self.ui_state = ui_state
         self.target_state = target_state
         self.shared_state = shared_state
@@ -415,6 +423,7 @@ class WebServer:
         self.static_dir = static_dir
         self.follow_server_port = follow_server_port
         self.recording_ctl = recording_ctl
+        self.gesture_enabled = gesture_enabled
         self.server = None
         self.thread = None
 
@@ -426,6 +435,7 @@ class WebServer:
         _WebHandler.static_dir = self.static_dir
         _WebHandler.follow_server_port = self.follow_server_port
         _WebHandler.recording_ctl = self.recording_ctl
+        _WebHandler.gesture_enabled = self.gesture_enabled
 
         ThreadingHTTPServer.allow_reuse_address = True
         self.server = ThreadingHTTPServer((self.host, self.port), _WebHandler)

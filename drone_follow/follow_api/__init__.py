@@ -4,9 +4,9 @@ No MAVSDK, Hailo, or GStreamer dependencies. Can be tested with
 only standard library + numpy/scipy.
 """
 
-from .types import Detection, FollowMode, VelocityCommand
+from .types import Detection, FollowMode, VelocityCommand, FaceDetection, HandDetection, GestureDetection
 from .config import ControllerConfig
-from .state import SharedDetectionState, FollowTargetState
+from .state import SharedDetectionState, FollowTargetState, SharedGestureState
 from .controller import (
     compute_velocity_command,
     ForwardSmoother,
@@ -19,9 +19,13 @@ __all__ = [
     "Detection",
     "FollowMode",
     "VelocityCommand",
+    "FaceDetection",
+    "HandDetection",
+    "GestureDetection",
     "ControllerConfig",
     "SharedDetectionState",
     "FollowTargetState",
+    "SharedGestureState",
     "compute_velocity_command",
     "ForwardSmoother",
     "_distance_to_bbox_height",
