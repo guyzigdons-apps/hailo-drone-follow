@@ -8,10 +8,12 @@ export default function App() {
   const [followingId, setFollowingId] = useState(null);
   const [velocity, setVelocity] = useState(null);
   const [videoDims, setVideoDims] = useState({ width: 0, height: 0 });
+  const [overlayDims, setOverlayDims] = useState({ width: 0, height: 0 });
   const [logsOpen, setLogsOpen] = useState(true);
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
   const [recording, setRecording] = useState(false);
+  const [roi, setRoi] = useState(null);
   const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -26,6 +28,7 @@ export default function App() {
         setDetections(data.detections || []);
         setFollowingId(data.following_id);
         setVelocity(data.velocity || null);
+        setRoi(data.roi || null);
       } catch {
         // malformed event
       }
@@ -200,6 +203,27 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
+  // Track the canvas display size so the SVG overlay maps 1:1 to rendered pixels.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const updateOverlayDims = () => {
+      const rect = canvas.getBoundingClientRect();
+      setOverlayDims({ width: rect.width, height: rect.height });
+    };
+
+    updateOverlayDims();
+    const observer = new ResizeObserver(updateOverlayDims);
+    observer.observe(canvas);
+    window.addEventListener("resize", updateOverlayDims);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateOverlayDims);
+    };
+  }, []);
+
   const handleFollow = async (id) => {
     try {
       const port = config?.follow_server_port || 8080;
@@ -283,6 +307,8 @@ export default function App() {
 
   const vw = videoDims.width;
   const vh = videoDims.height;
+  const ow = overlayDims.width;
+  const oh = overlayDims.height;
 
   return (
     <div className="app">
@@ -541,8 +567,27 @@ export default function App() {
           ref={canvasRef}
           className="video-feed"
         />
-        {vw > 0 && vh > 0 && (
-          <svg className="overlay" viewBox={`0 0 ${vw} ${vh}`}>
+        {vw > 0 && vh > 0 && ow > 0 && oh > 0 && (
+          <svg
+            className="overlay"
+            viewBox={`0 0 ${vw} ${vh}`}
+            preserveAspectRatio="none"
+            style={{ width: `${ow}px`, height: `${oh}px` }}
+          >
+            {roi && (
+              <rect
+                x={roi.x * vw}
+                y={roi.y * vh}
+                width={roi.w * vw}
+                height={roi.h * vh}
+                fill="none"
+                stroke="#ffff00"
+                strokeWidth={2}
+                strokeDasharray="8 4"
+                strokeOpacity={0.7}
+                pointerEvents="none"
+              />
+            )}
             {detections.map((det) => {
               const x = det.bbox.x * vw;
               const y = det.bbox.y * vh;
