@@ -321,14 +321,12 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     last_detection_time = time.monotonic()
     last_valid_detection: Optional[VelocityCommand] = None
     _prev_target_alt = config.target_altitude
-    _goto_altitude = None
     _prev_cmd: Optional[VelocityCommand] = None
     _fwd_smoother = ForwardSmoother()
 
     # Constants
-    _GOTO_KP = 0.5
-    _GOTO_MAX_SPEED = 1.5
-    _GOTO_TOLERANCE = 0.3
+    _ALT_HOLD_KP = 0.5
+    _ALT_HOLD_MAX_SPEED = 1.0
     _LOG_INTERVAL = 1.0
     _FWD_LOG_INTERVAL = 0.5
 
@@ -356,10 +354,9 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 shutdown.set()
                 break
 
-            # Detect target_altitude changes and start goto
+            # Log target_altitude changes
             if config.target_altitude != _prev_target_alt:
-                _goto_altitude = config.target_altitude
-                _log(f"[drone] Altitude changed: going to {_goto_altitude:.1f}m", level=logging.INFO)
+                _log(f"[drone] Target altitude changed: {_prev_target_alt:.1f}m -> {config.target_altitude:.1f}m", level=logging.INFO)
                 _prev_target_alt = config.target_altitude
 
             cmd = compute_velocity_command(
@@ -373,14 +370,11 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
                 cmd = VelocityCommand(smoothed_fwd, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
 
-            # Override vertical velocity when going to a new altitude
-            if _goto_altitude is not None and altitude_cache.get("m") is not None:
-                alt_error = _goto_altitude - altitude_cache["m"]
-                if abs(alt_error) < _GOTO_TOLERANCE:
-                    _log(f"[drone] Reached target altitude {_goto_altitude:.1f}m", level=logging.INFO)
-                    _goto_altitude = None
-                else:
-                    down_speed = max(-_GOTO_MAX_SPEED, min(_GOTO_MAX_SPEED, -_GOTO_KP * alt_error))
+            # Fixed-altitude hold: proportional controller toward target_altitude
+            if config.fixed_altitude and altitude_cache.get("m") is not None:
+                alt_error = config.target_altitude - altitude_cache["m"]
+                if abs(alt_error) > 0.1:  # dead zone to avoid jitter
+                    down_speed = max(-_ALT_HOLD_MAX_SPEED, min(_ALT_HOLD_MAX_SPEED, -_ALT_HOLD_KP * alt_error))
                     cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
 
             # Forward-velocity log (throttled)
@@ -516,13 +510,11 @@ async def _wait_for_connection(drone: System) -> bool:
 
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         config=None, ui_state=None, on_connected_cb=None):
+                         config=None, ui_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If config is provided, use it directly (allows live mutation from web UI).
     If ui_state is provided, logs are pushed to the web UI.
-    If on_connected_cb is provided, it is called once after the drone connects
-    (useful for simulation setup teardown, e.g. restoring a world file).
     """
     if config is None:
         config = ControllerConfig.from_args(args)
@@ -571,9 +563,6 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
             raise ConnectionError(
                 f"No drone detected on {args.connection} after {_CONNECTION_TIMEOUT_S}s. "
                 "Pipeline continues without drone control.")
-
-        if on_connected_cb is not None:
-            on_connected_cb()
 
         armed = False
         vel_api = VelocityCommandAPI(drone, config)
