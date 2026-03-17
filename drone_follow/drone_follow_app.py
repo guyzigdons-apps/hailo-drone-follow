@@ -22,7 +22,7 @@ import signal
 import threading
 import time
 from drone_follow.follow_api import ControllerConfig, SharedDetectionState
-from drone_follow.follow_api.state import FollowTargetState
+from drone_follow.follow_api.state import FollowTargetState, SharedVelocityState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
 from drone_follow.servers import FollowServer
@@ -96,6 +96,7 @@ def main():
 
     # Create target state for follow server
     target_state = FollowTargetState()
+    velocity_state = SharedVelocityState()
 
     # Pre-parse --ui flag to set up web UI before create_app parses all args
     ui_pre = argparse.ArgumentParser(add_help=False)
@@ -133,19 +134,24 @@ def main():
             shared_state, gesture_state, target_state=target_state,
             eos_reached=eos_reached, ui_state=ui_state,
             ui_fps=ui_pre_args.ui_fps, parser=parser,
-            record_dir=recordings_dir)
+            record_dir=recordings_dir, velocity_state=velocity_state)
     else:
         from drone_follow.pipeline_adapter import create_app
         app = create_app(shared_state, target_state=target_state,
                          eos_reached=eos_reached, ui_state=ui_state,
                          ui_fps=ui_pre_args.ui_fps, parser=parser,
-                         record_dir=recordings_dir)
+                         record_dir=recordings_dir, velocity_state=velocity_state)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
 
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
+
+    # Give the pipeline callback access to controller config for local velocity computation
+    # (needed for HUD arrows when drone control loop isn't connected yet)
+    if hasattr(app, 'user_data') and app.user_data is not None:
+        app.user_data.controller_config = controller_config
 
     # --save-config: dump effective config to JSON and exit
     save_path = getattr(args, "save_config", None)
@@ -194,11 +200,12 @@ def main():
                     run_unified_drone(
                         args, shared_state, gesture_state, shutdown,
                         config=controller_config, ui_state=ui_state,
-                        pipeline_app=app))
+                        pipeline_app=app, velocity_state=velocity_state))
             else:
                 loop.run_until_complete(
                     run_live_drone(args, shared_state, shutdown,
-                                  config=controller_config, ui_state=ui_state))
+                                  config=controller_config, ui_state=ui_state,
+                                  velocity_state=velocity_state))
         except Exception:
             LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
         finally:

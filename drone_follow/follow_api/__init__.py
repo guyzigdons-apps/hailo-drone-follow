@@ -6,7 +6,7 @@ only standard library + numpy/scipy.
 
 from .types import Detection, FollowMode, VelocityCommand, FaceDetection, HandDetection, GestureDetection
 from .config import ControllerConfig
-from .state import SharedDetectionState, FollowTargetState, SharedGestureState
+from .state import SharedDetectionState, FollowTargetState, SharedGestureState, SharedVelocityState
 from .controller import (
     compute_velocity_command,
     ForwardSmoother,
@@ -26,6 +26,7 @@ __all__ = [
     "SharedDetectionState",
     "FollowTargetState",
     "SharedGestureState",
+    "SharedVelocityState",
     "compute_velocity_command",
     "ForwardSmoother",
     "_distance_to_bbox_height",

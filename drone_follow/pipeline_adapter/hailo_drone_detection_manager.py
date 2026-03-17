@@ -15,7 +15,8 @@ from typing import Optional
 import hailo
 import numpy as np
 
-from drone_follow.follow_api.types import Detection
+from drone_follow.follow_api.types import Detection, VelocityCommand
+from drone_follow.follow_api.controller import compute_velocity_command
 
 from .byte_tracker import ByteTracker
 
@@ -100,6 +101,96 @@ def _run_tracker(byte_tracker, persons):
 
 
 # ---------------------------------------------------------------------------
+# HUD overlay helpers
+# ---------------------------------------------------------------------------
+
+def _get_velocity(velocity_state, detection, config):
+    """Get current velocity command, computing locally if the control loop isn't running.
+
+    Priority:
+      1. velocity_state from the drone control loop (if mode != IDLE)
+      2. Local computation from detection + config (pure math, no drone needed)
+    """
+    if velocity_state is not None:
+        fwd, right, down, yaw, mode = velocity_state.get()
+        if mode != "IDLE":
+            return fwd, right, down, yaw, mode
+
+    # Control loop not running — compute locally from detection
+    if detection is not None and config is not None:
+        cmd = compute_velocity_command(detection, config)
+        return cmd.forward_m_s, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, "TRACK"
+
+    if config is not None:
+        # No detection, compute search command
+        cmd = compute_velocity_command(None, config)
+        if cmd.yawspeed_deg_s != 0:
+            return cmd.forward_m_s, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, "SEARCH"
+
+    return 0.0, 0.0, 0.0, 0.0, "IDLE"
+
+
+def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
+    """Attach overlay_arrow and overlay_text metadata to ROI for HUD visualization.
+
+    Works in three modes:
+      - With drone connected: reads actual commands from velocity_state
+      - Without drone: computes expected commands locally from detection + config
+      - No detection: shows search/idle state
+    """
+    fwd, right, down, yaw, mode = _get_velocity(velocity_state, detection, config)
+
+    # HUD center position (bottom-center of frame)
+    cx, cy = 0.5, 0.85
+
+    # Scaling: map velocity to arrow length (fraction of frame height)
+    MAX_ARROW_LEN = 0.12
+    MAX_YAW = 60.0       # deg/s for full-length arrow
+    MAX_FWD = 3.0         # m/s
+    MAX_DOWN = 2.0        # m/s
+
+    # Yaw arrow (horizontal): angle 0 = right, 180 = left
+    if abs(yaw) > 1.0:
+        yaw_len = min(abs(yaw) / MAX_YAW, 1.0) * MAX_ARROW_LEN
+        yaw_angle = 0.0 if yaw > 0 else 180.0
+        label = f"x:{cx},y:{cy},angle:{yaw_angle},len:{yaw_len:.4f},r:0,g:220,b:255,t:3"
+        roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+
+    # Forward/backward arrow (vertical): 90 = up (forward), 270 = down (backward)
+    if abs(fwd) > 0.05:
+        fwd_len = min(abs(fwd) / MAX_FWD, 1.0) * MAX_ARROW_LEN
+        fwd_angle = 90.0 if fwd > 0 else 270.0
+        color = "r:0,g:255,b:100" if fwd > 0 else "r:255,g:80,b:0"
+        label = f"x:{cx},y:{cy},angle:{fwd_angle},len:{fwd_len:.4f},{color},t:3"
+        roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+
+    # Altitude arrow (vertical, offset to the right)
+    if abs(down) > 0.05:
+        alt_cx = cx + 0.06
+        alt_len = min(abs(down) / MAX_DOWN, 1.0) * MAX_ARROW_LEN * 0.7
+        alt_angle = 90.0 if down < 0 else 270.0
+        label = f"x:{alt_cx},y:{cy},angle:{alt_angle},len:{alt_len:.4f},r:255,g:220,b:0,t:2"
+        roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+
+    # Crosshair dot at HUD center
+    label = f"x:{cx},y:{cy},angle:0,len:0.002,r:255,g:255,b:255,t:4"
+    roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+
+    # Mode text
+    if mode:
+        if mode == "TRACK" or mode == "ORBIT":
+            color = "r:0,g:255,b:100"
+        elif mode.startswith("SEARCH"):
+            color = "r:255,g:220,b:0"
+        elif mode == "IDLE":
+            color = "r:128,g:128,b:128"
+        else:
+            color = "r:200,g:200,b:200"
+        label = f"x:{cx - 0.03},y:{cy + 0.05},text:{mode},{color},scale:0.6,bg:1"
+        roi.add_object(hailo.HailoClassification("overlay_text", 0, label, 0.0))
+
+
+# ---------------------------------------------------------------------------
 # Main app callback
 # ---------------------------------------------------------------------------
 
@@ -117,6 +208,8 @@ def app_callback(element, buffer, user_data):
 
     target_state = user_data.target_state
     ui_state = user_data.ui_state
+    # selected_detection will be set if we find a person to follow
+    selected_detection = None
 
     if not persons:
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
@@ -126,60 +219,66 @@ def app_callback(element, buffer, user_data):
         _update_ui(ui_state, [], {}, target_state.get_target() if target_state else None)
         if target_state is None or target_state.get_target() is None:
             LOGGER.debug("[SEARCH MODE] No person detected in frame - follow state cleared")
-        return
+    else:
+        available_ids, person_by_id, person_to_id = _run_tracker(
+            user_data.byte_tracker, persons)
 
-    available_ids, person_by_id, person_to_id = _run_tracker(
-        user_data.byte_tracker, persons)
+        # --- Target selection ---
+        target_id = target_state.get_target() if target_state is not None else None
 
-    # --- Target selection ---
-    target_id = target_state.get_target() if target_state is not None else None
+        best = None
+        follow_mode = ""
+        if target_id is not None:
+            best = person_by_id.get(target_id)
 
-    best = None
-    follow_mode = ""
-    if target_id is not None:
-        best = person_by_id.get(target_id)
+            if best is not None:
+                target_state.update_last_seen()
+                follow_mode = f"ID {target_id}"
+            else:
+                user_data.shared_state.update(None, available_ids=available_ids)
+                if target_state.get_target() is not None:
+                    target_state.set_target(None)
+                _update_ui(ui_state, persons, person_to_id, target_state.get_target())
+                if target_state.get_target() is None:
+                    LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
+                                target_id, sorted(available_ids) if available_ids else "none")
+                best = None  # signal: no valid target this frame
+        else:
+            best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
+            best_tid = person_to_id.get(id(best))
+            if best_tid is not None and target_state is not None:
+                target_state.set_target(best_tid)
+                follow_mode = f"locked ID {best_tid}"
+            elif best_tid is not None:
+                follow_mode = f"largest (ID {best_tid})"
+            else:
+                follow_mode = "largest (no tracking)"
 
         if best is not None:
-            target_state.update_last_seen()
-            follow_mode = f"ID {target_id}"
-        else:
-            user_data.shared_state.update(None, available_ids=available_ids)
-            if target_state.get_target() is not None:
-                target_state.set_target(None)
-            _update_ui(ui_state, persons, person_to_id, target_state.get_target())
-            if target_state.get_target() is None:
-                LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
-                            target_id, sorted(available_ids) if available_ids else "none")
-            return
-    else:
-        best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
-        best_tid = person_to_id.get(id(best))
-        if best_tid is not None and target_state is not None:
-            target_state.set_target(best_tid)
-            follow_mode = f"locked ID {best_tid}"
-        elif best_tid is not None:
-            follow_mode = f"largest (ID {best_tid})"
-        else:
-            follow_mode = "largest (no tracking)"
+            bbox = best.get_bbox()
+            cx = bbox.xmin() + bbox.width() / 2
+            cy = bbox.ymin() + bbox.height() / 2
+            selected_detection = Detection(
+                label="person",
+                confidence=best.get_confidence(),
+                center_x=cx,
+                center_y=cy,
+                bbox_height=bbox.height(),
+                timestamp=time.monotonic(),
+            )
+            user_data.shared_state.update(selected_detection, available_ids=available_ids)
 
-    bbox = best.get_bbox()
-    cx = bbox.xmin() + bbox.width() / 2
-    cy = bbox.ymin() + bbox.height() / 2
-    user_data.shared_state.update(Detection(
-        label="person",
-        confidence=best.get_confidence(),
-        center_x=cx,
-        center_y=cy,
-        bbox_height=bbox.height(),
-        timestamp=time.monotonic(),
-    ), available_ids=available_ids)
+            _update_ui(ui_state, persons, person_to_id,
+                       target_state.get_target() if target_state else None)
 
-    _update_ui(ui_state, persons, person_to_id,
-               target_state.get_target() if target_state else None)
+            available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
+            LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
+                        follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
 
-    available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
-    LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
-                follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
+    # Attach flight command HUD arrows (runs every frame, with or without drone connection)
+    velocity_state = getattr(user_data, 'velocity_state', None)
+    config = getattr(user_data, 'controller_config', None)
+    _attach_velocity_arrows(roi, velocity_state, detection=selected_detection, config=config)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +287,8 @@ def app_callback(element, buffer, user_data):
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
-               parser: Optional[argparse.ArgumentParser] = None, record_dir=None):
+               parser: Optional[argparse.ArgumentParser] = None, record_dir=None,
+               velocity_state=None, controller_config=None):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -221,12 +321,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     byte_tracker=None):
+                     byte_tracker=None, velocity_state=None, controller_config=None):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
             self.byte_tracker = byte_tracker
+            self.velocity_state = velocity_state
+            self.controller_config = controller_config
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -397,6 +499,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             display_branch = DISPLAY_PIPELINE(
                 video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                community_overlay=True, overlay_props={"hud_overlay": True},
             )
 
             # MJPEG branch (raw video, no overlay — React draws bboxes)
@@ -411,7 +514,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # Recording branch (valve drops by default; toggled at runtime)
             record_branch = (
                 f"valve name=record_valve drop=true ! "
-                f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
+                f"{OVERLAY_PIPELINE(name='record_overlay', community=True, hud_overlay=True)} ! "
                 f"videoconvert n-threads=2 ! "
                 f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
                 f"matroskamux name=record_mux ! filesink name=record_sink async=false location=/dev/null"
@@ -438,6 +541,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
+        velocity_state=velocity_state, controller_config=controller_config,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,

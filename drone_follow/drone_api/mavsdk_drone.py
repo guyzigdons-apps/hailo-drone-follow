@@ -360,7 +360,8 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
 
 
 async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None,
-                            ui_state=None, telemetry_cache: Optional[dict] = None):
+                            ui_state=None, telemetry_cache: Optional[dict] = None,
+                            velocity_state=None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
@@ -451,16 +452,18 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 _log(f"[{tag}] Yaw:{cmd.yawspeed_deg_s:+6.1f}\u00b0/s  "
                      f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
                      f"Down:{cmd.down_m_s:+5.2f}m/s", level=logging.INFO)
+            if detection is not None and config.follow_mode == "orbit":
+                mode = "ORBIT"
+            elif detection is not None:
+                mode = "TRACK"
+            elif time_since_detection >= config.search_enter_delay_s:
+                mode = "SEARCH"
+            else:
+                mode = "SEARCH-WAIT"
             if ui_state is not None:
-                if detection is not None and config.follow_mode == "orbit":
-                    mode = "ORBIT"
-                elif detection is not None:
-                    mode = "TRACK"
-                elif time_since_detection >= config.search_enter_delay_s:
-                    mode = "SEARCH"
-                else:
-                    mode = "SEARCH-WAIT"
                 ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode, right_m_s=cmd.right_m_s)
+            if velocity_state is not None:
+                velocity_state.update(cmd.forward_m_s, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
             _prev_cmd = cmd
 
             # Periodic status log to UI
@@ -582,7 +585,7 @@ async def _wait_for_connection(drone: System) -> bool:
 
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         config=None, ui_state=None):
+                         config=None, ui_state=None, velocity_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If config is provided, use it directly (allows live mutation from web UI).
@@ -689,7 +692,8 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     _telemetry_log_task(drone, altitude_cache, telemetry_cache, shutdown, ui_state=ui_state))
                 control_task = asyncio.create_task(
                     live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
-                                      ui_state=ui_state, telemetry_cache=telemetry_cache))
+                                      ui_state=ui_state, telemetry_cache=telemetry_cache,
+                                      velocity_state=velocity_state))
 
                 done, pending = await asyncio.wait(
                     [
@@ -723,7 +727,8 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     vel_api.reset_filter()
                     control_task = asyncio.create_task(
                         live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
-                                          ui_state=ui_state, telemetry_cache=telemetry_cache))
+                                          ui_state=ui_state, telemetry_cache=telemetry_cache,
+                                          velocity_state=velocity_state))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 

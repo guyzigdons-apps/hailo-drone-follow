@@ -89,3 +89,29 @@ class FollowTargetState:
                 "following_id": self._target_id,
                 "last_seen": self._last_seen
             }
+
+
+class SharedVelocityState:
+    """Thread-safe state for passing velocity commands from control loop to pipeline callback."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._forward_m_s: float = 0.0
+        self._right_m_s: float = 0.0
+        self._down_m_s: float = 0.0
+        self._yawspeed_deg_s: float = 0.0
+        self._mode: str = "IDLE"
+
+    def update(self, forward_m_s: float, right_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str):
+        with self._lock:
+            self._forward_m_s = forward_m_s
+            self._right_m_s = right_m_s
+            self._down_m_s = down_m_s
+            self._yawspeed_deg_s = yawspeed_deg_s
+            self._mode = mode
+
+    def get(self):
+        """Returns (forward_m_s, right_m_s, down_m_s, yawspeed_deg_s, mode)."""
+        with self._lock:
+            return (self._forward_m_s, self._right_m_s, self._down_m_s,
+                    self._yawspeed_deg_s, self._mode)

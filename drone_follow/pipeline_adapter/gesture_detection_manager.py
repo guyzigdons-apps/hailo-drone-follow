@@ -26,7 +26,7 @@ from drone_follow.follow_api.types import Detection, FaceDetection, HandDetectio
 from .byte_tracker import ByteTracker
 from .hailo_drone_detection_manager import (
     _get_gst, _build_det_info, _run_tracker, _update_ui,
-    _EMPTY_DET_ARRAY,
+    _EMPTY_DET_ARRAY, _attach_velocity_arrows,
 )
 
 LOGGER = logging.getLogger("drone_follow.gesture")
@@ -41,6 +41,7 @@ PALM_CROPPERS_SO = os.path.join(SO_DIR, "libpalm_croppers.so")
 HAND_AFFINE_WARP_SO = os.path.join(SO_DIR, "libhand_affine_warp.so")
 HAND_LANDMARK_POST_SO = os.path.join(SO_DIR, "libhand_landmark_postprocess.so")
 GESTURE_CLASSIFICATION_SO = os.path.join(SO_DIR, "libgesture_classification.so")
+PERSON_PALM_CROPPERS_SO = os.path.join(SO_DIR, "libperson_palm_croppers.so")
 
 # Model paths
 _MODELS_DIR = os.path.join(
@@ -171,6 +172,7 @@ def gesture_app_callback(element, buffer, user_data):
     ui_state = user_data.ui_state
     gesture_state = user_data.gesture_state
     shared_state = user_data.shared_state
+    selected_detection = None
 
     if not persons:
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
@@ -179,81 +181,86 @@ def gesture_app_callback(element, buffer, user_data):
         if target_state is not None and target_state.get_target() is not None:
             target_state.set_target(None)
         _update_ui(ui_state, [], {}, None)
-        return
+    else:
+        available_ids, person_by_id, person_to_id = _run_tracker(
+            user_data.byte_tracker, persons)
 
-    available_ids, person_by_id, person_to_id = _run_tracker(
-        user_data.byte_tracker, persons)
-
-    # --- Target selection (same as follow mode) ---
-    target_id = target_state.get_target() if target_state is not None else None
-    best = None
-    if target_id is not None:
-        best = person_by_id.get(target_id)
-        if best is not None:
-            target_state.update_last_seen()
+        # --- Target selection (same as follow mode) ---
+        target_id = target_state.get_target() if target_state is not None else None
+        best = None
+        if target_id is not None:
+            best = person_by_id.get(target_id)
+            if best is not None:
+                target_state.update_last_seen()
+            else:
+                shared_state.update(None, available_ids=available_ids)
+                gesture_state.update(None)
+                if target_state.get_target() is not None:
+                    target_state.set_target(None)
+                _update_ui(ui_state, persons, person_to_id, None)
+                best = None
         else:
-            shared_state.update(None, available_ids=available_ids)
-            gesture_state.update(None)
-            if target_state.get_target() is not None:
-                target_state.set_target(None)
-            _update_ui(ui_state, persons, person_to_id, None)
-            return
-    else:
-        best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
-        best_tid = person_to_id.get(id(best))
-        if best_tid is not None and target_state is not None:
-            target_state.set_target(best_tid)
+            best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
+            best_tid = person_to_id.get(id(best))
+            if best_tid is not None and target_state is not None:
+                target_state.set_target(best_tid)
 
-    pbbox = best.get_bbox()
-    cx = pbbox.xmin() + pbbox.width() / 2
-    cy = pbbox.ymin() + pbbox.height() / 2
-    now = time.monotonic()
+        if best is not None:
+            pbbox = best.get_bbox()
+            cx = pbbox.xmin() + pbbox.width() / 2
+            cy = pbbox.ymin() + pbbox.height() / 2
+            now = time.monotonic()
 
-    # Update SharedDetectionState (for distance/safety)
-    shared_state.update(Detection(
-        label="person",
-        confidence=best.get_confidence(),
-        center_x=cx,
-        center_y=cy,
-        bbox_height=pbbox.height(),
-        timestamp=now,
-    ), available_ids=available_ids)
+            selected_detection = Detection(
+                label="person",
+                confidence=best.get_confidence(),
+                center_x=cx,
+                center_y=cy,
+                bbox_height=pbbox.height(),
+                timestamp=now,
+            )
+            shared_state.update(selected_detection, available_ids=available_ids)
 
-    # --- Face: match from sibling detections ---
-    matched_face_det = _match_face_to_person(faces, pbbox)
-    face = None
-    if matched_face_det is not None:
-        fb = matched_face_det.get_bbox()
-        face = FaceDetection(
-            center_x=fb.xmin() + fb.width() / 2,
-            center_y=fb.ymin() + fb.height() / 2,
-            bbox_width=fb.width(),
-            bbox_height=fb.height(),
-            confidence=matched_face_det.get_confidence(),
-            timestamp=now,
-        )
+            # --- Face: match from sibling detections ---
+            matched_face_det = _match_face_to_person(faces, pbbox)
+            face = None
+            if matched_face_det is not None:
+                fb = matched_face_det.get_bbox()
+                face = FaceDetection(
+                    center_x=fb.xmin() + fb.width() / 2,
+                    center_y=fb.ymin() + fb.height() / 2,
+                    bbox_width=fb.width(),
+                    bbox_height=fb.height(),
+                    confidence=matched_face_det.get_confidence(),
+                    timestamp=now,
+                )
 
-    # --- Hand: extract from C++ pipeline metadata ---
-    hand, gesture_label = _extract_hand_from_roi(roi)
+            # --- Hand: extract from C++ pipeline metadata ---
+            hand, gesture_label = _extract_hand_from_roi(roi)
 
-    if face is not None:
-        gesture_state.update(GestureDetection(
-            face=face,
-            hand=hand,
-            person_bbox_height=pbbox.height(),
-            timestamp=now,
-        ))
-    else:
-        gesture_state.update(None)
+            if face is not None:
+                gesture_state.update(GestureDetection(
+                    face=face,
+                    hand=hand,
+                    person_bbox_height=pbbox.height(),
+                    timestamp=now,
+                ))
+            else:
+                gesture_state.update(None)
 
-    # Update UI
-    following_id = target_state.get_target() if target_state else None
-    _update_ui(ui_state, persons, person_to_id, following_id)
+            # Update UI
+            following_id = target_state.get_target() if target_state else None
+            _update_ui(ui_state, persons, person_to_id, following_id)
 
-    if hand is not None:
-        LOGGER.debug("[gesture] hand=(%s, %.2f,%.2f) gesture=%s",
-                     "open" if hand.is_open else "fist",
-                     hand.center_x, hand.center_y, gesture_label)
+            if hand is not None:
+                LOGGER.debug("[gesture] hand=(%s, %.2f,%.2f) gesture=%s",
+                             "open" if hand.is_open else "fist",
+                             hand.center_x, hand.center_y, gesture_label)
+
+    # Attach flight command HUD arrows (runs every frame, with or without drone)
+    velocity_state = getattr(user_data, 'velocity_state', None)
+    config = getattr(user_data, 'controller_config', None)
+    _attach_velocity_arrows(roi, velocity_state, detection=selected_detection, config=config)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +269,7 @@ def gesture_app_callback(element, buffer, user_data):
 
 def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reached=None,
                        ui_state=None, ui_fps=10, parser=None, record_dir=None,
-                       initial_follow_mode="follow"):
+                       initial_follow_mode="follow", velocity_state=None):
     """Create the gesture pipeline app.
 
     Extends the tiling pipeline (YOLOv8n for person + face) with C++ palm detection,
@@ -285,13 +292,16 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
 
     class GestureUserData(app_callback_class):
         def __init__(self, shared_state, gesture_state, target_state=None,
-                     ui_state=None, byte_tracker=None):
+                     ui_state=None, byte_tracker=None, velocity_state=None,
+                     controller_config=None):
             super().__init__()
             self.shared_state = shared_state
             self.gesture_state = gesture_state
             self.target_state = target_state
             self.ui_state = ui_state
             self.byte_tracker = byte_tracker
+            self.velocity_state = velocity_state
+            self.controller_config = controller_config
 
     class GestureTilingApp(GStreamerTilingApp):
         """Tiling + gesture pipeline with EOS handling and optional MJPEG appsink."""
@@ -466,12 +476,11 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 border_threshold=self.border_threshold,
             )
 
-            # --- 3. Palm detection (wrapped to preserve original resolution) ---
-            # We build the wrapper manually instead of using INFERENCE_PIPELINE_WRAPPER
-            # because that helper uses use-letterbox=true, and the hailoaggregator's
-            # letterbox reversal corrupts the pre-existing person/face detections
-            # from the tiling stage. With use-letterbox=false the aggregator passes
-            # all detections through without coordinate transforms.
+            # --- 3. Person-crop palm detection ---
+            # Crops per-person square regions for palm detection, giving the palm
+            # model a zoomed-in view of each person instead of the whole frame.
+            # After aggregation, palm detections are nested inside person_palm_crop
+            # sub-ROIs; palm_to_hand_crop promotes them to the main ROI.
             palm_detection_pipeline = INFERENCE_PIPELINE(
                 hef_path=DEFAULT_PALM_HEF,
                 post_process_so=PALM_DETECTION_POST_SO,
@@ -479,19 +488,11 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 name="palm_detection",
             )
 
-            from hailo_apps.python.core.common.defines import (
-                TAPPAS_POSTPROC_PATH_KEY, TAPPAS_POSTPROC_PATH_DEFAULT,
-            )
-            tappas_post_process_dir = os.environ.get(
-                TAPPAS_POSTPROC_PATH_KEY, TAPPAS_POSTPROC_PATH_DEFAULT)
-            whole_buffer_crop_so = os.path.join(
-                tappas_post_process_dir, "cropping_algorithms/libwhole_buffer.so")
-
             palm_detection_wrapper = (
                 f"{QUEUE(name='palm_wrapper_input_q')} ! "
                 f"hailocropper name=palm_wrapper_crop "
-                f"so-path={whole_buffer_crop_so} "
-                f"function-name=create_crops "
+                f"so-path={PERSON_PALM_CROPPERS_SO} "
+                f"function-name=person_palm_crop "
                 f"use-letterbox=false "
                 f"internal-offset=true "
                 f"hailoaggregator name=palm_wrapper_agg "
@@ -522,6 +523,8 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             )
 
             # --- 5. Palm cropper (palm → rotated hand crop → inner pipeline) ---
+            # Both this cropper and the person crop wrapper above operate on the
+            # full 720p frame buffer — all crops are taken at full resolution.
             palm_cropper_pipeline = (
                 f"{QUEUE(name='palm_cropper_input_q')} ! "
                 f"hailocropper name=palm_cropper "
@@ -537,7 +540,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 f"palm_agg. ! {QUEUE(name='palm_cropper_output_q')} "
             )
 
-            # --- 6. Gesture classification (removes palm detections, adds gesture label) ---
+            # --- 6. Gesture classification (removes palm/person_palm_crop detections, adds gesture label) ---
             gesture_filter = (
                 f"{QUEUE(name='gesture_filter_q')} ! "
                 f"hailofilter so-path={GESTURE_CLASSIFICATION_SO} "
@@ -564,6 +567,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             else:
                 display_branch = DISPLAY_PIPELINE(
                     video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                    community_overlay=True, overlay_props={"hud_overlay": True},
                 )
                 mjpeg_branch = (
                     f"videoconvert n-threads=2 ! "
@@ -574,7 +578,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 )
                 record_branch = (
                     f"valve name=record_valve drop=true ! "
-                    f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
+                    f"{OVERLAY_PIPELINE(name='record_overlay', community=True, hud_overlay=True)} ! "
                     f"videoconvert n-threads=2 ! "
                     f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
                     f"matroskamux name=record_mux ! filesink name=record_sink async=false location=/dev/null"
@@ -605,7 +609,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
 
     user_data = GestureUserData(
         shared_state, gesture_state, target_state, ui_state=ui_state,
-        byte_tracker=tracker,
+        byte_tracker=tracker, velocity_state=velocity_state,
     )
     app = GestureTilingApp(
         gesture_app_callback, user_data, parser=parser, eos_reached=eos_reached,

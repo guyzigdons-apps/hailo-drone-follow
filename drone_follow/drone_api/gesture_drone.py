@@ -47,7 +47,7 @@ LOGGER = logging.getLogger("drone_follow.gesture")
 
 async def gesture_control_loop(drone, gesture_state, config, shutdown,
                                 altitude_cache=None, ui_state=None,
-                                mode_changed=None):
+                                mode_changed=None, velocity_state=None):
     """Control loop for gesture mode.
 
     Handles wave detection for lock-on, acknowledgment yaw oscillation,
@@ -121,6 +121,8 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                 if not locked_on:
                     if ui_state is not None:
                         ui_state.update_velocity(0.0, 0.0, 0.0, "WAVE-WAIT")
+                    if velocity_state is not None:
+                        velocity_state.update(0.0, 0.0, 0.0, 0.0, "WAVE-WAIT")
                     await asyncio.sleep(period)
                     continue
 
@@ -134,6 +136,8 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                     cmd = await vel_api.send(cmd)
                     if ui_state is not None:
                         ui_state.update_velocity(0.0, 0.0, osc_yaw, "ACK")
+                    if velocity_state is not None:
+                        velocity_state.update(0.0, 0.0, 0.0, osc_yaw, "ACK")
                     await asyncio.sleep(period)
                     continue
                 else:
@@ -164,6 +168,8 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
 
             if ui_state is not None:
                 ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
+            if velocity_state is not None:
+                velocity_state.update(cmd.forward_m_s, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
 
             # Periodic logging
             if now - _last_log_time >= _LOG_INTERVAL:
@@ -281,7 +287,8 @@ async def run_gesture_drone(args, gesture_state, shutdown, shutdown_read_fd=None
                     _telemetry_altitude_task(drone, altitude_cache, shutdown))
                 control_task = asyncio.create_task(
                     gesture_control_loop(drone, gesture_state, config, shutdown,
-                                         altitude_cache, ui_state=ui_state))
+                                         altitude_cache, ui_state=ui_state,
+                                         velocity_state=velocity_state))
 
                 done, pending = await asyncio.wait(
                     [
@@ -308,7 +315,8 @@ async def run_gesture_drone(args, gesture_state, shutdown, shutdown_read_fd=None
                     vel_api.reset_filter()
                     control_task = asyncio.create_task(
                         gesture_control_loop(drone, gesture_state, config, shutdown,
-                                             altitude_cache, ui_state=ui_state))
+                                             altitude_cache, ui_state=ui_state,
+                                             velocity_state=velocity_state))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 
@@ -400,13 +408,15 @@ async def _mode_switching_control_loop(drone, shared_state, gesture_state, confi
             loop_task = asyncio.create_task(
                 gesture_control_loop(
                     drone, gesture_state, config, shutdown,
-                    altitude_cache=altitude_cache, ui_state=ui_state))
+                    altitude_cache=altitude_cache, ui_state=ui_state,
+                    velocity_state=velocity_state))
         else:
             LOGGER.info("[drone] Starting FOLLOW control loop (mode=%s)", current_mode)
             loop_task = asyncio.create_task(
                 live_control_loop(
                     drone, shared_state, config, shutdown,
-                    altitude_cache=altitude_cache, ui_state=ui_state))
+                    altitude_cache=altitude_cache, ui_state=ui_state,
+                    velocity_state=velocity_state))
 
         # Poll for mode change while the control loop runs
         try:
@@ -433,7 +443,8 @@ async def _mode_switching_control_loop(drone, shared_state, gesture_state, confi
 
 async def run_unified_drone(args, shared_state, gesture_state, shutdown,
                              shutdown_read_fd=None, config=None, ui_state=None,
-                             on_connected_cb=None, pipeline_app=None):
+                             on_connected_cb=None, pipeline_app=None,
+                             velocity_state=None):
     """Connect to drone and run the mode-switching control loop.
 
     Replaces both run_live_drone and run_gesture_drone. Supports runtime
