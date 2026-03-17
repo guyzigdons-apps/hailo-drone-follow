@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const POLL_INTERVAL = 100; // ms
 const LOG_POLL_INTERVAL = 500; // ms
 const DEBOUNCE_MS = 250;
 
@@ -13,34 +12,25 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
   const [recording, setRecording] = useState(false);
-  const imgRef = useRef(null);
+  const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
   const logEndRef = useRef(null);
 
-  // Poll detections
+  // Frame-synced detections via SSE (replaces polling)
   useEffect(() => {
-    let active = true;
-    const poll = async () => {
-      while (active) {
-        try {
-          const res = await fetch("/api/detections");
-          if (res.ok) {
-            const data = await res.json();
-            setDetections(data.detections || []);
-            setFollowingId(data.following_id);
-            setVelocity(data.velocity || null);
-          }
-        } catch {
-          // server not ready
-        }
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+    const es = new EventSource("/api/detections/stream");
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setDetections(data.detections || []);
+        setFollowingId(data.following_id);
+        setVelocity(data.velocity || null);
+      } catch {
+        // malformed event
       }
     };
-    poll();
-    return () => {
-      active = false;
-    };
+    return () => es.close();
   }, []);
 
   // Poll recording status
@@ -111,12 +101,103 @@ export default function App() {
     }
   }, [logs]);
 
-  // Track image natural dimensions
-  const onImgLoad = useCallback(() => {
-    const img = imgRef.current;
-    if (img) {
-      setVideoDims({ width: img.naturalWidth, height: img.naturalHeight });
-    }
+  // MJPEG stream via fetch + ReadableStream → canvas
+  useEffect(() => {
+    const controller = new AbortController();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+
+    const BOUNDARY = "--frame\r\n";
+    const HEADER_END = "\r\n\r\n";
+
+    (async () => {
+      try {
+        const res = await fetch("/api/video", { signal: controller.signal });
+        const reader = res.body.getReader();
+        let buffer = new Uint8Array(0);
+
+        const concat = (a, b) => {
+          const c = new Uint8Array(a.length + b.length);
+          c.set(a);
+          c.set(b, a.length);
+          return c;
+        };
+
+        const indexOf = (buf, pattern) => {
+          const enc = new TextEncoder();
+          const pat = enc.encode(pattern);
+          outer: for (let i = 0; i <= buf.length - pat.length; i++) {
+            for (let j = 0; j < pat.length; j++) {
+              if (buf[i + j] !== pat[j]) continue outer;
+            }
+            return i;
+          }
+          return -1;
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer = concat(buffer, value);
+
+          // Process all complete frames in the buffer
+          while (true) {
+            // Find the first boundary
+            const bStart = indexOf(buffer, BOUNDARY);
+            if (bStart === -1) break;
+
+            // Find the end of headers after the boundary
+            const headerStart = bStart + BOUNDARY.length;
+            const headerEnd = indexOf(
+              buffer.subarray(headerStart),
+              HEADER_END
+            );
+            if (headerEnd === -1) break;
+
+            const jpegStart = headerStart + headerEnd + HEADER_END.length;
+
+            // Find the next boundary to determine the end of JPEG data
+            const nextBoundary = indexOf(
+              buffer.subarray(jpegStart),
+              BOUNDARY
+            );
+            if (nextBoundary === -1) break;
+
+            // Extract JPEG bytes (strip trailing \r\n before next boundary)
+            let jpegEnd = jpegStart + nextBoundary;
+            while (jpegEnd > jpegStart && (buffer[jpegEnd - 1] === 0x0a || buffer[jpegEnd - 1] === 0x0d)) {
+              jpegEnd--;
+            }
+            const jpegData = buffer.slice(jpegStart, jpegEnd);
+
+            // Advance buffer past the current frame (keep from next boundary)
+            buffer = buffer.slice(jpegStart + nextBoundary);
+
+            // Draw the frame
+            try {
+              const blob = new Blob([jpegData], { type: "image/jpeg" });
+              const bmp = await createImageBitmap(blob);
+              if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+                canvas.width = bmp.width;
+                canvas.height = bmp.height;
+                setVideoDims({ width: bmp.width, height: bmp.height });
+              }
+              ctx.drawImage(bmp, 0, 0);
+              bmp.close();
+            } catch {
+              // skip corrupt frame
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          console.error("MJPEG stream error:", err);
+        }
+      }
+    })();
+
+    return () => controller.abort();
   }, []);
 
   const handleFollow = async (id) => {
@@ -213,8 +294,11 @@ export default function App() {
         </span>
         {velocity && (
           <span className="velocity-text">
-            {velocity.mode} | Fwd {velocity.forward_m_s.toFixed(2)} m/s | Down{" "}
-            {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
+            {velocity.mode} | Fwd {velocity.forward_m_s.toFixed(2)} m/s
+            {velocity.right_m_s != null && velocity.right_m_s !== 0
+              ? ` | Lat ${velocity.right_m_s.toFixed(2)} m/s`
+              : ""}{" "}
+            | Down {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
             {velocity.yawspeed_deg_s.toFixed(1)} deg/s
           </span>
         )}
@@ -235,6 +319,112 @@ export default function App() {
             <div className="controls-panel side-card">
               <div className="controls-header">Controls</div>
               <div className="controls-body">
+                {/* --- Operational controls --- */}
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">Target Size</span>
+                  <input
+                    type="range"
+                    min="0.05"
+                    max="1.0"
+                    step="0.01"
+                    value={config.target_bbox_height}
+                    disabled={config.yaw_only}
+                    onChange={(e) => onSlider("target_bbox_height", e.target.value)}
+                  />
+                  <span className="control-value">
+                    {(config.target_bbox_height * 100).toFixed(0)}%
+                  </span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Target Alt</span>
+                  <input
+                    type="range"
+                    min="1"
+                    max="20"
+                    step="0.5"
+                    value={config.target_altitude}
+                    onChange={(e) => onSlider("target_altitude", e.target.value)}
+                  />
+                  <span className="control-value">{config.target_altitude.toFixed(1)}m</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Yaw Only</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.yaw_only ? "toggle-on" : ""}`}
+                      onClick={() => onToggle("yaw_only")}
+                    >
+                      {config.yaw_only ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Mode</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.follow_mode === "follow" ? "toggle-on" : ""}`}
+                      onClick={() => {
+                        const updated = { ...config, follow_mode: "follow" };
+                        setConfig(updated);
+                        postConfig({ follow_mode: "follow" });
+                      }}
+                    >
+                      FOLLOW
+                    </button>
+                    <button
+                      className={`toggle-btn ${config.follow_mode === "orbit" ? "toggle-on" : ""}`}
+                      onClick={() => {
+                        const updated = { ...config, follow_mode: "orbit" };
+                        setConfig(updated);
+                        postConfig({ follow_mode: "orbit" });
+                      }}
+                    >
+                      ORBIT
+                    </button>
+                  </div>
+                </label>
+                {config.follow_mode === "orbit" && (
+                  <>
+                    <label className="control-row">
+                      <span className="control-label">Orbit Speed</span>
+                      <input
+                        type="range"
+                        min="0.2"
+                        max="3.0"
+                        step="0.1"
+                        value={config.orbit_speed_m_s}
+                        onChange={(e) => onSlider("orbit_speed_m_s", e.target.value)}
+                      />
+                      <span className="control-value">{config.orbit_speed_m_s.toFixed(1)} m/s</span>
+                    </label>
+                    <label className="control-row">
+                      <span className="control-label">Direction</span>
+                      <div className="toggle-wrapper">
+                        <button
+                          className={`toggle-btn ${config.orbit_direction === 1 ? "toggle-on" : ""}`}
+                          onClick={() => {
+                            const updated = { ...config, orbit_direction: 1 };
+                            setConfig(updated);
+                            postConfig({ orbit_direction: 1 });
+                          }}
+                        >
+                          CW
+                        </button>
+                        <button
+                          className={`toggle-btn ${config.orbit_direction === -1 ? "toggle-on" : ""}`}
+                          onClick={() => {
+                            const updated = { ...config, orbit_direction: -1 };
+                            setConfig(updated);
+                            postConfig({ orbit_direction: -1 });
+                          }}
+                        >
+                          CCW
+                        </button>
+                      </div>
+                    </label>
+                  </>
+                )}
+                {/* --- Tuning parameters --- */}
                 <label className="control-row">
                   <span className="control-label">KP Yaw</span>
                   <input
@@ -246,29 +436,6 @@ export default function App() {
                     onChange={(e) => onSlider("kp_yaw", e.target.value)}
                   />
                   <span className="control-value">{config.kp_yaw.toFixed(1)}</span>
-                </label>
-                <label className="control-row">
-                  <span className="control-label">Yaw Smooth</span>
-                  <div className="toggle-wrapper">
-                    <button
-                      className={`toggle-btn ${config.smooth_yaw ? "toggle-on" : ""}`}
-                      onClick={() => onToggle("smooth_yaw")}
-                    >
-                      {config.smooth_yaw ? "ON" : "OFF"}
-                    </button>
-                  </div>
-                </label>
-                <label className="control-row">
-                  <span className="control-label">Yaw Alpha</span>
-                  <input
-                    type="range"
-                    min="0.05"
-                    max="1.0"
-                    step="0.05"
-                    value={config.yaw_alpha}
-                    onChange={(e) => onSlider("yaw_alpha", e.target.value)}
-                  />
-                  <span className="control-value">{config.yaw_alpha.toFixed(2)}</span>
                 </label>
                 <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
                   <span className="control-label">KP Forward</span>
@@ -296,6 +463,29 @@ export default function App() {
                   />
                   <span className="control-value">{config.kp_backward.toFixed(1)}</span>
                 </label>
+                <label className="control-row">
+                  <span className="control-label">Yaw Smooth</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.smooth_yaw ? "toggle-on" : ""}`}
+                      onClick={() => onToggle("smooth_yaw")}
+                    >
+                      {config.smooth_yaw ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Yaw Alpha</span>
+                  <input
+                    type="range"
+                    min="0.05"
+                    max="1.0"
+                    step="0.05"
+                    value={config.yaw_alpha}
+                    onChange={(e) => onSlider("yaw_alpha", e.target.value)}
+                  />
+                  <span className="control-value">{config.yaw_alpha.toFixed(2)}</span>
+                </label>
                 <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
                   <span className="control-label">Fwd Smooth</span>
                   <div className="toggle-wrapper">
@@ -320,62 +510,6 @@ export default function App() {
                     onChange={(e) => onSlider("forward_alpha", e.target.value)}
                   />
                   <span className="control-value">{config.forward_alpha.toFixed(2)}</span>
-                </label>
-                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
-                  <span className="control-label">Distance Target</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="30"
-                    step="0.5"
-                    value={config.target_distance_m ?? 0}
-                    disabled={config.yaw_only}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      const updated = { ...config, target_distance_m: v || null };
-                      setConfig(updated);
-                      postConfig({ target_distance_m: v || null });
-                    }}
-                  />
-                  <span className="control-value">
-                    {config.target_distance_m
-                      ? `${config.target_distance_m.toFixed(1)}m`
-                      : "off"}
-                  </span>
-                </label>
-                <label className="control-row">
-                  <span className="control-label">Yaw Only</span>
-                  <div className="toggle-wrapper">
-                    <button
-                      className={`toggle-btn ${config.yaw_only ? "toggle-on" : ""}`}
-                      onClick={() => onToggle("yaw_only")}
-                    >
-                      {config.yaw_only ? "ON" : "OFF"}
-                    </button>
-                  </div>
-                </label>
-                <label className="control-row">
-                  <span className="control-label">Fixed Alt</span>
-                  <div className="toggle-wrapper">
-                    <button
-                      className={`toggle-btn ${config.fixed_altitude ? "toggle-on" : ""}`}
-                      onClick={() => onToggle("fixed_altitude")}
-                    >
-                      {config.fixed_altitude ? "ON" : "OFF"}
-                    </button>
-                  </div>
-                </label>
-                <label className="control-row">
-                  <span className="control-label">Takeoff Alt</span>
-                  <input
-                    type="range"
-                    min="1"
-                    max="20"
-                    step="0.5"
-                    value={config.takeoff_altitude}
-                    onChange={(e) => onSlider("takeoff_altitude", e.target.value)}
-                  />
-                  <span className="control-value">{config.takeoff_altitude.toFixed(1)}m</span>
                 </label>
               </div>
             </div>
@@ -403,12 +537,9 @@ export default function App() {
 
         <div className="video-column">
           <div className="video-container">
-        <img
-          ref={imgRef}
+        <canvas
+          ref={canvasRef}
           className="video-feed"
-          src="/api/video"
-          alt="Live feed"
-          onLoad={onImgLoad}
         />
         {vw > 0 && vh > 0 && (
           <svg className="overlay" viewBox={`0 0 ${vw} ${vh}`}>

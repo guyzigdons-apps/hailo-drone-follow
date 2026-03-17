@@ -2,20 +2,26 @@
 Web server for drone follow UI.
 
 Serves a React UI with live MJPEG video stream and interactive bounding boxes.
-The React app polls for detection metadata and allows click-to-follow.
+Detections are synchronized with video frames via atomic snapshots and SSE.
 
 Architecture:
     SharedUIState receives data from two GStreamer sources:
         1. app_callback (identity element) -> detection metadata
         2. appsink callback (JPEG branch) -> encoded JPEG frames
 
+    When a JPEG frame arrives (update_frame), the current detections are
+    atomically snapshotted alongside it.  The SSE endpoint pushes these
+    paired snapshots so the frontend always renders bboxes matching the
+    displayed frame.
+
     WebServer (stdlib ThreadingHTTPServer) serves:
-        GET  /api/video        -> MJPEG stream
-        GET  /api/detections   -> JSON detection list
-        POST /api/follow/<id>  -> set follow target
-        POST /api/follow/clear -> clear target
-        GET  /api/status       -> current status
-        GET  /*                -> React static build (SPA fallback)
+        GET  /api/video              -> MJPEG stream
+        GET  /api/detections/stream  -> SSE detection stream (frame-synced)
+        GET  /api/detections         -> JSON detection list (polling fallback)
+        POST /api/follow/<id>        -> set follow target
+        POST /api/follow/clear       -> clear target
+        GET  /api/status             -> current status
+        GET  /*                      -> React static build (SPA fallback)
 """
 
 import json
@@ -38,6 +44,7 @@ class SharedUIState:
         self._detections: list = []
         self._following_id: Optional[int] = None
         self._frame_jpeg: Optional[bytes] = None
+        self._frame_snapshot: Optional[dict] = None
         self._velocity = {
             "forward_m_s": 0.0,
             "down_m_s": 0.0,
@@ -56,9 +63,18 @@ class SharedUIState:
             self._following_id = following_id
 
     def update_frame(self, jpeg_bytes: bytes):
-        """Called from appsink callback with pre-encoded JPEG bytes."""
+        """Called from appsink callback with pre-encoded JPEG bytes.
+
+        Atomically snapshots the current detections alongside the frame
+        so the SSE endpoint can push frame-synced bounding boxes.
+        """
         with self._lock:
             self._frame_jpeg = jpeg_bytes
+            self._frame_snapshot = {
+                "detections": list(self._detections),
+                "following_id": self._following_id,
+                "velocity": dict(self._velocity),
+            }
         self._frame_event.set()
         self._frame_event.clear()
 
@@ -71,11 +87,12 @@ class SharedUIState:
                 "velocity": dict(self._velocity),
             }
 
-    def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str):
+    def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str, right_m_s: float = 0.0):
         """Called from control loop to expose current command velocity in UI."""
         with self._lock:
             self._velocity = {
                 "forward_m_s": float(forward_m_s),
+                "right_m_s": float(right_m_s),
                 "down_m_s": float(down_m_s),
                 "yawspeed_deg_s": float(yawspeed_deg_s),
                 "mode": str(mode),
@@ -105,6 +122,12 @@ class SharedUIState:
         self._frame_event.wait(timeout=timeout)
         with self._lock:
             return self._frame_jpeg
+
+    def wait_frame_with_detections(self, timeout: float = 1.0):
+        """Block until a new frame; return (jpeg_bytes, snapshot_dict)."""
+        self._frame_event.wait(timeout=timeout)
+        with self._lock:
+            return self._frame_jpeg, self._frame_snapshot
 
 
 class _WebHandler(BaseHTTPRequestHandler):
@@ -150,6 +173,8 @@ class _WebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/video":
             self._handle_mjpeg()
+        elif self.path == "/api/detections/stream":
+            self._handle_detections_sse()
         elif self.path == "/api/detections":
             self._handle_detections()
         elif self.path == "/api/status":
@@ -187,6 +212,25 @@ class _WebHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _handle_detections_sse(self):
+        """SSE: push frame-synced detection snapshots on every new MJPEG frame."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self._cors_headers()
+        self.end_headers()
+
+        try:
+            while True:
+                _jpeg, snapshot = self.ui_state.wait_frame_with_detections(timeout=2.0)
+                if snapshot is None:
+                    continue
+                self.wfile.write(f"data: {json.dumps(snapshot)}\n\n".encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def _handle_detections(self):
         self._send_json(self.ui_state.get_detections())
 
@@ -209,12 +253,16 @@ class _WebHandler(BaseHTTPRequestHandler):
         "yaw_only": bool,
         "fixed_altitude": bool,
         "target_distance_m": float,
+        "target_bbox_height": float,
         "dead_zone_height_percent": float,
         "smooth_yaw": bool,
         "yaw_alpha": float,
         "smooth_forward": bool,
         "forward_alpha": float,
-        "takeoff_altitude": float,
+        "target_altitude": float,
+        "follow_mode": str,
+        "orbit_speed_m_s": float,
+        "orbit_direction": int,
     }
 
     def _handle_get_config(self):
@@ -379,6 +427,7 @@ class WebServer:
         _WebHandler.follow_server_port = self.follow_server_port
         _WebHandler.recording_ctl = self.recording_ctl
 
+        ThreadingHTTPServer.allow_reuse_address = True
         self.server = ThreadingHTTPServer((self.host, self.port), _WebHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
