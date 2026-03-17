@@ -215,14 +215,57 @@ def _openhd_stream_pipeline(port=5500, host="127.0.0.1", bitrate=3917, name="ope
     )
 
 
+# Sideband metadata file written by OpenHD with current SHM resolution
+_SHM_META_PATH = "/tmp/openhd_raw_video.meta"
+
+
+def _read_shm_resolution():
+    """Read current SHM resolution from OpenHD's sideband metadata file.
+
+    Returns (width, height, fps) or None if the file doesn't exist or is invalid.
+    OpenHD writes this file every time the camera pipeline (re)starts, so it
+    always reflects the active capture resolution.
+    """
+    import json as _json
+    try:
+        with open(_SHM_META_PATH, "r") as f:
+            meta = _json.loads(f.read())
+        w = int(meta["width"])
+        h = int(meta["height"])
+        fps = int(meta.get("fps", 30))
+        if w > 0 and h > 0 and fps > 0:
+            return (w, h, fps)
+    except (FileNotFoundError, KeyError, ValueError, _json.JSONDecodeError) as e:
+        LOGGER.debug("Cannot read SHM metadata from %s: %s", _SHM_META_PATH, e)
+    return None
+
+
 def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, name="source"):
     """Build a GStreamer source pipeline for OpenHD shared-memory NV12 passthrough.
 
     shmsrc buffers are read-only (mmap'd shared memory).  Force an immediate
     NV12->I420 conversion to create writable buffers (cheap UV deinterleave).
-    --width/--height MUST match the OpenHD camera resolution exactly.
+
+    The caps MUST match the resolution that OpenHD is actually writing into
+    shared memory.  We read the sideband metadata file that OpenHD writes on
+    every pipeline (re)start to auto-detect the correct resolution, falling
+    back to the caller-supplied video_width/video_height if the file is absent.
     """
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
+
+    # Auto-detect resolution from OpenHD metadata
+    shm_res = _read_shm_resolution()
+    if shm_res is not None:
+        shm_w, shm_h, shm_fps = shm_res
+        if shm_w != video_width or shm_h != video_height or shm_fps != frame_rate:
+            LOGGER.info(
+                "SHM resolution from metadata (%dx%d@%d) differs from "
+                "CLI/defaults (%dx%d@%d) — using metadata values",
+                shm_w, shm_h, shm_fps, video_width, video_height, frame_rate,
+            )
+            video_width = shm_w
+            video_height = shm_h
+            frame_rate = shm_fps
 
     socket_path = str(video_source).split('://', 1)[1]
 
@@ -301,6 +344,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self._record_lock = threading.Lock()
             self._shm_rebuild_pending = False
             super().__init__(app_callback, user_data, parser=parser)
+            # After base class init, sync resolution from SHM metadata if in
+            # SHM mode so that self.video_width/height are correct for any
+            # future rebuild (watchdog, manual, etc.).
+            if str(getattr(self, 'video_source', '')).startswith('shm://'):
+                shm_res = _read_shm_resolution()
+                if shm_res is not None:
+                    self.video_width, self.video_height, self.frame_rate = shm_res
             # Connect appsink after pipeline is created by super().__init__
             if self._ui_enabled:
                 self._connect_mjpeg_sink()
@@ -338,17 +388,85 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 is_shm = str(getattr(self, 'video_source', '')).startswith('shm://')
                 if is_shm and not self._shm_rebuild_pending:
                     self._shm_rebuild_pending = True
-                    LOGGER.warning("SHM pipeline error (%s) — rebuilding in 2s", err)
-                    GLib.timeout_add(2000, self._shm_rebuild)
+                    LOGGER.warning("SHM pipeline error (%s) — waiting for socket + rebuilding", err)
+                    # Start polling for the SHM socket to reappear (OpenHD may
+                    # be restarting its pipeline with a new resolution).
+                    self._shm_poll_count = 0
+                    GLib.timeout_add(500, self._shm_wait_for_socket)
                     return True
                 elif is_shm:
                     # Additional error while rebuild already pending — ignore
                     return True
             return super().bus_call(bus, message, loop)
 
+        def _shm_wait_for_socket(self):
+            """Poll until the SHM socket and metadata file exist, then rebuild.
+
+            OpenHD removes the socket and recreates it during pipeline restart.
+            The metadata file is written first (during setup()), then the socket
+            appears when shmsink enters PLAYING.  We poll every 500ms for up to
+            30s (60 attempts) before giving up.
+            """
+            self._shm_poll_count += 1
+            socket_path = str(self.video_source).split('://', 1)[1]
+            meta_ok = _read_shm_resolution() is not None
+            socket_ok = os.path.exists(socket_path)
+            if socket_ok and meta_ok:
+                LOGGER.info("SHM socket + metadata ready after %d polls — rebuilding pipeline",
+                            self._shm_poll_count)
+                self._shm_rebuild()
+                return False  # stop polling
+            if self._shm_poll_count >= 60:
+                LOGGER.warning("SHM socket/metadata did not reappear after 30s — rebuilding anyway")
+                self._shm_rebuild()
+                return False
+            if self._shm_poll_count % 10 == 0:
+                LOGGER.debug("Waiting for SHM socket (exists=%s) + metadata (exists=%s) [poll %d]",
+                             socket_ok, meta_ok, self._shm_poll_count)
+            return True  # keep polling
+
         def _shm_rebuild(self):
-            """Rebuild pipeline and clear the pending flag."""
+            """Rebuild pipeline after SHM error (e.g. OpenHD resolution change).
+
+            Re-reads the OpenHD metadata file so the new pipeline uses
+            the correct caps for the (potentially changed) resolution.
+            Performs a careful teardown to avoid segfaults from in-flight
+            Hailo inference buffers.
+            """
+            import gi
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+
             self._shm_rebuild_pending = False
+            # Update our video dimensions from the metadata file so the
+            # rebuilt pipeline negotiates the correct SHM buffer layout.
+            shm_res = _read_shm_resolution()
+            if shm_res is not None:
+                new_w, new_h, new_fps = shm_res
+                if new_w != self.video_width or new_h != self.video_height:
+                    LOGGER.info(
+                        "SHM rebuild: resolution changed %dx%d -> %dx%d",
+                        self.video_width, self.video_height, new_w, new_h,
+                    )
+                self.video_width = new_w
+                self.video_height = new_h
+                self.frame_rate = new_fps
+
+            # Pre-teardown: transition the old pipeline through READY first
+            # so in-flight Hailo inference buffers are drained gracefully
+            # before we go to NULL (which is more aggressive).
+            if self.pipeline:
+                LOGGER.debug("SHM rebuild: pipeline PLAYING -> READY (drain buffers)")
+                self.pipeline.set_state(Gst.State.READY)
+                result, _state, _pending = self.pipeline.get_state(5 * Gst.SECOND)
+                if result != Gst.StateChangeReturn.SUCCESS:
+                    LOGGER.warning("SHM rebuild: READY transition incomplete (result=%s), continuing", result)
+
+            # Reset ByteTracker to clear stale predictions from old resolution
+            if hasattr(self, 'user_data') and hasattr(self.user_data, 'byte_tracker'):
+                self.user_data.byte_tracker.reset()
+                LOGGER.debug("SHM rebuild: ByteTracker reset")
+
             return self._rebuild_pipeline()
 
         def on_eos(self):

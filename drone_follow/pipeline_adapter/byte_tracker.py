@@ -329,6 +329,14 @@ class ByteTracker:
         self.match_thresh = match_thresh  # Lower for turns: allows matching with lower IOU
         self.kalman_filter = KalmanFilter()
 
+    def reset(self):
+        """Clear all tracking state (e.g. after resolution change)."""
+        self.tracked_stracks = []
+        self.lost_stracks = []
+        self.removed_stracks = []
+        self.frame_id = 0
+        self.kalman_filter = KalmanFilter()
+
     def update(self, output_results, frame=None):
         self.frame_id += 1
         activated_starcks = []

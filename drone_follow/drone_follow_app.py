@@ -14,6 +14,9 @@ Usage:
 Pipeline options (--input, --input-codec, etc.) are passed through to the tiling pipeline.
 """
 
+import faulthandler
+faulthandler.enable()
+
 import argparse
 import asyncio
 import logging
