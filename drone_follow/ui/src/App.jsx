@@ -287,10 +287,13 @@ export default function App() {
   return (
     <div className="app">
       <div className="status-bar">
+        <span className={`mode-badge ${followingId != null ? "mode-sot" : "mode-mot"}`}>
+          {followingId != null ? "SOT" : "MOT"}
+        </span>
         <span className="status-text">
           {followingId != null
-            ? `Following: ID ${followingId}`
-            : "Auto (largest person)"}
+            ? `Following ID ${followingId}`
+            : "No target selected"}
         </span>
         {velocity && (
           <span className="velocity-text">

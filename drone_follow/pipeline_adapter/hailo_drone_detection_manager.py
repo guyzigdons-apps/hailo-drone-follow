@@ -159,15 +159,12 @@ def app_callback(element, buffer, user_data):
                             target_id, sorted(available_ids) if available_ids else "none")
             return
     else:
-        best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
-        best_tid = person_to_id.get(id(best))
-        if best_tid is not None and target_state is not None:
-            target_state.set_target(best_tid)
-            follow_mode = f"locked ID {best_tid}"
-        elif best_tid is not None:
-            follow_mode = f"largest (ID {best_tid})"
-        else:
-            follow_mode = "largest (no tracking)"
+        # MOT mode: no target selected — don't follow anyone
+        user_data.shared_state.update(None, available_ids=available_ids)
+        _update_ui(ui_state, persons, person_to_id, None)
+        LOGGER.debug("[MOT MODE] No target selected. Available: %s",
+                     sorted(available_ids) if available_ids else "none")
+        return
 
     bbox = best.get_bbox()
     cx = bbox.xmin() + bbox.width() / 2

@@ -54,6 +54,28 @@ body {
   border: 1px solid #3a3a3a;
 }
 
+.mode-badge {
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-right: 10px;
+  flex-shrink: 0;
+}
+
+.mode-mot {
+  background: #3a5a8a;
+  color: #a8d6ff;
+  border: 1px solid #5a7aaa;
+}
+
+.mode-sot {
+  background: #2a7a4a;
+  color: #a8ffb8;
+  border: 1px solid #3a9a5a;
+}
+
 .status-text {
   font-size: 14px;
   font-weight: 600;
