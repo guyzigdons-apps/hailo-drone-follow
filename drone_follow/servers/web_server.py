@@ -43,6 +43,7 @@ class SharedUIState:
         self._lock = threading.Lock()
         self._detections: list = []
         self._following_id: Optional[int] = None
+        self._tracking_mode: str = "mot"
         self._frame_jpeg: Optional[bytes] = None
         self._frame_snapshot: Optional[dict] = None
         self._velocity = {
@@ -56,11 +57,13 @@ class SharedUIState:
         self._logs: deque = deque(maxlen=200)
         self._log_counter: int = 0
 
-    def update_detections(self, detections: list, following_id: Optional[int] = None):
+    def update_detections(self, detections: list, following_id: Optional[int] = None,
+                          tracking_mode: str = "mot"):
         """Called from app_callback with detection metadata."""
         with self._lock:
             self._detections = detections
             self._following_id = following_id
+            self._tracking_mode = tracking_mode
 
     def update_frame(self, jpeg_bytes: bytes):
         """Called from appsink callback with pre-encoded JPEG bytes.
@@ -73,6 +76,7 @@ class SharedUIState:
             self._frame_snapshot = {
                 "detections": list(self._detections),
                 "following_id": self._following_id,
+                "tracking_mode": self._tracking_mode,
                 "velocity": dict(self._velocity),
             }
         self._frame_event.set()
@@ -84,6 +88,7 @@ class SharedUIState:
             return {
                 "detections": list(self._detections),
                 "following_id": self._following_id,
+                "tracking_mode": self._tracking_mode,
                 "velocity": dict(self._velocity),
             }
 
