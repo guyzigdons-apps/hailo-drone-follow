@@ -202,7 +202,7 @@ def app_callback(element, buffer, user_data):
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
-               parser: Optional[argparse.ArgumentParser] = None, record_dir=None,
+               parser: Optional[argparse.ArgumentParser] = None,
                tracker_name: Optional[str] = None,
                record_enabled=False, record_dir=None):
     """Create the tiling pipeline app with drone-follow callback.
