@@ -61,7 +61,7 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
     group.add_argument("--record", action="store_true",
-                       help="Record raw video + detections for the entire session (requires --ui)")
+                       help="Record raw video + detections for the entire session")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -83,7 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Camera is mounted upside-down: default both mirrors on (= 180° rotation).
     # The library defines --horizontal-mirror/--vertical-mirror (store_true, default=False);
     # set_defaults overrides arg-level defaults.
-    parser.set_defaults(horizontal_mirror=True, vertical_mirror=True)
+    parser.set_defaults(horizontal_mirror=False, vertical_mirror=False)
     return parser
 
 
@@ -129,7 +129,7 @@ def main():
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
-                     record_dir=recordings_dir)
+                     record_enabled=ui_pre_args.record, record_dir=recordings_dir)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
@@ -162,6 +162,10 @@ def main():
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
         try:
+            if app.is_recording:
+                app.stop_recording()
+            else:
+                app.cleanup_recording_branch()
             app.loop.quit()
         except Exception:
             pass
@@ -200,8 +204,7 @@ def main():
         signal.signal(signal.SIGTERM, on_signal)
 
     # Start recording from CLI flag after pipeline is running
-    if ui_pre_args.record and ui_state is not None:
-        # Schedule recording start after pipeline enters PLAYING state
+    if ui_pre_args.record:
         def _start_recording_delayed():
             time.sleep(1.0)  # wait for pipeline to reach PLAYING
             app.start_recording()
@@ -218,6 +221,8 @@ def main():
             shutdown.set()
         if app.is_recording:
             app.stop_recording()
+        else:
+            app.cleanup_recording_branch()
         # Wait for drone thread to finish cleanly
         drone_thread.join(timeout=5.0)
         if web_server is not None:
