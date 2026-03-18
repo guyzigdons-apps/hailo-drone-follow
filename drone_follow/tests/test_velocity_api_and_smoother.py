@@ -38,6 +38,7 @@ class TestVelocityCommandAPIClamping:
         cfg = ControllerConfig(
             max_forward=2.0, max_backward=3.0,
             max_down_speed=1.5, max_yawspeed=90.0,
+            max_orbit_speed=1.0,
             smooth_yaw=False,
         )
         return VelocityCommandAPI(drone=None, config=cfg)
