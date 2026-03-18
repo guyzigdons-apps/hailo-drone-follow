@@ -153,127 +153,43 @@ def _match_face_to_person(faces, person_bbox):
     return best
 
 
-# ---------------------------------------------------------------------------
-# Palm tracker — lightweight position-based tracking for palm bboxes
-# ---------------------------------------------------------------------------
-
-class PalmTracker:
-    """Track palm detections across frames using position proximity.
-
-    Assigns stable IDs to palms so we can detect waves and lock onto
-    a specific palm without running the expensive hand landmark model.
-    """
-
-    def __init__(self, max_distance: float = 0.15, max_lost_frames: int = 15):
-        self._next_id = 1
-        self._tracks: dict = {}  # id -> {cx, cy, w, h, conf, lost_frames}
-        self._max_distance = max_distance
-        self._max_lost_frames = max_lost_frames
-
-    def update(self, palm_bboxes: list, timestamp: float) -> list:
-        """Update tracker with new palm bboxes.
-
-        Args:
-            palm_bboxes: list of (cx, cy, w, h, confidence) tuples
-            timestamp: current time
-
-        Returns:
-            list of PalmDetection with stable track IDs
-        """
-        # Mark all tracks as unmatched
-        matched_tracks = set()
-        matched_detections = set()
-        results = []
-
-        # Greedy nearest-neighbor matching
-        pairs = []
-        for di, (cx, cy, w, h, conf) in enumerate(palm_bboxes):
-            for tid, track in self._tracks.items():
-                dist = math.sqrt((cx - track["cx"]) ** 2 + (cy - track["cy"]) ** 2)
-                pairs.append((dist, di, tid))
-        pairs.sort()
-
-        for dist, di, tid in pairs:
-            if di in matched_detections or tid in matched_tracks:
-                continue
-            if dist > self._max_distance:
-                break
-            matched_tracks.add(tid)
-            matched_detections.add(di)
-            cx, cy, w, h, conf = palm_bboxes[di]
-            self._tracks[tid] = {"cx": cx, "cy": cy, "w": w, "h": h,
-                                 "conf": conf, "lost_frames": 0}
-            results.append(PalmDetection(
-                track_id=tid, center_x=cx, center_y=cy,
-                bbox_width=w, bbox_height=h,
-                confidence=conf, timestamp=timestamp))
-
-        # New tracks for unmatched detections
-        for di, (cx, cy, w, h, conf) in enumerate(palm_bboxes):
-            if di in matched_detections:
-                continue
-            tid = self._next_id
-            self._next_id += 1
-            self._tracks[tid] = {"cx": cx, "cy": cy, "w": w, "h": h,
-                                 "conf": conf, "lost_frames": 0}
-            results.append(PalmDetection(
-                track_id=tid, center_x=cx, center_y=cy,
-                bbox_width=w, bbox_height=h,
-                confidence=conf, timestamp=timestamp))
-
-        # Age out unmatched tracks
-        lost_ids = []
-        for tid in self._tracks:
-            if tid not in matched_tracks:
-                self._tracks[tid]["lost_frames"] += 1
-                if self._tracks[tid]["lost_frames"] > self._max_lost_frames:
-                    lost_ids.append(tid)
-        for tid in lost_ids:
-            del self._tracks[tid]
-
-        return results
-
-    def get_track(self, track_id: int) -> Optional[dict]:
-        return self._tracks.get(track_id)
-
-
 def _extract_palms_from_roi(roi):
-    """Extract palm detections from ROI when gesture_classification is pass-through.
+    """Extract tracked palm detections from ROI.
 
-    When hand_landmark_hailonet and gesture_classification are in pass-through,
-    the raw palm detections survive as nested objects inside person_palm_crop
-    sub-ROIs, or as top-level 'palm' detections promoted by palm_to_hand_crop.
+    After hailotracker, each palm/hand detection has a HailoUniqueID attached.
+    When gesture_classification is pass-through, detections keep their original
+    labels (palm/hand). When active, they become "hand" detections.
 
-    Returns list of (center_x, center_y, width, height, confidence) tuples
-    in frame-normalized coordinates.
+    Returns list of PalmDetection with stable track IDs from the GStreamer tracker.
     """
+    now = time.monotonic()
     palms = []
 
-    # Check for top-level palm detections (promoted by palm_to_hand_crop)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     for det in detections:
         label = det.get_label()
-        if label == "palm" or label == "hand":
-            bbox = det.get_bbox()
-            cx = bbox.xmin() + bbox.width() / 2
-            cy = bbox.ymin() + bbox.height() / 2
-            palms.append((cx, cy, bbox.width(), bbox.height(), det.get_confidence()))
+        if label not in ("palm", "hand"):
+            continue
 
-    # Also check nested in sub-ROIs (person_palm_crop)
-    if not palms:
-        for det in detections:
-            if det.get_label() == "person_palm_crop":
-                sub_dets = det.get_objects_typed(hailo.HAILO_DETECTION)
-                parent_bbox = det.get_bbox()
-                for sub_det in sub_dets:
-                    if sub_det.get_label() == "palm":
-                        sb = sub_det.get_bbox()
-                        # Convert from parent-relative to frame-normalized
-                        cx = parent_bbox.xmin() + (sb.xmin() + sb.width() / 2) * parent_bbox.width()
-                        cy = parent_bbox.ymin() + (sb.ymin() + sb.height() / 2) * parent_bbox.height()
-                        w = sb.width() * parent_bbox.width()
-                        h = sb.height() * parent_bbox.height()
-                        palms.append((cx, cy, w, h, sub_det.get_confidence()))
+        bbox = det.get_bbox()
+        cx = bbox.xmin() + bbox.width() / 2
+        cy = bbox.ymin() + bbox.height() / 2
+
+        # Extract tracking ID from HailoUniqueID (attached by hailotracker)
+        track_id = -1
+        ids = det.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+        if ids:
+            track_id = ids[0].get_id()
+
+        palms.append(PalmDetection(
+            track_id=track_id,
+            center_x=cx,
+            center_y=cy,
+            bbox_width=bbox.width(),
+            bbox_height=bbox.height(),
+            confidence=det.get_confidence(),
+            timestamp=now,
+        ))
 
     return palms
 
@@ -402,24 +318,16 @@ def gesture_app_callback(element, buffer, user_data):
     shared_state = user_data.shared_state
     palm_state = user_data.palm_state
     palm_lock = user_data.palm_lock
-    palm_tracker = user_data.palm_tracker
     selected_detection = None
     hand = None
     gesture_label = None
     now = time.monotonic()
 
-    # --- Palm tracking (always runs) ---
+    # --- Palm tracking (via GStreamer hailotracker — always runs) ---
     locked_id = palm_lock.get_locked_palm_id() if palm_lock is not None else None
     hand_landmarks_on = palm_lock.hand_landmarks_enabled if palm_lock is not None else True
 
-    if hand_landmarks_on:
-        # Hand landmarks are on — extract palms from "hand" detections
-        palm_bboxes = _extract_palms_from_roi(roi)
-    else:
-        # Hand landmarks off — extract raw palm detections
-        palm_bboxes = _extract_palms_from_roi(roi)
-
-    tracked_palms = palm_tracker.update(palm_bboxes, now) if palm_tracker is not None else []
+    tracked_palms = _extract_palms_from_roi(roi)
     if palm_state is not None:
         palm_state.update(tracked_palms)
 
@@ -569,6 +477,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
         QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
         TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
+        TRACKER_PIPELINE,
     )
 
     if parser is None:
@@ -577,8 +486,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
     class GestureUserData(app_callback_class):
         def __init__(self, shared_state, gesture_state, target_state=None,
                      ui_state=None, byte_tracker=None, velocity_state=None,
-                     controller_config=None, palm_state=None, palm_lock=None,
-                     palm_tracker=None):
+                     controller_config=None, palm_state=None, palm_lock=None):
             super().__init__()
             self.shared_state = shared_state
             self.gesture_state = gesture_state
@@ -589,7 +497,6 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             self.controller_config = controller_config
             self.palm_state = palm_state
             self.palm_lock = palm_lock
-            self.palm_tracker = palm_tracker
 
     class GestureTilingApp(GStreamerTilingApp):
         """Tiling + gesture pipeline with EOS handling and optional MJPEG appsink."""
@@ -602,6 +509,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             self._ui_fps = ui_fps
             self._initial_follow_mode = initial_follow_mode
             self._gesture_enabled = (initial_follow_mode == "gesture")
+            self._hand_landmarks_enabled = False  # pipeline starts with pass-through=true
             self._recording = False
             self._record_dir = record_dir or os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
@@ -609,6 +517,103 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             super().__init__(app_callback, user_data, parser=parser)
             if self._ui_enabled:
                 self._connect_mjpeg_sink()
+            # Note: gesture_classification (hailofilter) does NOT support pass-through.
+            # Palm detections survive to the callback regardless.
+            # Debug: attach pad probe before palm tracker to inspect metadata
+            self._attach_palm_debug_probe()
+
+        def _attach_palm_debug_probe(self):
+            """Attach a pad probe on the palm_tracker sink to dump metadata structure.
+
+            The tracker is now after palm_cropper, so we should see promoted
+            palm/hand detections at this point.
+            """
+            Gst = _get_gst()
+            tracker_el = self.pipeline.get_by_name("palm_tracker")
+            if tracker_el is None:
+                LOGGER.warning("[debug] palm_tracker element not found")
+                return
+            sink_pad = tracker_el.get_static_pad("sink")
+            if sink_pad is None:
+                LOGGER.warning("[debug] palm_tracker sink pad not found")
+                return
+
+            self._debug_probe_count = 0
+            self._debug_probe_max = 30  # log first 30 frames then stop
+
+            def _probe_cb(pad, info):
+                if self._debug_probe_count >= self._debug_probe_max:
+                    return Gst.PadProbeReturn.OK
+                self._debug_probe_count += 1
+
+                buf = info.get_buffer()
+                if buf is None:
+                    return Gst.PadProbeReturn.OK
+
+                roi = hailo.get_roi_from_buffer(buf)
+                self._dump_roi_tree(roi, prefix="[pre-tracker]", depth=0)
+                return Gst.PadProbeReturn.OK
+
+            sink_pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb)
+            LOGGER.info("[debug] Palm tracker debug probe attached (will log %d frames)",
+                        self._debug_probe_max)
+
+        @staticmethod
+        def _dump_roi_tree(obj, prefix="", depth=0):
+            """Recursively dump Hailo metadata tree."""
+            indent = "  " * depth
+
+            # Get all sub-objects
+            detections = obj.get_objects_typed(hailo.HAILO_DETECTION)
+            classifications = obj.get_objects_typed(hailo.HAILO_CLASSIFICATION)
+            unique_ids = obj.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+            landmarks = obj.get_objects_typed(hailo.HAILO_LANDMARKS)
+
+            if depth == 0:
+                det_summary = {}
+                for d in detections:
+                    lbl = d.get_label()
+                    det_summary[lbl] = det_summary.get(lbl, 0) + 1
+                LOGGER.info("%s ROI detections: %s", prefix, det_summary)
+
+            for det in detections:
+                bbox = det.get_bbox()
+                lbl = det.get_label()
+                conf = det.get_confidence()
+                class_id = det.get_class_id() if hasattr(det, 'get_class_id') else '?'
+
+                # Check for sub-objects
+                sub_dets = det.get_objects_typed(hailo.HAILO_DETECTION)
+                sub_cls = det.get_objects_typed(hailo.HAILO_CLASSIFICATION)
+                sub_ids = det.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+                sub_lm = det.get_objects_typed(hailo.HAILO_LANDMARKS)
+
+                id_str = ""
+                if sub_ids:
+                    id_str = f" track_id={sub_ids[0].get_id()}"
+
+                LOGGER.info(
+                    "%s %sDET label=%s class_id=%s conf=%.2f "
+                    "bbox=(%.3f,%.3f,%.3f,%.3f)%s sub_dets=%d cls=%d lm=%d",
+                    prefix, indent, lbl, class_id, conf,
+                    bbox.xmin(), bbox.ymin(), bbox.width(), bbox.height(),
+                    id_str, len(sub_dets), len(sub_cls), len(sub_lm))
+
+                # Recurse into sub-detections
+                for sub in sub_dets:
+                    sb = sub.get_bbox()
+                    sub_class_id = sub.get_class_id() if hasattr(sub, 'get_class_id') else '?'
+                    sub_sub_ids = sub.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+                    sub_id_str = ""
+                    if sub_sub_ids:
+                        sub_id_str = f" track_id={sub_sub_ids[0].get_id()}"
+                    LOGGER.info(
+                        "%s %s  SUB label=%s class_id=%s conf=%.2f "
+                        "bbox=(%.3f,%.3f,%.3f,%.3f)%s",
+                        prefix, indent, sub.get_label(), sub_class_id,
+                        sub.get_confidence(),
+                        sb.xmin(), sb.ymin(), sb.width(), sb.height(),
+                        sub_id_str)
 
         def _connect_mjpeg_sink(self):
             self._Gst = _get_gst()
@@ -696,7 +701,6 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
 
         _GESTURE_HAILONET_NAMES = ("palm_detection_hailonet", "hand_landmark_hailonet")
         _HAND_LANDMARK_NAMES = ("hand_landmark_hailonet",)
-        _GESTURE_FILTER_NAMES = ("gesture_classification",)
 
         def _set_gesture_passthrough(self, passthrough: bool):
             """Set pass-through on gesture hailonets. Only safe after pipeline is PLAYING."""
@@ -718,8 +722,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             el = self.pipeline.get_by_name("palm_detection_hailonet")
             if el is not None:
                 el.set_property("pass-through", False)
-            # Hand landmarks + gesture classification start disabled
-            self._set_hand_landmarks_passthrough(True)
+            # Hand landmarks start disabled (already pass-through=true in pipeline string)
             self._gesture_enabled = True
             self._hand_landmarks_enabled = False
             LOGGER.info("[gesture] Gesture mode ENABLED (palm detection on, hand landmarks off)")
@@ -733,18 +736,13 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             if not self._gesture_enabled:
                 return
             self._set_gesture_passthrough(True)
-            # Also disable gesture classification filter
-            for name in self._GESTURE_FILTER_NAMES:
-                el = self.pipeline.get_by_name(name)
-                if el is not None:
-                    el.set_property("pass-through", True)
             self._gesture_enabled = False
             self._hand_landmarks_enabled = False
             LOGGER.info("[gesture] Gesture NPU inference DISABLED (pass-through)")
 
         def _set_hand_landmarks_passthrough(self, passthrough: bool):
-            """Toggle hand_landmark_hailonet and gesture_classification pass-through."""
-            for name in (*self._HAND_LANDMARK_NAMES, *self._GESTURE_FILTER_NAMES):
+            """Toggle hand_landmark_hailonet pass-through only."""
+            for name in self._HAND_LANDMARK_NAMES:
                 el = self.pipeline.get_by_name(name)
                 if el is not None:
                     el.set_property("pass-through", passthrough)
@@ -834,7 +832,26 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 f"palm_wrapper_agg. ! {QUEUE(name='palm_wrapper_output_q')} "
             )
 
+            # --- 3b. Palm tracker (Hailo GStreamer tracker for stable palm IDs) ---
+            # Tracks palm detections across frames using Kalman + IOU matching.
+            # Provides HailoUniqueID on each palm — visible in overlay, used
+            # for wave-to-lock gesture detection.
+            # class_id=0: only track palm detections (class 0 from palm_detection model),
+            # not persons/faces which are also on the ROI from the tiling stage.
+            palm_tracker_pipeline = TRACKER_PIPELINE(
+                class_id=0,
+                kalman_dist_thr=0.7,
+                iou_thr=0.8,
+                init_iou_thr=0.6,
+                keep_new_frames=2,
+                keep_tracked_frames=30,
+                keep_lost_frames=5,
+                name="palm_tracker",
+            )
+
             # --- 4. Hand landmark inner pipeline (inside palm cropper) ---
+            # Starts with pass-through=true: hand landmarks are only enabled
+            # after a wave gesture locks onto a specific palm (saves NPU).
             inner_pipeline = (
                 f"{QUEUE(name='hand_scale_q')} ! "
                 f"videoscale name=hand_videoscale n-threads=2 qos=false ! "
@@ -848,6 +865,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 f"batch-size=1 "
                 f"vdevice-group-id={SHARED_VDEVICE_GROUP_ID} "
                 f"scheduler-timeout-ms=33 "
+                f"pass-through=true "
                 f"force-writable=true ! "
                 f"{QUEUE(name='hand_postproc_q')} ! "
                 f"hailofilter name=hand_landmark_postproc "
@@ -874,6 +892,8 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             )
 
             # --- 6. Gesture classification (removes palm/person_palm_crop detections, adds gesture label) ---
+            # Toggled to pass-through at runtime (after PLAYING) together with
+            # hand_landmark_hailonet so raw palm detections survive to the callback.
             gesture_filter = (
                 f"{QUEUE(name='gesture_filter_q')} ! "
                 f"hailofilter so-path={GESTURE_CLASSIFICATION_SO} "
@@ -893,6 +913,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                     f"{tile_cropper_pipeline} ! "
                     f"{palm_detection_wrapper} ! "
                     f"{palm_cropper_pipeline} ! "
+                    f"{palm_tracker_pipeline} ! "
                     f"{gesture_filter} ! "
                     f"{user_callback_pipeline} ! "
                     f"{display_pipeline}"
@@ -928,6 +949,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                     f"{tile_cropper_pipeline} ! "
                     f"{palm_detection_wrapper} ! "
                     f"{palm_cropper_pipeline} ! "
+                    f"{palm_tracker_pipeline} ! "
                     f"{gesture_filter} ! "
                     f"{user_callback_pipeline} ! "
                     f"{output_pipeline}"
@@ -939,14 +961,12 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
     tracker = ByteTracker(
         track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
     )
-    palm_tracker = PalmTracker(max_distance=0.15, max_lost_frames=15)
-    LOGGER.info("[gesture] ByteTracker + PalmTracker running synchronously in callback")
+    LOGGER.info("[gesture] ByteTracker (persons) + hailotracker (palms) in pipeline")
 
     user_data = GestureUserData(
         shared_state, gesture_state, target_state, ui_state=ui_state,
         byte_tracker=tracker, velocity_state=velocity_state,
         palm_state=palm_state, palm_lock=palm_lock,
-        palm_tracker=palm_tracker,
     )
     app = GestureTilingApp(
         gesture_app_callback, user_data, parser=parser, eos_reached=eos_reached,
