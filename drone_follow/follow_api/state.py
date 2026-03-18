@@ -2,9 +2,9 @@
 
 import threading
 import time
-from typing import Optional
+from typing import List, Optional
 
-from .types import Detection, GestureDetection
+from .types import Detection, GestureDetection, PalmDetection
 
 
 class SharedDetectionState:
@@ -89,6 +89,62 @@ class FollowTargetState:
                 "following_id": self._target_id,
                 "last_seen": self._last_seen
             }
+
+
+class SharedPalmState:
+    """Thread-safe state for passing tracked palm detections from callback to control loop."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._palms: List[PalmDetection] = []
+        self._frame_count: int = 0
+
+    def update(self, palms: List[PalmDetection]):
+        with self._lock:
+            self._palms = palms
+            self._frame_count += 1
+
+    def get_latest(self):
+        """Returns (list of PalmDetection, frame_count)."""
+        with self._lock:
+            return list(self._palms), self._frame_count
+
+
+class PalmLockState:
+    """Thread-safe coordination of palm lock between control loop and pipeline callback.
+
+    Control loop sets the locked palm track_id.
+    Callback reads it to know which palm to extract hand landmarks for.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._locked_palm_id: Optional[int] = None
+        self._hand_landmarks_enabled: bool = False
+
+    def lock(self, palm_track_id: int):
+        with self._lock:
+            self._locked_palm_id = palm_track_id
+            self._hand_landmarks_enabled = True
+
+    def unlock(self):
+        with self._lock:
+            self._locked_palm_id = None
+            self._hand_landmarks_enabled = False
+
+    def get_locked_palm_id(self) -> Optional[int]:
+        with self._lock:
+            return self._locked_palm_id
+
+    @property
+    def is_locked(self) -> bool:
+        with self._lock:
+            return self._locked_palm_id is not None
+
+    @property
+    def hand_landmarks_enabled(self) -> bool:
+        with self._lock:
+            return self._hand_landmarks_enabled
 
 
 class SharedVelocityState:

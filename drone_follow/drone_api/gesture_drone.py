@@ -47,19 +47,36 @@ LOGGER = logging.getLogger("drone_follow.gesture")
 
 async def gesture_control_loop(drone, gesture_state, config, shutdown,
                                 altitude_cache=None, ui_state=None,
-                                mode_changed=None, velocity_state=None):
+                                mode_changed=None, velocity_state=None,
+                                palm_state=None, palm_lock=None,
+                                pipeline_app=None):
     """Control loop for gesture mode.
 
-    Handles wave detection for lock-on, acknowledgment yaw oscillation,
-    and continuous gesture-based velocity commands.
+    Handles palm tracking, wave detection for lock-on, hand landmark toggling,
+    acknowledgment yaw oscillation, and continuous gesture-based velocity commands.
+
+    Palm tracking:
+    - Palm detections are tracked across frames (by the callback's PalmTracker).
+    - Wave detection runs on palm positions (no hand landmarks needed).
+    - When a wave is detected on a specific palm, that palm is "locked".
+    - Hand landmark inference is enabled only after lock-on (saves NPU compute).
+    - If the locked palm is lost, hand landmarks are disabled again.
 
     If mode_changed is provided, the loop exits when it is set.
     """
     vel_api = VelocityCommandAPI(drone, config)
-    wave_detector = WaveDetector(
-        reversals_needed=config.gesture_wave_reversals,
-        window_s=config.gesture_wave_window_s,
-    )
+
+    # Per-palm wave detectors: {palm_track_id: WaveDetector}
+    wave_detectors: dict = {}
+    _WAVE_DETECTOR_MAX_AGE_S = 3.0  # remove stale wave detectors
+
+    def _get_wave_detector(palm_id):
+        if palm_id not in wave_detectors:
+            wave_detectors[palm_id] = WaveDetector(
+                reversals_needed=config.gesture_wave_reversals,
+                window_s=config.gesture_wave_window_s,
+            )
+        return wave_detectors[palm_id]
 
     def _log(msg: str, level: int = logging.INFO):
         if not LOGGER.isEnabledFor(level):
@@ -72,9 +89,26 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
     last_gesture_time = time.monotonic()
     last_gesture = None
     locked_on = False
+    locked_palm_id = None
+    palm_lost_time = None  # when the locked palm was last seen
+    _PALM_LOST_TIMEOUT_S = 2.0  # unlock after palm missing this long
     ack_start_time = None  # None = not in ack phase
     _LOG_INTERVAL = 1.0
     _last_log_time = 0.0
+
+    def _unlock_palm():
+        nonlocal locked_on, locked_palm_id, palm_lost_time, ack_start_time
+        locked_on = False
+        locked_palm_id = None
+        palm_lost_time = None
+        ack_start_time = None
+        if palm_lock is not None:
+            palm_lock.unlock()
+        if pipeline_app is not None:
+            pipeline_app.disable_hand_landmarks()
+        # Reset all wave detectors for fresh start
+        wave_detectors.clear()
+        _log("[gesture] Palm unlocked — hand landmarks disabled", level=logging.INFO)
 
     try:
         while not shutdown.is_set():
@@ -82,8 +116,14 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                 LOGGER.info("[gesture] Mode changed, exiting gesture control loop")
                 return
             now = time.monotonic()
-            gesture, _ = gesture_state.get_latest()
 
+            # Read tracked palms
+            palms = []
+            if palm_state is not None:
+                palms, _ = palm_state.get_latest()
+
+            # Read gesture (only meaningful when locked + hand landmarks on)
+            gesture, _ = gesture_state.get_latest()
             if gesture is not None:
                 age = now - gesture.timestamp
                 if age > config.detection_timeout_s:
@@ -94,21 +134,42 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
 
             time_since_gesture = now - last_gesture_time
 
-            # Search timeout — hold position (no auto-land from gesture mode)
-            if time_since_gesture > config.search_timeout_s:
-                _log(f"[gesture] Search timeout ({config.search_timeout_s}s) exceeded. Holding position.",
+            # Search timeout — hold position
+            if time_since_gesture > config.search_timeout_s and locked_on:
+                _log(f"[gesture] Search timeout ({config.search_timeout_s}s). Holding position.",
                      level=logging.WARNING)
                 await vel_api.send_zero()
                 await asyncio.sleep(period)
                 continue
 
-            # Wave detection phase (before lock-on)
+            # === WAVE DETECTION PHASE (before lock-on) ===
             if not locked_on:
-                if gesture is not None and gesture.hand is not None:
-                    if wave_detector.update(gesture.hand.center_x, now):
-                        locked_on = True
-                        ack_start_time = now
-                        _log("[gesture] Wave detected! Acknowledging...", level=logging.INFO)
+                # Track which palm IDs are currently visible
+                visible_palm_ids = {p.track_id for p in palms}
+
+                # Clean up wave detectors for palms no longer visible
+                stale = [pid for pid in wave_detectors if pid not in visible_palm_ids]
+                for pid in stale:
+                    del wave_detectors[pid]
+
+                # Run wave detection on each visible palm
+                wave_palm_id = None
+                for palm in palms:
+                    wd = _get_wave_detector(palm.track_id)
+                    if wd.update(palm.center_x, now):
+                        wave_palm_id = palm.track_id
+                        break
+
+                if wave_palm_id is not None:
+                    locked_on = True
+                    locked_palm_id = wave_palm_id
+                    ack_start_time = now
+                    if palm_lock is not None:
+                        palm_lock.lock(wave_palm_id)
+                    if pipeline_app is not None:
+                        pipeline_app.enable_hand_landmarks()
+                    _log(f"[gesture] Wave detected on palm {wave_palm_id}! "
+                         f"Enabling hand landmarks...", level=logging.INFO)
 
                 # Before lock-on, just do face centering
                 if gesture is not None and not locked_on:
@@ -125,6 +186,24 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                         velocity_state.update(0.0, 0.0, 0.0, 0.0, "WAVE-WAIT")
                     await asyncio.sleep(period)
                     continue
+
+            # === LOCKED PHASE ===
+
+            # Check if locked palm is still visible
+            locked_palm_visible = any(p.track_id == locked_palm_id for p in palms)
+            if locked_palm_visible:
+                palm_lost_time = None
+            elif palm_lost_time is None:
+                palm_lost_time = now
+
+            # Unlock if locked palm lost for too long
+            if palm_lost_time is not None and (now - palm_lost_time) > _PALM_LOST_TIMEOUT_S:
+                _unlock_palm()
+                await vel_api.send_zero()
+                if velocity_state is not None:
+                    velocity_state.update(0.0, 0.0, 0.0, 0.0, "WAVE-WAIT")
+                await asyncio.sleep(period)
+                continue
 
             # Acknowledgment phase: yaw oscillation
             if ack_start_time is not None:
@@ -174,14 +253,17 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
             # Periodic logging
             if now - _last_log_time >= _LOG_INTERVAL:
                 _last_log_time = now
+                palm_count = len(palms)
                 if gesture is not None:
                     hand_str = ("open" if (gesture.hand and gesture.hand.is_open)
                                 else "fist" if gesture.hand else "none")
                     _log(f"[{mode}] Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+5.2f} "
-                         f"hand={hand_str} face=({gesture.face.center_x:.2f},{gesture.face.center_y:.2f})",
+                         f"hand={hand_str} palm={locked_palm_id} palms={palm_count} "
+                         f"face=({gesture.face.center_x:.2f},{gesture.face.center_y:.2f})",
                          level=logging.INFO)
                 else:
-                    _log(f"[{mode}] No gesture detection", level=logging.INFO)
+                    _log(f"[{mode}] palm={locked_palm_id} palms={palm_count} "
+                         f"No gesture detection", level=logging.INFO)
 
             await asyncio.sleep(period)
     except asyncio.CancelledError:
@@ -189,6 +271,9 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
             await vel_api.send_zero()
         except Exception:
             pass
+        # Clean up lock state on exit
+        if palm_lock is not None and palm_lock.is_locked:
+            palm_lock.unlock()
         raise
 
 
@@ -372,7 +457,8 @@ async def run_gesture_drone(args, gesture_state, shutdown, shutdown_read_fd=None
 
 async def _mode_switching_control_loop(drone, shared_state, gesture_state, config,
                                         shutdown, altitude_cache, ui_state,
-                                        pipeline_app):
+                                        pipeline_app, velocity_state=None,
+                                        palm_state=None, palm_lock=None):
     """Control loop wrapper that switches between follow and gesture based on config.follow_mode.
 
     When the mode changes (via web UI config update), the current inner loop is cancelled,
@@ -409,7 +495,9 @@ async def _mode_switching_control_loop(drone, shared_state, gesture_state, confi
                 gesture_control_loop(
                     drone, gesture_state, config, shutdown,
                     altitude_cache=altitude_cache, ui_state=ui_state,
-                    velocity_state=velocity_state))
+                    velocity_state=velocity_state,
+                    palm_state=palm_state, palm_lock=palm_lock,
+                    pipeline_app=pipeline_app))
         else:
             LOGGER.info("[drone] Starting FOLLOW control loop (mode=%s)", current_mode)
             loop_task = asyncio.create_task(
@@ -444,7 +532,8 @@ async def _mode_switching_control_loop(drone, shared_state, gesture_state, confi
 async def run_unified_drone(args, shared_state, gesture_state, shutdown,
                              shutdown_read_fd=None, config=None, ui_state=None,
                              on_connected_cb=None, pipeline_app=None,
-                             velocity_state=None):
+                             velocity_state=None,
+                             palm_state=None, palm_lock=None):
     """Connect to drone and run the mode-switching control loop.
 
     Replaces both run_live_drone and run_gesture_drone. Supports runtime
@@ -539,7 +628,9 @@ async def run_unified_drone(args, shared_state, gesture_state, shutdown,
                 control_task = asyncio.create_task(
                     _mode_switching_control_loop(
                         drone, shared_state, gesture_state, config, shutdown,
-                        altitude_cache, ui_state, pipeline_app))
+                        altitude_cache, ui_state, pipeline_app,
+                        velocity_state=velocity_state,
+                        palm_state=palm_state, palm_lock=palm_lock))
 
                 done, pending = await asyncio.wait(
                     [
@@ -567,7 +658,9 @@ async def run_unified_drone(args, shared_state, gesture_state, shutdown,
                     control_task = asyncio.create_task(
                         _mode_switching_control_loop(
                             drone, shared_state, gesture_state, config, shutdown,
-                            altitude_cache, ui_state, pipeline_app))
+                            altitude_cache, ui_state, pipeline_app,
+                            velocity_state=velocity_state,
+                            palm_state=palm_state, palm_lock=palm_lock))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 

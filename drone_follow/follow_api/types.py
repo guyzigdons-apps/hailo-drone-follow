@@ -58,6 +58,18 @@ class HandDetection:
 
 
 @dataclass
+class PalmDetection:
+    """A tracked palm detection (from palm_detection model, no landmarks needed)."""
+    track_id: int         # stable ID from PalmTracker
+    center_x: float       # palm bbox center, 0.0 to 1.0
+    center_y: float
+    bbox_width: float
+    bbox_height: float
+    confidence: float
+    timestamp: float
+
+
+@dataclass
 class GestureDetection:
     face: FaceDetection
     hand: Optional[HandDetection]   # None when no hand visible

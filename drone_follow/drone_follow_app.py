@@ -126,15 +126,20 @@ def main():
 
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     gesture_state = None
+    palm_state = None
+    palm_lock = None
     if ui_pre_args.gesture:
-        from drone_follow.follow_api.state import SharedGestureState
+        from drone_follow.follow_api.state import SharedGestureState, SharedPalmState, PalmLockState
         from drone_follow.pipeline_adapter import create_gesture_app
         gesture_state = SharedGestureState()
+        palm_state = SharedPalmState()
+        palm_lock = PalmLockState()
         app = create_gesture_app(
             shared_state, gesture_state, target_state=target_state,
             eos_reached=eos_reached, ui_state=ui_state,
             ui_fps=ui_pre_args.ui_fps, parser=parser,
-            record_dir=recordings_dir, velocity_state=velocity_state)
+            record_dir=recordings_dir, velocity_state=velocity_state,
+            palm_state=palm_state, palm_lock=palm_lock)
     else:
         from drone_follow.pipeline_adapter import create_app
         app = create_app(shared_state, target_state=target_state,
@@ -200,7 +205,8 @@ def main():
                     run_unified_drone(
                         args, shared_state, gesture_state, shutdown,
                         config=controller_config, ui_state=ui_state,
-                        pipeline_app=app, velocity_state=velocity_state))
+                        pipeline_app=app, velocity_state=velocity_state,
+                        palm_state=palm_state, palm_lock=palm_lock))
             else:
                 loop.run_until_complete(
                     run_live_drone(args, shared_state, shutdown,

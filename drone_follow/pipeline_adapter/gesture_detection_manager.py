@@ -21,7 +21,7 @@ from typing import Optional
 import hailo
 import numpy as np
 
-from drone_follow.follow_api.types import Detection, FaceDetection, HandDetection, GestureDetection
+from drone_follow.follow_api.types import Detection, FaceDetection, HandDetection, GestureDetection, PalmDetection
 
 from .byte_tracker import ByteTracker
 from .hailo_drone_detection_manager import (
@@ -154,15 +154,243 @@ def _match_face_to_person(faces, person_bbox):
 
 
 # ---------------------------------------------------------------------------
+# Palm tracker — lightweight position-based tracking for palm bboxes
+# ---------------------------------------------------------------------------
+
+class PalmTracker:
+    """Track palm detections across frames using position proximity.
+
+    Assigns stable IDs to palms so we can detect waves and lock onto
+    a specific palm without running the expensive hand landmark model.
+    """
+
+    def __init__(self, max_distance: float = 0.15, max_lost_frames: int = 15):
+        self._next_id = 1
+        self._tracks: dict = {}  # id -> {cx, cy, w, h, conf, lost_frames}
+        self._max_distance = max_distance
+        self._max_lost_frames = max_lost_frames
+
+    def update(self, palm_bboxes: list, timestamp: float) -> list:
+        """Update tracker with new palm bboxes.
+
+        Args:
+            palm_bboxes: list of (cx, cy, w, h, confidence) tuples
+            timestamp: current time
+
+        Returns:
+            list of PalmDetection with stable track IDs
+        """
+        # Mark all tracks as unmatched
+        matched_tracks = set()
+        matched_detections = set()
+        results = []
+
+        # Greedy nearest-neighbor matching
+        pairs = []
+        for di, (cx, cy, w, h, conf) in enumerate(palm_bboxes):
+            for tid, track in self._tracks.items():
+                dist = math.sqrt((cx - track["cx"]) ** 2 + (cy - track["cy"]) ** 2)
+                pairs.append((dist, di, tid))
+        pairs.sort()
+
+        for dist, di, tid in pairs:
+            if di in matched_detections or tid in matched_tracks:
+                continue
+            if dist > self._max_distance:
+                break
+            matched_tracks.add(tid)
+            matched_detections.add(di)
+            cx, cy, w, h, conf = palm_bboxes[di]
+            self._tracks[tid] = {"cx": cx, "cy": cy, "w": w, "h": h,
+                                 "conf": conf, "lost_frames": 0}
+            results.append(PalmDetection(
+                track_id=tid, center_x=cx, center_y=cy,
+                bbox_width=w, bbox_height=h,
+                confidence=conf, timestamp=timestamp))
+
+        # New tracks for unmatched detections
+        for di, (cx, cy, w, h, conf) in enumerate(palm_bboxes):
+            if di in matched_detections:
+                continue
+            tid = self._next_id
+            self._next_id += 1
+            self._tracks[tid] = {"cx": cx, "cy": cy, "w": w, "h": h,
+                                 "conf": conf, "lost_frames": 0}
+            results.append(PalmDetection(
+                track_id=tid, center_x=cx, center_y=cy,
+                bbox_width=w, bbox_height=h,
+                confidence=conf, timestamp=timestamp))
+
+        # Age out unmatched tracks
+        lost_ids = []
+        for tid in self._tracks:
+            if tid not in matched_tracks:
+                self._tracks[tid]["lost_frames"] += 1
+                if self._tracks[tid]["lost_frames"] > self._max_lost_frames:
+                    lost_ids.append(tid)
+        for tid in lost_ids:
+            del self._tracks[tid]
+
+        return results
+
+    def get_track(self, track_id: int) -> Optional[dict]:
+        return self._tracks.get(track_id)
+
+
+def _extract_palms_from_roi(roi):
+    """Extract palm detections from ROI when gesture_classification is pass-through.
+
+    When hand_landmark_hailonet and gesture_classification are in pass-through,
+    the raw palm detections survive as nested objects inside person_palm_crop
+    sub-ROIs, or as top-level 'palm' detections promoted by palm_to_hand_crop.
+
+    Returns list of (center_x, center_y, width, height, confidence) tuples
+    in frame-normalized coordinates.
+    """
+    palms = []
+
+    # Check for top-level palm detections (promoted by palm_to_hand_crop)
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    for det in detections:
+        label = det.get_label()
+        if label == "palm" or label == "hand":
+            bbox = det.get_bbox()
+            cx = bbox.xmin() + bbox.width() / 2
+            cy = bbox.ymin() + bbox.height() / 2
+            palms.append((cx, cy, bbox.width(), bbox.height(), det.get_confidence()))
+
+    # Also check nested in sub-ROIs (person_palm_crop)
+    if not palms:
+        for det in detections:
+            if det.get_label() == "person_palm_crop":
+                sub_dets = det.get_objects_typed(hailo.HAILO_DETECTION)
+                parent_bbox = det.get_bbox()
+                for sub_det in sub_dets:
+                    if sub_det.get_label() == "palm":
+                        sb = sub_det.get_bbox()
+                        # Convert from parent-relative to frame-normalized
+                        cx = parent_bbox.xmin() + (sb.xmin() + sb.width() / 2) * parent_bbox.width()
+                        cy = parent_bbox.ymin() + (sb.ymin() + sb.height() / 2) * parent_bbox.height()
+                        w = sb.width() * parent_bbox.width()
+                        h = sb.height() * parent_bbox.height()
+                        palms.append((cx, cy, w, h, sub_det.get_confidence()))
+
+    return palms
+
+
+def _find_hand_near_palm(roi, palm_cx, palm_cy, max_dist=0.15):
+    """Find the hand detection closest to a tracked palm position.
+
+    Used after hand landmarks are enabled to match the locked palm's
+    hand detection from the full gesture pipeline output.
+    """
+    best_hand = None
+    best_label = None
+    best_dist = max_dist
+
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    for det in detections:
+        if det.get_label() != "hand":
+            continue
+        bbox = det.get_bbox()
+        cx = bbox.xmin() + bbox.width() / 2
+        cy = bbox.ymin() + bbox.height() / 2
+        dist = math.sqrt((cx - palm_cx) ** 2 + (cy - palm_cy) ** 2)
+        if dist < best_dist:
+            best_dist = dist
+            best_hand = det
+            # Extract hand + gesture from this specific detection
+            best_label = None
+            for obj in det.get_objects():
+                if isinstance(obj, hailo.HailoClassification):
+                    if obj.get_classification_type() == "gesture":
+                        best_label = obj.get_label()
+
+    if best_hand is None:
+        return None, None
+
+    # Extract landmarks from matched hand
+    hbbox = best_hand.get_bbox()
+    landmarks = None
+    for obj in best_hand.get_objects():
+        if isinstance(obj, hailo.HailoLandmarks):
+            if obj.get_landmarks_type() == "hand_landmarks":
+                landmarks = obj
+
+    if landmarks is None:
+        return None, best_label
+
+    points = landmarks.get_points()
+    if len(points) < 21:
+        return None, best_label
+
+    hx0 = hbbox.xmin()
+    hy0 = hbbox.ymin()
+    hw = hbbox.width()
+    hh = hbbox.height()
+
+    def to_frame(pt):
+        return (hx0 + pt.x() * hw, hy0 + pt.y() * hh)
+
+    wrist_x, wrist_y = to_frame(points[0])
+    palm_indices = [0, 5, 9, 13, 17]
+    px = sum(to_frame(points[i])[0] for i in palm_indices) / len(palm_indices)
+    py = sum(to_frame(points[i])[1] for i in palm_indices) / len(palm_indices)
+
+    is_open = best_label not in ("FIST", None)
+
+    hand = HandDetection(
+        center_x=px, center_y=py,
+        wrist_x=wrist_x, wrist_y=wrist_y,
+        is_open=is_open,
+        confidence=best_hand.get_confidence(),
+        timestamp=time.monotonic(),
+    )
+    return hand, best_label
+
+
+# ---------------------------------------------------------------------------
 # Main callback
 # ---------------------------------------------------------------------------
 
+_gesture_log_interval = 1.0
+_gesture_last_log_time = 0.0
+
+
+def _get_gesture_mode(user_data):
+    """Read current gesture control mode from velocity_state (set by drone control loop)."""
+    velocity_state = getattr(user_data, 'velocity_state', None)
+    if velocity_state is None:
+        return None
+    _, _, _, _, mode = velocity_state.get()
+    return mode
+
+
+def _colorize_hand_detections(roi, gesture_mode):
+    """Set hand detection bbox to green when gesture control is active (post-wave lock-on)."""
+    active_modes = ("GESTURE", "FIST-STOP", "FACE-TRACK", "ACK")
+    if gesture_mode not in active_modes:
+        return
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    for det in detections:
+        if det.get_label() == "hand":
+            # Green = 0x00FF00 packed as 0xRRGGBB
+            color_cls = hailo.HailoClassification("overlay_color", 0x00FF00, "", 0.0)
+            det.add_object(color_cls)
+
+
 def gesture_app_callback(element, buffer, user_data):
-    """Pipeline callback: extracts person, face, and hand metadata from the C++ pipeline.
+    """Pipeline callback: extracts person, face, palm, and hand metadata.
 
     Person + face come from the tiling YOLOv8n.
-    Hand + landmarks + gesture come from the palm/hand C++ stages.
+    Palm detections come from the palm_detection model (always on in gesture mode).
+    Hand landmarks + gesture come from the hand_landmark model (only when locked on a palm).
+
+    Palm tracking runs every frame. Hand landmarks are only extracted for the
+    locked palm to reduce NPU load.
     """
+    global _gesture_last_log_time
+
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     persons = [d for d in detections if d.get_label() == "person"]
@@ -172,7 +400,28 @@ def gesture_app_callback(element, buffer, user_data):
     ui_state = user_data.ui_state
     gesture_state = user_data.gesture_state
     shared_state = user_data.shared_state
+    palm_state = user_data.palm_state
+    palm_lock = user_data.palm_lock
+    palm_tracker = user_data.palm_tracker
     selected_detection = None
+    hand = None
+    gesture_label = None
+    now = time.monotonic()
+
+    # --- Palm tracking (always runs) ---
+    locked_id = palm_lock.get_locked_palm_id() if palm_lock is not None else None
+    hand_landmarks_on = palm_lock.hand_landmarks_enabled if palm_lock is not None else True
+
+    if hand_landmarks_on:
+        # Hand landmarks are on — extract palms from "hand" detections
+        palm_bboxes = _extract_palms_from_roi(roi)
+    else:
+        # Hand landmarks off — extract raw palm detections
+        palm_bboxes = _extract_palms_from_roi(roi)
+
+    tracked_palms = palm_tracker.update(palm_bboxes, now) if palm_tracker is not None else []
+    if palm_state is not None:
+        palm_state.update(tracked_palms)
 
     if not persons:
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
@@ -209,7 +458,6 @@ def gesture_app_callback(element, buffer, user_data):
             pbbox = best.get_bbox()
             cx = pbbox.xmin() + pbbox.width() / 2
             cy = pbbox.ymin() + pbbox.height() / 2
-            now = time.monotonic()
 
             selected_detection = Detection(
                 label="person",
@@ -235,8 +483,24 @@ def gesture_app_callback(element, buffer, user_data):
                     timestamp=now,
                 )
 
-            # --- Hand: extract from C++ pipeline metadata ---
-            hand, gesture_label = _extract_hand_from_roi(roi)
+            # --- Hand: only extract for locked palm ---
+            if locked_id is not None and hand_landmarks_on:
+                # Find the tracked palm position for the locked ID
+                locked_palm = None
+                for p in tracked_palms:
+                    if p.track_id == locked_id:
+                        locked_palm = p
+                        break
+                if locked_palm is not None:
+                    hand, gesture_label = _find_hand_near_palm(
+                        roi, locked_palm.center_x, locked_palm.center_y)
+                # If locked palm not found in this frame, hand stays None
+            elif locked_id is None and not hand_landmarks_on:
+                # Not locked, hand landmarks off — no hand data (expected)
+                pass
+            else:
+                # Fallback: extract any hand (e.g. during transition)
+                hand, gesture_label = _extract_hand_from_roi(roi)
 
             if face is not None:
                 gesture_state.update(GestureDetection(
@@ -252,10 +516,29 @@ def gesture_app_callback(element, buffer, user_data):
             following_id = target_state.get_target() if target_state else None
             _update_ui(ui_state, persons, person_to_id, following_id)
 
-            if hand is not None:
-                LOGGER.debug("[gesture] hand=(%s, %.2f,%.2f) gesture=%s",
-                             "open" if hand.is_open else "fist",
-                             hand.center_x, hand.center_y, gesture_label)
+    # --- Gesture mode overlay coloring and logging ---
+    gesture_mode = _get_gesture_mode(user_data)
+    _colorize_hand_detections(roi, gesture_mode)
+
+    # Periodic logging (terminal + UI)
+    if now - _gesture_last_log_time >= _gesture_log_interval:
+        _gesture_last_log_time = now
+        hand_str = "none"
+        if hand is not None:
+            hand_str = f"{'open' if hand.is_open else 'fist'} ({hand.center_x:.2f},{hand.center_y:.2f})"
+        face_str = "none"
+        if selected_detection is not None:
+            face_str = f"({selected_detection.center_x:.2f},{selected_detection.center_y:.2f})"
+        mode_str = gesture_mode or "NO-DRONE"
+        palm_str = f"palms={len(tracked_palms)}"
+        lock_str = f"lock={locked_id}" if locked_id is not None else "lock=none"
+        log_msg = (f"[gesture] mode={mode_str} hand={hand_str} "
+                   f"gesture={gesture_label} person={face_str} "
+                   f"{palm_str} {lock_str} "
+                   f"persons={len(persons)} faces={len(faces)}")
+        LOGGER.info(log_msg)
+        if ui_state is not None:
+            ui_state.push_log(log_msg)
 
     # Attach flight command HUD arrows (runs every frame, with or without drone)
     velocity_state = getattr(user_data, 'velocity_state', None)
@@ -269,7 +552,8 @@ def gesture_app_callback(element, buffer, user_data):
 
 def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reached=None,
                        ui_state=None, ui_fps=10, parser=None, record_dir=None,
-                       initial_follow_mode="follow", velocity_state=None):
+                       initial_follow_mode="follow", velocity_state=None,
+                       palm_state=None, palm_lock=None):
     """Create the gesture pipeline app.
 
     Extends the tiling pipeline (YOLOv8n for person + face) with C++ palm detection,
@@ -293,7 +577,8 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
     class GestureUserData(app_callback_class):
         def __init__(self, shared_state, gesture_state, target_state=None,
                      ui_state=None, byte_tracker=None, velocity_state=None,
-                     controller_config=None):
+                     controller_config=None, palm_state=None, palm_lock=None,
+                     palm_tracker=None):
             super().__init__()
             self.shared_state = shared_state
             self.gesture_state = gesture_state
@@ -302,6 +587,9 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             self.byte_tracker = byte_tracker
             self.velocity_state = velocity_state
             self.controller_config = controller_config
+            self.palm_state = palm_state
+            self.palm_lock = palm_lock
+            self.palm_tracker = palm_tracker
 
     class GestureTilingApp(GStreamerTilingApp):
         """Tiling + gesture pipeline with EOS handling and optional MJPEG appsink."""
@@ -407,6 +695,8 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 return path
 
         _GESTURE_HAILONET_NAMES = ("palm_detection_hailonet", "hand_landmark_hailonet")
+        _HAND_LANDMARK_NAMES = ("hand_landmark_hailonet",)
+        _GESTURE_FILTER_NAMES = ("gesture_classification",)
 
         def _set_gesture_passthrough(self, passthrough: bool):
             """Set pass-through on gesture hailonets. Only safe after pipeline is PLAYING."""
@@ -418,12 +708,21 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                     LOGGER.warning("[gesture] hailonet '%s' not found", name)
 
         def enable_gesture(self):
-            """Enable palm/hand/gesture NPU inference (for gesture mode)."""
+            """Enable palm/hand/gesture NPU inference (for gesture mode).
+
+            Enables palm detection but keeps hand landmarks off until a palm is locked.
+            """
             if self._gesture_enabled:
                 return
-            self._set_gesture_passthrough(False)
+            # Enable palm detection
+            el = self.pipeline.get_by_name("palm_detection_hailonet")
+            if el is not None:
+                el.set_property("pass-through", False)
+            # Hand landmarks + gesture classification start disabled
+            self._set_hand_landmarks_passthrough(True)
             self._gesture_enabled = True
-            LOGGER.info("[gesture] Gesture NPU inference ENABLED")
+            self._hand_landmarks_enabled = False
+            LOGGER.info("[gesture] Gesture mode ENABLED (palm detection on, hand landmarks off)")
 
         def disable_gesture(self):
             """Disable palm/hand/gesture NPU inference (for follow mode, saves compute).
@@ -434,12 +733,45 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             if not self._gesture_enabled:
                 return
             self._set_gesture_passthrough(True)
+            # Also disable gesture classification filter
+            for name in self._GESTURE_FILTER_NAMES:
+                el = self.pipeline.get_by_name(name)
+                if el is not None:
+                    el.set_property("pass-through", True)
             self._gesture_enabled = False
+            self._hand_landmarks_enabled = False
             LOGGER.info("[gesture] Gesture NPU inference DISABLED (pass-through)")
+
+        def _set_hand_landmarks_passthrough(self, passthrough: bool):
+            """Toggle hand_landmark_hailonet and gesture_classification pass-through."""
+            for name in (*self._HAND_LANDMARK_NAMES, *self._GESTURE_FILTER_NAMES):
+                el = self.pipeline.get_by_name(name)
+                if el is not None:
+                    el.set_property("pass-through", passthrough)
+
+        def enable_hand_landmarks(self):
+            """Enable hand landmark inference (after palm lock-on)."""
+            if self._hand_landmarks_enabled:
+                return
+            self._set_hand_landmarks_passthrough(False)
+            self._hand_landmarks_enabled = True
+            LOGGER.info("[gesture] Hand landmark NPU inference ENABLED (palm locked)")
+
+        def disable_hand_landmarks(self):
+            """Disable hand landmark inference (palm unlocked, saves compute)."""
+            if not self._hand_landmarks_enabled:
+                return
+            self._set_hand_landmarks_passthrough(True)
+            self._hand_landmarks_enabled = False
+            LOGGER.info("[gesture] Hand landmark NPU inference DISABLED (palm unlocked)")
 
         @property
         def gesture_enabled(self):
             return self._gesture_enabled
+
+        @property
+        def hand_landmarks_enabled(self):
+            return getattr(self, '_hand_landmarks_enabled', False)
 
         def get_pipeline_string(self):
             # --- 1. Source ---
@@ -486,6 +818,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 post_process_so=PALM_DETECTION_POST_SO,
                 batch_size=1,
                 name="palm_detection",
+                scheduler_timeout_ms=33,
             )
 
             palm_detection_wrapper = (
@@ -567,7 +900,8 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             else:
                 display_branch = DISPLAY_PIPELINE(
                     video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
-                    community_overlay=True, overlay_props={"hud_overlay": True},
+                    community_overlay=True,
+                    overlay_props={"hud_overlay": True, "use_custom_colors": True},
                 )
                 mjpeg_branch = (
                     f"videoconvert n-threads=2 ! "
@@ -578,7 +912,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 )
                 record_branch = (
                     f"valve name=record_valve drop=true ! "
-                    f"{OVERLAY_PIPELINE(name='record_overlay', community=True, hud_overlay=True)} ! "
+                    f"{OVERLAY_PIPELINE(name='record_overlay', community=True, hud_overlay=True, use_custom_colors=True)} ! "
                     f"videoconvert n-threads=2 ! "
                     f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
                     f"matroskamux name=record_mux ! filesink name=record_sink async=false location=/dev/null"
@@ -605,11 +939,14 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
     tracker = ByteTracker(
         track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
     )
-    LOGGER.info("[gesture] ByteTracker running synchronously in callback")
+    palm_tracker = PalmTracker(max_distance=0.15, max_lost_frames=15)
+    LOGGER.info("[gesture] ByteTracker + PalmTracker running synchronously in callback")
 
     user_data = GestureUserData(
         shared_state, gesture_state, target_state, ui_state=ui_state,
         byte_tracker=tracker, velocity_state=velocity_state,
+        palm_state=palm_state, palm_lock=palm_lock,
+        palm_tracker=palm_tracker,
     )
     app = GestureTilingApp(
         gesture_app_callback, user_data, parser=parser, eos_reached=eos_reached,
