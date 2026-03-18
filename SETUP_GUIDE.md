@@ -31,7 +31,25 @@ Both: Raspberry Pi OS Bookworm 64-bit.
 
 ## Air Unit Setup
 
-### 1. Clone
+### 1. Install Hailo Prerequisites
+
+```bash
+sudo apt update
+sudo apt install -y dkms
+sudo apt install -y hailo-all
+```
+
+After installation, verify the Hailo device is detected:
+```bash
+hailortcli fw-control identify
+```
+
+Fix permissions on Hailo resource files (required for the pipeline to read JSON configs):
+```bash
+sudo chmod 644 /usr/local/hailo/resources/json/*.json
+```
+
+### 2. Clone
 
 ```bash
 cd ~
@@ -42,7 +60,7 @@ git clone -b feature/openhd-integration-new \
     git@github.com:guyzigdons-apps/hailo-drone-follow.git
 ```
 
-### 2. Build OpenHD
+### 3. Build OpenHD
 
 ```bash
 cd ~/OpenHD && sudo ./build_native.sh all
@@ -55,13 +73,13 @@ sudo cmake --build build_release -j$(nproc)
 sudo cp build_release/openhd /usr/local/bin/openhd
 ```
 
-### 3. Install drone-follow
+### 4. Install drone-follow
 
 ```bash
 cd ~/hailo-drone-follow && ./install.sh
 ```
 
-### 4. Deploy df_params.json & encryption key
+### 5. Deploy df_params.json & encryption key
 
 ```bash
 sudo mkdir -p /usr/local/share/openhd
@@ -71,14 +89,10 @@ sudo cp ~/hailo-drone-follow/df_params.json /usr/local/share/openhd/df_params.js
 sudo dd if=/dev/urandom of=/usr/local/share/openhd/txrx.key bs=32 count=1 2>/dev/null
 ```
 
-### 5. Enable SHM passthrough (for SHM mode)
+### 6. Configure Camera Mode
 
-Create the marker file so OpenHD exposes raw video via shared memory:
-
-```bash
-sudo mkdir -p /boot/openhd
-sudo touch /boot/openhd/hailo.txt
-```
+See the [Camera Modes](#camera-modes) section below for choosing and
+configuring Mode A or Mode B.
 
 ---
 
@@ -131,28 +145,55 @@ sudo systemctl set-default multi-user.target && sudo reboot
 
 There are two integration modes. Both use the Hailo8 for AI detection.
 
-### Mode A — SHM Passthrough (recommended)
+### Mode A — Camera Type 5 (`X_CAM_TYPE_HAILO_AI`)
 
-OpenHD owns the camera (libcamerasrc). It creates a shared-memory branch
-(`/tmp/openhd_raw_video`) so drone-follow reads raw NV12 frames without
-opening the camera itself.
+drone-follow **owns the camera** — it captures directly from the RPi camera,
+runs Hailo inference, draws overlay, encodes to H.264, and streams RTP to
+OpenHD which treats it as an external video source.
 
-**Requirements:**
-- `/boot/openhd/hailo.txt` must exist (enables the SHM branch)
-- Camera type in OpenHD: any RPi libcamera type (e.g. IMX708 = type 32)
-- drone-follow uses `--input shm:///tmp/openhd_raw_video`
-- Resolution changes via QOpenHD work seamlessly (auto-detected via metadata)
+**Command:**
+```bash
+drone-follow --input rpi --openhd-stream --horizontal-mirror \
+    --connection tcpout://127.0.0.1:5760
+```
+> **Note:** `--horizontal-mirror` is only for selfie mode (front-facing camera).
+> Omit for rear-facing.
 
-### Mode B — Hailo Camera Type 5
+**Configuration:**
+1. Set camera type to **5** (HAILO_AI) in QOpenHD camera settings, or edit directly:
+   ```bash
+   sudo vim /boot/openhd/camera1.txt
+   ```
+2. Make sure no `hailo.txt` flag file exists:
+   ```bash
+   sudo rm -f /boot/openhd/hailo.txt
+   ```
+3. Resolution is controlled by drone-follow CLI arguments (`--width`, `--height`).
 
-drone-follow owns the camera directly and sends processed H264 video to
-OpenHD via UDP RTP.
+### Mode B — Shared Memory (`hailo.txt` flag) *(recommended)*
 
-**Requirements:**
-- Set camera type to **Hailo AI (5)** in QOpenHD camera settings
-- drone-follow uses `--input rpi --openhd-stream`
-- OpenHD receives the encoded stream instead of capturing from libcamerasrc
-- Resolution is controlled by drone-follow CLI arguments (`--width`, `--height`)
+OpenHD **owns the camera** — it captures from libcamera as normal, encodes
+for WFB transmission, and also tees raw NV12 frames to a shared-memory socket.
+drone-follow reads from SHM and performs AI inference only (no encoding).
+
+**Command:**
+```bash
+drone-follow --input shm:///tmp/openhd_raw_video --no-display \
+    --connection tcpout://127.0.0.1:5760
+```
+
+**Configuration:**
+1. Set camera type to a **normal libcamera type** in QOpenHD, or edit directly:
+   ```bash
+   sudo vim /boot/openhd/camera1.txt
+   ```
+   Common values: `31` = IMX219, `32` = IMX708.
+2. Create the SHM flag file so OpenHD exposes raw video via shared memory:
+   ```bash
+   sudo mkdir -p /boot/openhd
+   sudo touch /boot/openhd/hailo.txt
+   ```
+3. Resolution changes via QOpenHD work seamlessly (auto-detected via SHM metadata).
 
 ---
 
@@ -166,19 +207,18 @@ sudo /usr/local/bin/openhd --air --clean-start
 
 ### Step 2 — Air: Start drone-follow
 
-**SHM mode** (Mode A):
+**Camera Type 5 mode** (Mode A):
 ```bash
 cd ~/hailo-drone-follow && source venv/bin/activate
-drone-follow --input shm:///tmp/openhd_raw_video \
-    --openhd-stream --horizontal-mirror \
+drone-follow --input rpi --openhd-stream --horizontal-mirror \
     --connection tcpout://127.0.0.1:5760 \
     --tiles-x 1 --tiles-y 1
 ```
 
-**Hailo camera type mode** (Mode B):
+**SHM mode** (Mode B):
 ```bash
 cd ~/hailo-drone-follow && source venv/bin/activate
-drone-follow --input rpi --openhd-stream --horizontal-mirror \
+drone-follow --input shm:///tmp/openhd_raw_video --no-display \
     --connection tcpout://127.0.0.1:5760 \
     --tiles-x 1 --tiles-y 1
 ```
