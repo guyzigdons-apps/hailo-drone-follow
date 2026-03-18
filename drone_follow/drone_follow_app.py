@@ -21,13 +21,10 @@ import os
 import signal
 import threading
 import time
-from contextlib import nullcontext
-
 from drone_follow.follow_api import ControllerConfig, SharedDetectionState
 from drone_follow.follow_api.state import FollowTargetState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
-from drone_follow.sim import WorldLoader
 from drone_follow.servers import FollowServer
 
 LOGGER = logging.getLogger("drone_follow.app")
@@ -52,17 +49,8 @@ def _resolve_serial_connection(args):
 
 
 def _add_app_args(parser: argparse.ArgumentParser) -> None:
-    """Register application-level CLI flags (servers, UI, world loading)."""
+    """Register application-level CLI flags (servers, UI)."""
     group = parser.add_argument_group("app")
-
-    # World loading
-    group.add_argument("--px4-path", default=None, metavar="DIR",
-                       help="Path to PX4-Autopilot directory. Required when using --world.")
-    group.add_argument("--world", default=None, metavar="NAME_OR_PATH",
-                       help="SDF world to load in Gazebo. Can be a name from sdf_examples/ "
-                            "(e.g. '2_person_world') or a path to an .sdf file. "
-                            "Temporarily symlinks it as default.sdf; "
-                            "restores the original after the drone connects.")
 
     group.add_argument("--follow-server-port", type=int, default=8080,
                        help="HTTP server port for target selection")
@@ -73,7 +61,7 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
     group.add_argument("--record", action="store_true",
-                       help="Record raw video + detections for the entire session (requires --ui)")
+                       help="Record raw video + detections for the entire session")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -94,6 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_tracker_args(parser)
 
     _add_app_args(parser)
+
     return parser
 
 
@@ -139,7 +128,7 @@ def main():
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
-                     record_dir=recordings_dir)
+                     record_enabled=ui_pre_args.record, record_dir=recordings_dir)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
@@ -147,14 +136,12 @@ def main():
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
 
-    # Validate --world / --px4-path pair early (before starting servers)
-    world_loader = None
-    if args.world is not None:
-        if args.px4_path is None:
-            LOGGER.error("--world requires --px4-path")
-            raise SystemExit(1)
-        world_loader = WorldLoader(args.px4_path, args.world)
-        world_loader.validate()
+    # --save-config: dump effective config to JSON and exit
+    save_path = getattr(args, "save_config", None)
+    if save_path:
+        controller_config.save_json(save_path)
+        LOGGER.info("[app] Config saved to %s", save_path)
+        raise SystemExit(0)
 
     # Start follow server (always available)
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
@@ -174,6 +161,10 @@ def main():
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
         try:
+            if app.is_recording:
+                app.stop_recording()
+            else:
+                app.cleanup_recording_branch()
             app.loop.quit()
         except Exception:
             pass
@@ -184,19 +175,14 @@ def main():
         _quit_pipeline()
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
-    world_ctx = world_loader if world_loader is not None else nullcontext()
-    on_connected = world_loader.restore if world_loader is not None else None
-
     def run_drone():
         """Run drone control in a background thread with its own asyncio loop."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            with world_ctx:
-                loop.run_until_complete(
-                    run_live_drone(args, shared_state, shutdown,
-                                  config=controller_config, ui_state=ui_state,
-                                  on_connected_cb=on_connected))
+            loop.run_until_complete(
+                run_live_drone(args, shared_state, shutdown,
+                              config=controller_config, ui_state=ui_state))
         except Exception:
             LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
         finally:
@@ -217,8 +203,7 @@ def main():
         signal.signal(signal.SIGTERM, on_signal)
 
     # Start recording from CLI flag after pipeline is running
-    if ui_pre_args.record and ui_state is not None:
-        # Schedule recording start after pipeline enters PLAYING state
+    if ui_pre_args.record:
         def _start_recording_delayed():
             time.sleep(1.0)  # wait for pipeline to reach PLAYING
             app.start_recording()
@@ -235,6 +220,8 @@ def main():
             shutdown.set()
         if app.is_recording:
             app.stop_recording()
+        else:
+            app.cleanup_recording_branch()
         # Wait for drone thread to finish cleanly
         drone_thread.join(timeout=5.0)
         if web_server is not None:
