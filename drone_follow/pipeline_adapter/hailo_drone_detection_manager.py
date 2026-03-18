@@ -64,6 +64,9 @@ def _update_ui(ui_state, persons, person_to_id, following_id):
     if ui_state is None:
         return
     all_dets = [_build_det_info(p, person_to_id.get(id(p))) for p in persons]
+    det_ids = [d.get("id") for d in all_dets]
+    LOGGER.info("[ui] Sending %d detections to UI: ids=%s following=%s",
+                 len(all_dets), det_ids, following_id)
     ui_state.update_detections(all_dets, following_id)
 
 
@@ -136,6 +139,10 @@ def app_callback(element, buffer, user_data):
             embeddings.append(np.array(matrices[0].get_data()))
         else:
             embeddings.append(None)
+
+    n_with = sum(1 for e in embeddings if e is not None)
+    if n_with < len(embeddings):
+        LOGGER.debug("[reid] Embeddings: %d/%d persons have ReID vectors", n_with, len(embeddings))
 
     available_ids, person_by_id, person_to_id = _run_tracker(
         user_data.byte_tracker, persons, embeddings=embeddings)
