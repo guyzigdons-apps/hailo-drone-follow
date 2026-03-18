@@ -93,10 +93,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_app_args(parser)
 
-    # Camera is mounted upside-down: default both mirrors on (= 180° rotation).
-    # The library defines --horizontal-mirror/--vertical-mirror (store_true, default=False);
-    # set_defaults overrides arg-level defaults.
-    parser.set_defaults(horizontal_mirror=False, vertical_mirror=False)
     return parser
 
 
