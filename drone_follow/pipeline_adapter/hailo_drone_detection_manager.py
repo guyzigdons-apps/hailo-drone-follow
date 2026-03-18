@@ -447,16 +447,25 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             LOGGER.info("[reid] RepVGG body-ReID pipeline enabled (hef=%s)", reid_hef)
             return reid_cropper
+        def cleanup_recording_branch(self):
+            """Force recording branch elements to NULL so they don't block pipeline shutdown."""
+            if not self._record_enabled:
+                return
+            Gst = _get_gst()
+            with self._record_lock:
+                for name in ("record_enc", "record_mux", "record_sink"):
+                    el = self.pipeline.get_by_name(name)
+                    if el is not None:
+                        el.set_state(Gst.State.NULL)
 
         def get_pipeline_string(self):
             reid_cropper_pipeline = self._build_reid_cropper_pipeline()
 
-            if not self._ui_enabled:
-                # Non-UI path: build the same pipeline as the parent class
-                # but with the ReID cropper inserted after tile detection
+            if not self._ui_enabled and not self._record_enabled:
                 if reid_cropper_pipeline is None:
                     return super().get_pipeline_string()
 
+                # Non-UI/non-record path with ReID: build minimal pipeline
                 source_pipeline = SOURCE_PIPELINE(
                     video_source=self.video_source,
                     video_width=self.video_width,
@@ -503,20 +512,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     f'{user_callback_pipeline} ! '
                     f'{display_pipeline}'
                 )
-        def cleanup_recording_branch(self):
-            """Force recording branch elements to NULL so they don't block pipeline shutdown."""
-            if not self._record_enabled:
-                return
-            Gst = _get_gst()
-            with self._record_lock:
-                for name in ("record_enc", "record_mux", "record_sink"):
-                    el = self.pipeline.get_by_name(name)
-                    if el is not None:
-                        el.set_state(Gst.State.NULL)
-
-        def get_pipeline_string(self):
-            if not self._ui_enabled and not self._record_enabled:
-                return super().get_pipeline_string()
 
             # Build custom pipeline with optional tee branches
             source_pipeline = SOURCE_PIPELINE(
