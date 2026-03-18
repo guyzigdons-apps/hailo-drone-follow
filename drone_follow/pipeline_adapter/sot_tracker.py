@@ -82,9 +82,13 @@ class SOTracker:
         h, w = frame.shape[:2]
         self._frame_size = (w, h)
         self._tracker.init(frame, bbox_xywh)
+        was_initialized = self._initialized
         self._initialized = True
-        LOGGER.info("[SOT] Initialized NanoTrack on bbox %s (frame %dx%d)",
-                    bbox_xywh, w, h)
+        if not was_initialized:
+            LOGGER.info("[SOT] NanoTrack initialized bbox=%s frame=%dx%d",
+                        bbox_xywh, w, h)
+        else:
+            LOGGER.debug("[SOT] NanoTrack re-init bbox=%s", bbox_xywh)
 
     def update(self, frame: np.ndarray) -> SOTResult:
         """Update the tracker with a new frame.

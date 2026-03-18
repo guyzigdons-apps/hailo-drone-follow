@@ -6,7 +6,6 @@ No other module needs to import hailo or gi.repository.
 
 import argparse
 import logging
-import math
 import os
 import threading
 import time
@@ -19,7 +18,7 @@ import numpy as np
 
 from drone_follow.follow_api.types import Detection, TrackingMode
 
-from .sot_tracker import SOTracker, SOTResult
+from .sot_tracker import SOTracker
 from .tracker import MetricsTracker
 from .tracker_factory import create_tracker
 
@@ -69,7 +68,6 @@ def _get_frame_from_buffer(element, buffer):
     fmt, w, h = _cached_caps
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
 
-    # NanoTrack expects BGR; GStreamer RGB needs conversion
     if fmt == "RGB":
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     return frame
@@ -83,60 +81,6 @@ def _hailo_bbox_to_pixel_xywh(person, frame_w, frame_h):
     w = int(bbox.width() * frame_w)
     h = int(bbox.height() * frame_h)
     return (x, y, max(w, 1), max(h, 1))
-
-
-def _find_closest_mot_detection(sot_result, person_by_id, iou_threshold=0.3):
-    """Find the MOT track whose bbox best overlaps the SOT result.
-
-    Returns (track_id, person) or (None, None) if no match above threshold.
-    """
-    if sot_result.bbox is None or not sot_result.ok:
-        return None, None
-
-    sx, sy, sw, sh = sot_result.bbox
-    best_iou = 0.0
-    best_tid = None
-    best_person = None
-
-    # Need frame dimensions to convert normalized MOT bboxes to pixels.
-    # We use the SOT result's normalized center to get approximate frame size.
-    # Actually, we'll compare in normalized space using sot_result.center_norm
-    # and bbox_height_norm.
-    if sot_result.center_norm is None:
-        return None, None
-
-    scx, scy = sot_result.center_norm
-    s_half_h = sot_result.bbox_height_norm / 2
-    # Approximate SOT bbox width ratio (assume aspect from pixel bbox)
-    s_half_w = (sw / max(sh, 1)) * s_half_h / 2 if sh > 0 else s_half_h
-
-    for tid, person in person_by_id.items():
-        bbox = person.get_bbox()
-        mcx = bbox.xmin() + bbox.width() / 2
-        mcy = bbox.ymin() + bbox.height() / 2
-        m_half_w = bbox.width() / 2
-        m_half_h = bbox.height() / 2
-
-        # IoU in normalized space
-        x1 = max(scx - s_half_w, mcx - m_half_w)
-        y1 = max(scy - s_half_h, mcy - m_half_h)
-        x2 = min(scx + s_half_w, mcx + m_half_w)
-        y2 = min(scy + s_half_h, mcy + m_half_h)
-
-        inter = max(0, x2 - x1) * max(0, y2 - y1)
-        area_s = (2 * s_half_w) * (2 * s_half_h)
-        area_m = bbox.width() * bbox.height()
-        union = area_s + area_m - inter
-
-        iou = inter / union if union > 0 else 0
-        if iou > best_iou:
-            best_iou = iou
-            best_tid = tid
-            best_person = person
-
-    if best_iou >= iou_threshold:
-        return best_tid, best_person
-    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -161,70 +105,99 @@ def _build_det_info(person, track_id=None):
     return det_info
 
 
-def _update_ui(ui_state, persons, person_to_id, following_id, tracking_mode="mot"):
-    """Push detection metadata to the web UI if enabled."""
+def _update_ui(ui_state, persons, person_to_id, following_id,
+               tracking_mode="mot", id_remap=None):
+    """Push detection metadata to the web UI if enabled.
+
+    Args:
+        id_remap: optional dict {internal_id: display_id} to override
+                  IDs shown in the UI (e.g. after an ID switch).
+    """
     if ui_state is None:
         return
-    all_dets = [_build_det_info(p, person_to_id.get(id(p))) for p in persons]
+    all_dets = []
+    for p in persons:
+        tid = person_to_id.get(id(p))
+        if id_remap and tid in id_remap:
+            tid = id_remap[tid]
+        all_dets.append(_build_det_info(p, tid))
     ui_state.update_detections(all_dets, following_id, tracking_mode=tracking_mode)
 
 
-def _try_reacquire(target_state, person_by_id):
-    """Attempt to reacquire a lost target using saved ReID embeddings.
+def _try_reacquire_reid(target_state, persons):
+    """Attempt to reacquire a lost target by comparing saved target embeddings
+    against ReID embeddings on raw YOLO detections.
 
-    Compares stored embeddings against current detections.  Returns the
-    matched track_id on success, None otherwise.
-
-    Currently a no-op — embeddings are None placeholders.  When a ReID
-    feature extractor is added, this function will perform actual
-    appearance-based matching.
+    Returns the matched person detection on success, None otherwise.
     """
-    embeddings = target_state.get_reid_embeddings()
-    if not embeddings:
+    target_embs = target_state.get_target_embeddings()
+    if not target_embs:
         return None
 
-    # Only attempt matching if we have real embeddings (not None placeholders)
-    has_real = any(e.get("embedding") is not None for e in embeddings)
-    if not has_real:
-        return None
+    best_person = None
+    best_sim = -1.0
+    threshold = 0.5  # cosine similarity threshold for re-identification
 
-    # TODO: Compare saved embeddings against current detections' embeddings.
-    # For each person in person_by_id, extract an embedding and compute
-    # cosine similarity against our saved embeddings.  Return the track_id
-    # of the best match above a threshold.
+    for person in persons:
+        matrices = person.get_objects_typed(hailo.HAILO_MATRIX)
+        if not matrices:
+            continue
+        det_emb = np.array(matrices[0].get_data())
+        norm = np.linalg.norm(det_emb)
+        if norm < 1e-6:
+            continue
+        det_emb = det_emb / norm
+
+        # Compare against all saved target embeddings, take best similarity
+        for saved in target_embs:
+            sim = float(np.dot(det_emb, saved))
+            if sim > best_sim:
+                best_sim = sim
+                best_person = person
+
+    if best_sim >= threshold and best_person is not None:
+        LOGGER.info("[REID] Reacquire match (sim=%.3f)", best_sim)
+        return best_person
     return None
 
 
-def _collect_nearby_embeddings(persons, person_by_id, last_pos):
-    """Build a list of nearby-detection dicts sorted by distance to *last_pos*.
+def _find_overlapping_detection(sot_result, persons, frame_h, frame_w):
+    """Find the YOLO detection that best overlaps NanoTrack's bbox.
 
-    Each entry: {"track_id": int, "embedding": None, "distance": float}.
-    ``embedding`` is a placeholder — a future ReID feature extractor will
-    populate it with an actual appearance vector.
-
-    Args:
-        persons: list of Hailo detection objects in the current frame.
-        person_by_id: {track_id -> detection} mapping from the tracker.
-        last_pos: (cx, cy) normalized 0-1 — last known target position.
-
-    Returns:
-        List sorted by ascending Euclidean distance to *last_pos*.
+    Returns the person detection with highest IoU, or None if below threshold.
     """
-    if last_pos is None:
-        return []
-    lx, ly = last_pos
-    nearby = []
-    for tid, person in person_by_id.items():
+    if sot_result is None or not sot_result.ok or sot_result.bbox is None:
+        return None
+
+    sx, sy, sw, sh = sot_result.bbox
+    best_iou = 0.0
+    best_person = None
+
+    for person in persons:
         bbox = person.get_bbox()
-        cx = bbox.xmin() + bbox.width() / 2
-        cy = bbox.ymin() + bbox.height() / 2
-        dist = math.hypot(cx - lx, cy - ly)
-        nearby.append({"track_id": tid, "embedding": None, "distance": dist})
-    nearby.sort(key=lambda e: e["distance"])
-    return nearby
+        # Convert normalized bbox to pixels
+        px = int(bbox.xmin() * frame_w)
+        py = int(bbox.ymin() * frame_h)
+        pw = int(bbox.width() * frame_w)
+        ph = int(bbox.height() * frame_h)
+
+        # Compute IoU
+        x1 = max(sx, px)
+        y1 = max(sy, py)
+        x2 = min(sx + sw, px + pw)
+        y2 = min(sy + sh, py + ph)
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        union = sw * sh + pw * ph - inter
+        iou = inter / union if union > 0 else 0
+
+        if iou > best_iou:
+            best_iou = iou
+            best_person = person
+
+    return best_person if best_iou >= 0.3 else None
 
 
-def _run_tracker(tracker, persons):
+def _run_tracker(tracker, persons, embeddings=None):
     """Run tracker and return (available_ids, person_by_id, person_to_id).
 
     person_by_id:  {track_id -> person detection}
@@ -243,7 +216,7 @@ def _run_tracker(tracker, persons):
         det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
         det_array[i, 4] = person.get_confidence()
 
-    all_tracks = tracker.update(det_array)
+    all_tracks = tracker.update(det_array, embeddings=embeddings)
 
     for t in all_tracks:
         if t.is_activated and 0 <= t.input_index < len(persons):
@@ -263,17 +236,14 @@ def _run_tracker(tracker, persons):
 def app_callback(element, buffer, user_data):
     """Tiling pipeline callback with MOT/SOT mode support.
 
-    MOT mode (default): All people are tracked and shown in the UI.
-        The drone does NOT auto-follow anyone — it waits for the user
-        to select a target.
-    SOT mode: The drone follows a specific person using a hybrid approach:
-        1. MOT (ByteTrack) provides track ID continuity.
-        2. NanoTrack SOT provides visual tracking as fallback when MOT
-           loses the track ID (e.g., ID switch, brief occlusion).
-        3. If both lose the target, nearby embeddings are saved for
-           future ReID and the pipeline reverts to MOT mode.
-
-    ByteTracker + NanoTrack both run synchronously in the callback.
+    MOT mode: ByteTracker tracks all people, UI shows IDs, drone waits
+        for user to select a target.
+    SOT mode: NanoTrack visually tracks the selected person.  MOT does
+        NOT run.  ReID embeddings are collected from the YOLO detection
+        that overlaps NanoTrack's bbox.  When NanoTrack loses the target,
+        ReID matching is attempted against all YOLO detections in the
+        frame.  If a match is found, NanoTrack is re-initialized on it.
+        Otherwise, reverts to MOT mode.
     """
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
@@ -284,218 +254,196 @@ def app_callback(element, buffer, user_data):
     sot = user_data.sot_tracker
     mode = target_state.get_mode() if target_state is not None else TrackingMode.MOT
 
-    # --- No persons in frame ---
-    if not persons:
-        user_data.tracker.update(_EMPTY_DET_ARRAY)
-
-        # In SOT mode, try NanoTrack even with no detections (visual tracking)
-        if mode == TrackingMode.SOT and sot.is_initialized:
-            frame = _get_frame_from_buffer(element, buffer)
-            if frame is not None:
-                sot_result = sot.update(frame)
-                if sot_result.ok:
-                    # NanoTrack still sees the target even though YOLO doesn't
-                    target_state.update_last_seen(position=sot_result.center_norm)
-                    user_data.shared_state.update(Detection(
-                        label="person",
-                        confidence=sot_result.confidence,
-                        center_x=sot_result.center_norm[0],
-                        center_y=sot_result.center_norm[1],
-                        bbox_height=sot_result.bbox_height_norm,
-                        timestamp=time.monotonic(),
-                    ), available_ids=set())
-                    _update_ui(ui_state, [], {}, target_state.get_target(),
-                               tracking_mode="sot")
-                    LOGGER.debug("[SOT/NanoTrack] No YOLO dets but NanoTrack ok "
-                                 "score=%.3f", sot_result.confidence)
-                    return
-
-        # Truly lost
-        user_data.shared_state.update(None, available_ids=set())
-        if target_state is not None and mode == TrackingMode.SOT:
-            sot.reset()
-            target_state.set_target(None)
-            LOGGER.debug("[SOT→MOT] No person detected — reverting to MOT")
-        _update_ui(ui_state, [], {}, None, tracking_mode="mot")
-        return
-
-    # --- Run MOT tracker (always, both modes) ---
-    available_ids, person_by_id, person_to_id = _run_tracker(
-        user_data.tracker, persons)
-
-    # Attach tracking IDs to Hailo detection objects so hailooverlay renders them
-    for person in persons:
-        track_id = person_to_id.get(id(person))
-        if track_id is not None:
-            person.add_object(hailo.HailoUniqueID(track_id, hailo.TRACKING_ID))
-
-    # === MOT MODE: show all, follow none ===
+    # =======================================================================
+    # MOT MODE
+    # =======================================================================
     if mode == TrackingMode.MOT:
-        sot.reset()  # ensure SOT is clean
+        if not persons:
+            user_data.tracker.update(_EMPTY_DET_ARRAY)
+            user_data.shared_state.update(None, available_ids=set())
+            _update_ui(ui_state, [], {}, None, tracking_mode="mot")
+            return
 
-        # --- Reacquisition: try to re-identify the lost target ---
+        # Extract ReID embeddings for MOT tracker
+        embeddings = []
+        for person in persons:
+            matrices = person.get_objects_typed(hailo.HAILO_MATRIX)
+            if matrices:
+                embeddings.append(np.array(matrices[0].get_data()))
+            else:
+                embeddings.append(None)
+        if not any(e is not None for e in embeddings):
+            embeddings = None
+
+        available_ids, person_by_id, person_to_id = _run_tracker(
+            user_data.tracker, persons, embeddings=embeddings)
+
+        # Attach tracking IDs for hailooverlay
+        for person in persons:
+            track_id = person_to_id.get(id(person))
+            if track_id is not None:
+                person.add_object(hailo.HailoUniqueID(track_id, hailo.TRACKING_ID))
+
+        # ReID reacquisition: try to re-identify a previously lost target
         if target_state is not None and target_state.has_reacquire_data():
-            matched_id = _try_reacquire(target_state, person_by_id)
-            if matched_id is not None and matched_id in person_by_id:
-                LOGGER.info("[MOT→SOT] Reacquired target as ID %d via ReID",
-                            matched_id)
-                target_state.set_target(matched_id)
-                best = person_by_id[matched_id]
-                bbox = best.get_bbox()
+            matched_person = _try_reacquire_reid(target_state, persons)
+            if matched_person is not None:
+                display_id = target_state.get_display_id()
+                target_state.set_target(
+                    id(matched_person), display_id=display_id, reacquired=True)
+                bbox = matched_person.get_bbox()
                 cx = bbox.xmin() + bbox.width() / 2
                 cy = bbox.ymin() + bbox.height() / 2
                 target_state.update_last_seen(position=(cx, cy))
 
-                # Init NanoTrack on the reacquired target
+                # Init NanoTrack on the reacquired person
                 frame = _get_frame_from_buffer(element, buffer)
                 if frame is not None:
                     h, w = frame.shape[:2]
-                    sot.init(frame, _hailo_bbox_to_pixel_xywh(best, w, h))
+                    sot.init(frame, _hailo_bbox_to_pixel_xywh(matched_person, w, h))
 
                 user_data.shared_state.update(Detection(
                     label="person",
-                    confidence=best.get_confidence(),
+                    confidence=matched_person.get_confidence(),
                     center_x=cx, center_y=cy,
                     bbox_height=bbox.height(),
                     timestamp=time.monotonic(),
                 ), available_ids=available_ids)
-                _update_ui(ui_state, persons, person_to_id, matched_id,
-                           tracking_mode="sot")
+                _update_ui(ui_state, persons, person_to_id,
+                           display_id, tracking_mode="sot")
                 _log_tracker_metrics(user_data.tracker)
                 return
-            # No match yet — stay in MOT, will retry next frame
-            LOGGER.debug("[MOT/reacquire] No ReID match, retrying... (%d embeddings saved)",
-                         len(target_state.get_reid_embeddings()))
+            LOGGER.debug("[MOT] reacquire: no ReID match (%d target embeddings)",
+                         len(target_state.get_target_embeddings()))
         elif target_state is not None:
-            # Timeout expired or no embeddings — stop trying
             target_state.clear_reacquire()
 
         user_data.shared_state.update(None, available_ids=available_ids)
         _update_ui(ui_state, persons, person_to_id, None, tracking_mode="mot")
-        LOGGER.debug("[MOT] %d persons tracked: %s",
+        LOGGER.debug("[MOT] %d tracked ids=%s",
                      len(available_ids), sorted(available_ids))
         _log_tracker_metrics(user_data.tracker)
         return
 
-    # === SOT MODE: follow the selected target ===
-    target_id = target_state.get_target()
-    best = person_by_id.get(target_id)
-
-    # Extract frame for NanoTrack (needed for init or update)
+    # =======================================================================
+    # SOT MODE — NanoTrack only, no MOT
+    # =======================================================================
+    display_id = target_state.get_display_id()
     frame = _get_frame_from_buffer(element, buffer)
 
-    if best is not None:
-        # --- MOT found the target ---
-        bbox = best.get_bbox()
-        cx = bbox.xmin() + bbox.width() / 2
-        cy = bbox.ymin() + bbox.height() / 2
-        target_state.update_last_seen(position=(cx, cy))
+    # Initialize NanoTrack on first SOT frame (target just selected from MOT)
+    if not sot.is_initialized:
+        target_id = target_state.get_target()
+        # Run MOT once to resolve which detection is our target_id
+        embeddings = []
+        for person in persons:
+            matrices = person.get_objects_typed(hailo.HAILO_MATRIX)
+            if matrices:
+                embeddings.append(np.array(matrices[0].get_data()))
+            else:
+                embeddings.append(None)
+        if not any(e is not None for e in embeddings):
+            embeddings = None
+        _, person_by_id, _ = _run_tracker(
+            user_data.tracker, persons, embeddings=embeddings)
+        init_person = person_by_id.get(target_id)
 
-        # (Re-)init NanoTrack with MOT's bbox for drift correction
+        if init_person is None:
+            # Target not found in detections — can't init NanoTrack
+            LOGGER.info("[SOT→MOT] Can't find ID %d in detections to init NanoTrack",
+                        target_id)
+            sot.reset()
+            target_state.set_target(None)
+            user_data.shared_state.update(None, available_ids=set())
+            _update_ui(ui_state, persons, {}, None, tracking_mode="mot")
+            return
+
         if frame is not None:
             h, w = frame.shape[:2]
-            pixel_bbox = _hailo_bbox_to_pixel_xywh(best, w, h)
-            if not sot.is_initialized:
-                sot.init(frame, pixel_bbox)
-            else:
-                # Re-init periodically to prevent drift (every frame MOT
-                # confirms the target, we reset NanoTrack's template)
-                sot.init(frame, pixel_bbox)
+            sot.init(frame, _hailo_bbox_to_pixel_xywh(init_person, w, h))
+            # Save the first ReID embedding
+            matrices = init_person.get_objects_typed(hailo.HAILO_MATRIX)
+            if matrices:
+                emb = np.array(matrices[0].get_data())
+                norm = np.linalg.norm(emb)
+                if norm > 1e-6:
+                    target_state.add_target_embedding(emb / norm)
+
+    # --- Run NanoTrack ---
+    if frame is not None and sot.is_initialized:
+        sot_result = sot.update(frame)
+    else:
+        sot_result = None
+
+    if sot_result is not None and sot_result.ok:
+        # NanoTrack is tracking — use its position for the drone
+        target_state.update_last_seen(position=sot_result.center_norm)
+
+        # Find overlapping YOLO detection for ReID + display overlay
+        sot_person_to_id = {}
+        overlap_person = None
+        if persons and frame is not None:
+            h, w = frame.shape[:2]
+            overlap_person = _find_overlapping_detection(sot_result, persons, h, w)
+            if overlap_person is not None:
+                # Tag for hailooverlay green box + ID label
+                overlap_person.add_object(
+                    hailo.HailoUniqueID(display_id, hailo.TRACKING_ID))
+                sot_person_to_id[id(overlap_person)] = display_id
+                # Collect ReID embedding
+                matrices = overlap_person.get_objects_typed(hailo.HAILO_MATRIX)
+                if matrices:
+                    emb = np.array(matrices[0].get_data())
+                    norm = np.linalg.norm(emb)
+                    if norm > 1e-6:
+                        target_state.add_target_embedding(emb / norm)
 
         user_data.shared_state.update(Detection(
             label="person",
-            confidence=best.get_confidence(),
-            center_x=cx,
-            center_y=cy,
-            bbox_height=bbox.height(),
+            confidence=sot_result.confidence,
+            center_x=sot_result.center_norm[0],
+            center_y=sot_result.center_norm[1],
+            bbox_height=sot_result.bbox_height_norm,
             timestamp=time.monotonic(),
-        ), available_ids=available_ids)
-
-        _update_ui(ui_state, persons, person_to_id, target_id, tracking_mode="sot")
-        LOGGER.debug("[SOT/MOT] Following ID %d  conf=%.2f center=(%.2f,%.2f) h=%.2f",
-                     target_id, best.get_confidence(), cx, cy, bbox.height())
-
-    elif sot.is_initialized and frame is not None:
-        # --- MOT lost the track ID, try NanoTrack fallback ---
-        sot_result = sot.update(frame)
-
-        if sot_result.ok:
-            # NanoTrack still tracks visually — try to adopt a new MOT ID
-            fallback_tid, fallback_person = _find_closest_mot_detection(
-                sot_result, person_by_id)
-
-            if fallback_tid is not None:
-                # Found a matching MOT detection — adopt its ID
-                LOGGER.info("[SOT] MOT ID %d lost, NanoTrack matched MOT ID %d "
-                            "(ID switch recovery)", target_id, fallback_tid)
-                target_state.set_target(fallback_tid)
-                fbbox = fallback_person.get_bbox()
-                cx = fbbox.xmin() + fbbox.width() / 2
-                cy = fbbox.ymin() + fbbox.height() / 2
-                target_state.update_last_seen(position=(cx, cy))
-
-                # Re-init NanoTrack on the corrected bbox
-                h, w = frame.shape[:2]
-                sot.init(frame, _hailo_bbox_to_pixel_xywh(fallback_person, w, h))
-
-                user_data.shared_state.update(Detection(
-                    label="person",
-                    confidence=fallback_person.get_confidence(),
-                    center_x=cx,
-                    center_y=cy,
-                    bbox_height=fbbox.height(),
-                    timestamp=time.monotonic(),
-                ), available_ids=available_ids)
-                _update_ui(ui_state, persons, person_to_id, fallback_tid,
-                           tracking_mode="sot")
-            else:
-                # NanoTrack tracks but no MOT match — use NanoTrack position
-                target_state.update_last_seen(position=sot_result.center_norm)
-                user_data.shared_state.update(Detection(
-                    label="person",
-                    confidence=sot_result.confidence,
-                    center_x=sot_result.center_norm[0],
-                    center_y=sot_result.center_norm[1],
-                    bbox_height=sot_result.bbox_height_norm,
-                    timestamp=time.monotonic(),
-                ), available_ids=available_ids)
-                _update_ui(ui_state, persons, person_to_id, target_id,
-                           tracking_mode="sot")
-                LOGGER.debug("[SOT/NanoTrack] MOT ID %d lost, NanoTrack fallback "
-                             "score=%.3f", target_id, sot_result.confidence)
-        else:
-            # Both MOT and NanoTrack lost the target — revert to MOT
-            _handle_target_lost(target_state, sot, persons, person_by_id,
-                                available_ids, user_data, ui_state, person_to_id,
-                                target_id)
+        ), available_ids=set())
+        _update_ui(ui_state, persons, sot_person_to_id, display_id, tracking_mode="sot")
+        LOGGER.debug("[SOT] NanoTrack ok score=%.2f c=(%.2f,%.2f)",
+                     sot_result.confidence,
+                     sot_result.center_norm[0], sot_result.center_norm[1])
     else:
-        # MOT mode: no target selected — don't follow anyone
-        user_data.shared_state.update(None, available_ids=available_ids)
-        _update_ui(ui_state, persons, person_to_id, None)
-        LOGGER.debug("[MOT MODE] No target selected. Available: %s",
-                     sorted(available_ids) if available_ids else "none")
-        return
+        # NanoTrack lost the target — try ReID against current detections
+        if persons:
+            matched_person = _try_reacquire_reid(target_state, persons)
+            if matched_person is not None and frame is not None:
+                # Found via ReID — re-init NanoTrack, stay in SOT
+                bbox = matched_person.get_bbox()
+                cx = bbox.xmin() + bbox.width() / 2
+                cy = bbox.ymin() + bbox.height() / 2
+                target_state.update_last_seen(position=(cx, cy))
+                h, w = frame.shape[:2]
+                sot.init(frame, _hailo_bbox_to_pixel_xywh(matched_person, w, h))
+                # Tag recovered person for overlay
+                matched_person.add_object(
+                    hailo.HailoUniqueID(display_id, hailo.TRACKING_ID))
+                user_data.shared_state.update(Detection(
+                    label="person",
+                    confidence=matched_person.get_confidence(),
+                    center_x=cx, center_y=cy,
+                    bbox_height=bbox.height(),
+                    timestamp=time.monotonic(),
+                ), available_ids=set())
+                _update_ui(ui_state, persons, {id(matched_person): display_id},
+                           display_id, tracking_mode="sot")
+                LOGGER.info("[SOT] NanoTrack lost → ReID recovered (sim match)")
+                return
 
-    _log_tracker_metrics(user_data.tracker)
-
-
-def _handle_target_lost(target_state, sot, persons, person_by_id,
-                        available_ids, user_data, ui_state, person_to_id,
-                        target_id):
-    """Handle target loss: save ReID embeddings, reset SOT, revert to MOT."""
-    last_pos = target_state.get_last_known_position()
-    nearby = _collect_nearby_embeddings(persons, person_by_id, last_pos)
-    target_state.store_reid_embeddings(nearby)
-
-    LOGGER.info("[SOT→MOT] Target ID %d lost (MOT+NanoTrack). "
-                "Saved %d nearby embeddings. Available: %s — reverting to MOT",
-                target_id, len(nearby),
-                sorted(available_ids) if available_ids else "none")
-
-    sot.reset()
-    target_state.set_target(None)  # switches to MOT
-    user_data.shared_state.update(None, available_ids=available_ids)
-    _update_ui(ui_state, persons, person_to_id, None, tracking_mode="mot")
+        # ReID also failed — revert to MOT
+        n_embs = len(target_state.get_target_embeddings())
+        LOGGER.info("[SOT→MOT] NanoTrack + ReID failed. %d embeddings saved.", n_embs)
+        sot.reset()
+        target_state.set_target(None)
+        user_data.shared_state.update(None, available_ids=set())
+        _update_ui(ui_state, persons, {}, None, tracking_mode="mot")
 
 
 def _log_tracker_metrics(tracker):
@@ -536,11 +484,20 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         GStreamerTilingApp,
     )
     from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
-    from hailo_apps.python.core.common.core import get_pipeline_parser
+    from hailo_apps.python.core.common.core import get_pipeline_parser, get_resource_path
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
         QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
         TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
+        CROPPER_PIPELINE,
+    )
+    from hailo_apps.python.core.common.defines import (
+        RESOURCES_SO_DIR_NAME,
+        RESOURCES_MODELS_DIR_NAME,
+        REID_POSTPROCESS_SO_FILENAME,
+        ALL_DETECTIONS_CROPPER_POSTPROCESS_SO_FILENAME,
+        REID_CROPPER_POSTPROCESS_FUNCTION,
+        REID_POSTPROCESS_FUNCTION,
     )
 
     if parser is None:
@@ -697,9 +654,110 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     if el is not None:
                         el.set_state(Gst.State.NULL)
 
+        def _build_reid_cropper_pipeline(self):
+            """Build the RepVGG body-ReID cropper+inference sub-pipeline.
+
+            Returns the pipeline string or None if ReID is disabled or the HEF is not found.
+            """
+            if not getattr(self.options_menu, 'reid', True):
+                LOGGER.info("[reid] ReID disabled via --no-reid")
+                return None
+
+            reid_hef = get_resource_path(
+                pipeline_name=None,
+                resource_type=RESOURCES_MODELS_DIR_NAME,
+                arch=self.arch,
+                model='repvgg_a0_person_reid_512',
+            )
+            if reid_hef is None or not reid_hef.exists():
+                LOGGER.warning("[reid] RepVGG HEF not found (%s) — running without ReID", reid_hef)
+                return None
+
+            reid_so = get_resource_path(
+                pipeline_name=None,
+                resource_type=RESOURCES_SO_DIR_NAME,
+                model=REID_POSTPROCESS_SO_FILENAME,
+            )
+            cropper_so = get_resource_path(
+                pipeline_name=None,
+                resource_type=RESOURCES_SO_DIR_NAME,
+                model=ALL_DETECTIONS_CROPPER_POSTPROCESS_SO_FILENAME,
+            )
+
+            reid_inference = INFERENCE_PIPELINE(
+                hef_path=str(reid_hef),
+                post_process_so=str(reid_so),
+                post_function_name=REID_POSTPROCESS_FUNCTION,
+                batch_size=self.batch_size,
+                config_json=None,
+                name='reid_inference',
+            )
+
+            reid_cropper = CROPPER_PIPELINE(
+                inner_pipeline=reid_inference,
+                so_path=str(cropper_so),
+                function_name=REID_CROPPER_POSTPROCESS_FUNCTION,
+                internal_offset=True,
+                name='reid_cropper',
+            )
+
+            LOGGER.info("[reid] RepVGG body-ReID pipeline enabled (hef=%s)", reid_hef)
+            return reid_cropper
+
         def get_pipeline_string(self):
+            reid_cropper_pipeline = self._build_reid_cropper_pipeline()
+
             if not self._ui_enabled and not self._record_enabled:
-                return super().get_pipeline_string()
+                if reid_cropper_pipeline is None:
+                    return super().get_pipeline_string()
+
+                # Non-UI/non-record path with ReID: build minimal pipeline
+                source_pipeline = SOURCE_PIPELINE(
+                    video_source=self.video_source,
+                    video_width=self.video_width,
+                    video_height=self.video_height,
+                    frame_rate=self.frame_rate,
+                    sync=self.sync,
+                    horizontal_mirror=self.horizontal_mirror,
+                    vertical_mirror=self.vertical_mirror,
+                )
+
+                detection_pipeline = INFERENCE_PIPELINE(
+                    hef_path=self.hef_path,
+                    post_process_so=self.post_process_so,
+                    post_function_name=self.post_function,
+                    batch_size=self.batch_size,
+                    config_json=self.labels_json,
+                )
+
+                tiling_mode = 1 if self.use_multi_scale else 0
+                scale_level = self.scale_level if self.use_multi_scale else 0
+                tile_cropper_pipeline = TILE_CROPPER_PIPELINE(
+                    detection_pipeline,
+                    name='tile_cropper_wrapper',
+                    internal_offset=True,
+                    scale_level=scale_level,
+                    tiling_mode=tiling_mode,
+                    tiles_along_x_axis=self.tiles_x,
+                    tiles_along_y_axis=self.tiles_y,
+                    overlap_x_axis=self.overlap_x,
+                    overlap_y_axis=self.overlap_y,
+                    iou_threshold=self.iou_threshold,
+                    border_threshold=self.border_threshold,
+                )
+
+                user_callback_pipeline = USER_CALLBACK_PIPELINE()
+                display_pipeline = DISPLAY_PIPELINE(
+                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                )
+
+                return (
+                    f'{source_pipeline} ! '
+                    f'{tile_cropper_pipeline} ! '
+                    f'{reid_cropper_pipeline} ! '
+                    f'{user_callback_pipeline} ! '
+                    f'{display_pipeline}'
+                )
 
             # Build custom pipeline with optional tee branches
             source_pipeline = SOURCE_PIPELINE(
@@ -751,7 +809,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     f"videorate max-rate={self._ui_fps} ! "
                     f"video/x-raw,framerate={self._ui_fps}/1 ! "
                     f"jpegenc quality=70 ! "
-                    f"appsink name=mjpeg_sink sync=false drop=false emit-signals=true"
+                    f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
                 )
                 extra_branches.append(
                     f"t. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch}"
@@ -776,8 +834,10 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 + " ".join(extra_branches)
             )
 
-            pipeline_parts = [source_pipeline, tile_cropper_pipeline,
-                              user_callback_pipeline, output_pipeline]
+            pipeline_parts = [source_pipeline, tile_cropper_pipeline]
+            if reid_cropper_pipeline is not None:
+                pipeline_parts.append(reid_cropper_pipeline)
+            pipeline_parts.extend([user_callback_pipeline, output_pipeline])
 
             return ' ! '.join(pipeline_parts)
 

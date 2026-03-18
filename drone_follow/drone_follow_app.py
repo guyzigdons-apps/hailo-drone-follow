@@ -62,6 +62,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="MJPEG stream frame rate (default: 10)")
     group.add_argument("--record", action="store_true",
                        help="Record raw video + detections for the entire session")
+    group.add_argument("--reid", action=argparse.BooleanOptionalAction, default=True,
+                       help="Enable RepVGG body-ReID for improved tracking (default: on)")
 
 
 def _build_parser() -> argparse.ArgumentParser:

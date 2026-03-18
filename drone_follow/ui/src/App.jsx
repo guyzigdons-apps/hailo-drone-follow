@@ -566,7 +566,7 @@ export default function App() {
                     y={y}
                     width={w}
                     height={h}
-                    fill="none"
+                    fill="transparent"
                     stroke={isFollowing ? "#00ff00" : "#ffffff"}
                     strokeWidth={isFollowing ? 3 : 2}
                     strokeOpacity={0.9}

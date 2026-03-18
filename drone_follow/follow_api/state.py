@@ -3,7 +3,6 @@
 import logging
 import threading
 import time
-from collections import deque
 from typing import Optional
 
 from .types import Detection, TrackingMode
@@ -45,29 +44,30 @@ class FollowTargetState:
       MOT — all people tracked, drone waits for user to select a target.
       SOT — following a specific person by track ID.
 
-    Also maintains a ReID embedding store: when the followed target is lost,
-    nearby embeddings (up to ``max_reid_embeddings``) are saved so a future
-    ReID module can attempt re-identification.
+    When ReID is enabled, the target's appearance embeddings are collected
+    every few frames while following.  On target loss, these saved embeddings
+    are used to re-identify the person in subsequent frames.
     """
 
-    MAX_REID_EMBEDDINGS = 10
     REACQUIRE_TIMEOUT_S = 5.0  # seconds to attempt reacquisition before giving up
+    EMBEDDING_SAVE_INTERVAL = 5  # save one embedding every N frames
+    MAX_TARGET_EMBEDDINGS = 20  # rolling window of saved embeddings
 
     def __init__(self):
         self._lock = threading.Lock()
         self._target_id: Optional[int] = None
+        self._display_id: Optional[int] = None
         self._last_seen: Optional[float] = None
         self._mode: TrackingMode = TrackingMode.MOT
         # Last known normalized (0-1) center position of the followee
         self._last_known_position: Optional[tuple] = None  # (cx, cy)
         # Timestamp when target was lost — used for reacquisition timeout
         self._target_lost_at: Optional[float] = None
-        # ReID embedding store — list of (track_id, embedding) tuples.
-        # Populated when target is lost with embeddings of nearby detections.
-        # ``embedding`` is currently None (placeholder for a future feature
-        # extractor); the slot is reserved so the pipeline can be extended
-        # without changing the state API.
-        self._reid_embeddings: deque = deque(maxlen=self.MAX_REID_EMBEDDINGS)
+        # ReID target embeddings — appearance vectors of the followed person,
+        # collected every EMBEDDING_SAVE_INTERVAL frames while in SOT mode.
+        # Used for re-identification after target loss.
+        self._target_embeddings: list = []
+        self._embedding_frame_counter: int = 0
 
     # ---- Mode management ----
 
@@ -75,30 +75,50 @@ class FollowTargetState:
         with self._lock:
             return self._mode
 
-    def set_target(self, detection_id: Optional[int]):
+    def set_target(self, detection_id: Optional[int], display_id: Optional[int] = None,
+                   reacquired: bool = False):
         """Set the target detection ID to follow.
 
         Setting a non-None ID switches to SOT mode.
-        Setting None switches back to MOT mode (embeddings preserved
-        for reacquisition if they were stored before this call).
+        Setting None switches back to MOT mode (target embeddings preserved
+        for ReID reacquisition).
+
+        Args:
+            detection_id: internal MOT track ID to follow.
+            display_id: ID shown in the UI. Defaults to detection_id.
+            reacquired: True when re-acquiring a lost target via ReID.
+                        Preserves saved target embeddings and display_id.
         """
         with self._lock:
             self._target_id = detection_id
+            self._display_id = display_id if display_id is not None else detection_id
             if detection_id is not None:
                 self._mode = TrackingMode.SOT
                 self._last_seen = time.monotonic()
                 self._target_lost_at = None
-                self._reid_embeddings.clear()
-                LOGGER.info("[MODE] SOT — following ID %d", detection_id)
+                if not reacquired:
+                    # Fresh target selection — start collecting new embeddings
+                    self._target_embeddings = []
+                self._embedding_frame_counter = 0
+                LOGGER.info("[MODE] SOT — following ID %d (display %d)%s",
+                            detection_id, self._display_id,
+                            " (reacquired)" if reacquired else "")
             else:
                 self._mode = TrackingMode.MOT
+                # Keep _display_id and _target_embeddings for reacquisition
                 self._target_lost_at = time.monotonic()
-                LOGGER.info("[MODE] MOT — waiting for target selection")
+                LOGGER.info("[MODE] MOT — waiting for target selection"
+                            " (%d embeddings saved)", len(self._target_embeddings))
 
     def get_target(self) -> Optional[int]:
         """Get the current target detection ID."""
         with self._lock:
             return self._target_id
+
+    def get_display_id(self) -> Optional[int]:
+        """Get the ID to show in the UI (original ID before any ID switches)."""
+        with self._lock:
+            return self._display_id
 
     def update_last_seen(self, position: Optional[tuple] = None):
         """Update the last seen timestamp and optionally position for the current target.
@@ -122,38 +142,32 @@ class FollowTargetState:
         with self._lock:
             return self._last_known_position
 
-    # ---- ReID embedding store ----
+    # ---- ReID target embeddings ----
 
-    def store_reid_embeddings(self, nearby: list):
-        """Store embeddings of detections near the last known target position.
+    def add_target_embedding(self, embedding):
+        """Save a pre-normalized ReID embedding of the followed target.
 
-        Called when the target is lost.  Each entry is a dict with at least
-        ``track_id`` and ``embedding`` (currently None — placeholder for
-        future feature extraction).  Only the closest ``MAX_REID_EMBEDDINGS``
-        entries are kept.
-
-        Args:
-            nearby: list of dicts ``{"track_id": int, "embedding": Any,
-                    "distance": float}`` sorted by ascending distance to last
-                    known position.
+        Called every frame while in SOT mode; internally saves only every
+        ``EMBEDDING_SAVE_INTERVAL`` calls, keeping a rolling window of
+        ``MAX_TARGET_EMBEDDINGS``.
         """
         with self._lock:
-            self._reid_embeddings.clear()
-            for entry in nearby[: self.MAX_REID_EMBEDDINGS]:
-                self._reid_embeddings.append(entry)
-            if nearby:
-                LOGGER.debug("[REID] Stored %d nearby embeddings for re-identification",
-                             len(self._reid_embeddings))
+            self._embedding_frame_counter += 1
+            if self._embedding_frame_counter > 1 and self._embedding_frame_counter % self.EMBEDDING_SAVE_INTERVAL != 0:
+                return
+            self._target_embeddings.append(embedding)
+            if len(self._target_embeddings) > self.MAX_TARGET_EMBEDDINGS:
+                self._target_embeddings.pop(0)
 
-    def get_reid_embeddings(self) -> list:
-        """Return stored ReID embeddings (list of dicts)."""
+    def get_target_embeddings(self) -> list:
+        """Return saved target embeddings (list of numpy arrays)."""
         with self._lock:
-            return list(self._reid_embeddings)
+            return list(self._target_embeddings)
 
     def has_reacquire_data(self) -> bool:
-        """True if we have saved embeddings and are within the reacquisition timeout."""
+        """True if we have saved target embeddings and are within the reacquisition timeout."""
         with self._lock:
-            if not self._reid_embeddings or self._target_lost_at is None:
+            if not self._target_embeddings or self._target_lost_at is None:
                 return False
             elapsed = time.monotonic() - self._target_lost_at
             return elapsed < self.REACQUIRE_TIMEOUT_S
@@ -161,7 +175,7 @@ class FollowTargetState:
     def clear_reacquire(self):
         """Clear saved embeddings and lost timestamp (reacquisition gave up)."""
         with self._lock:
-            self._reid_embeddings.clear()
+            self._target_embeddings = []
             self._target_lost_at = None
 
     # ---- Status ----
@@ -173,5 +187,5 @@ class FollowTargetState:
                 "following_id": self._target_id,
                 "last_seen": self._last_seen,
                 "tracking_mode": self._mode.value,
-                "reid_embedding_count": len(self._reid_embeddings),
+                "reid_embedding_count": len(self._target_embeddings),
             }
