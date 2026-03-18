@@ -65,6 +65,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--reid", "--no-reid", action=argparse.BooleanOptionalAction,
                        default=True,
                        help="Enable RepVGG body-ReID for improved tracking (default: on)")
+    group.add_argument("--save-gallery-crops", action="store_true",
+                       help="Save cropped JPEG of each newly gallery-added person to gallery/")
 
 
 def _build_parser() -> argparse.ArgumentParser:

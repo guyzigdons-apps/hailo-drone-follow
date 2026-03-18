@@ -67,25 +67,6 @@ def _update_ui(ui_state, persons, person_to_id, following_id):
     ui_state.update_detections(all_dets, following_id)
 
 
-def _attach_tracking_ids_for_overlay(person_by_id):
-    """Attach TRACKING_ID metadata so hailooverlay can render tracker IDs."""
-    for track_id, person in person_by_id.items():
-        try:
-            # Keep only one tracking-id object per detection to avoid stale duplicates.
-            for uid in person.get_objects_typed(hailo.HAILO_UNIQUE_ID):
-                if uid.get_mode() == hailo.hailo_unique_id_mode_t.TRACKING_ID:
-                    person.remove_object(uid)
-            person.add_object(
-                hailo.HailoUniqueID(int(track_id), hailo.hailo_unique_id_mode_t.TRACKING_ID)
-            )
-        except Exception:
-            LOGGER.debug(
-                "[overlay] Failed to attach tracking ID %s to detection",
-                track_id,
-                exc_info=True,
-            )
-
-
 def _run_tracker(byte_tracker, persons, embeddings=None):
     """Run ByteTracker and return (available_ids, person_by_id, person_to_id).
 
@@ -130,8 +111,8 @@ def app_callback(element, buffer, user_data):
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
     """
-    hailo_roi = hailo.get_roi_from_buffer(buffer)
-    detections = hailo_roi.get_objects_typed(hailo.HAILO_DETECTION)
+    roi = hailo.get_roi_from_buffer(buffer)
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     persons = [d for d in detections if d.get_label() == "person"]
 
     target_state = user_data.target_state
@@ -158,10 +139,6 @@ def app_callback(element, buffer, user_data):
 
     available_ids, person_by_id, person_to_id = _run_tracker(
         user_data.byte_tracker, persons, embeddings=embeddings)
-
-    # Inject tracker IDs into Hailo metadata so the local hailooverlay window
-    # can display the same IDs used by the web UI.
-    _attach_tracking_ids_for_overlay(person_by_id)
 
     # --- Save cropped images for newly gallery-added persons ---
     if user_data.save_gallery_crops:
@@ -455,35 +432,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             LOGGER.info("[reid] RepVGG body-ReID pipeline enabled (hef=%s)", reid_hef)
             return reid_cropper
 
-        def _roi_crop_pipeline(self):
-            """Build a videocrop+videoscale snippet if ROI is not the full frame."""
-            x1 = max(0.0, getattr(self.options_menu, 'roi_x1', 0.0))
-            y1 = max(0.0, getattr(self.options_menu, 'roi_y1', 0.0))
-            x2 = min(1.0, getattr(self.options_menu, 'roi_x2', 1.0))
-            y2 = min(1.0, getattr(self.options_menu, 'roi_y2', 1.0))
-            if x1 <= 0.0 and y1 <= 0.0 and x2 >= 1.0 and y2 >= 1.0:
-                return None
-            W, H = self.video_width, self.video_height
-            left = int(x1 * W)
-            top = int(y1 * H)
-            right = W - int(x2 * W)
-            bottom = H - int(y2 * H)
-            LOGGER.info("[roi] videocrop: left=%d top=%d right=%d bottom=%d (frame %dx%d)",
-                        left, top, right, bottom, W, H)
-            return (
-                f"videocrop name=roi_crop left={left} top={top} right={right} bottom={bottom} ! "
-                f"videoscale name=roi_scale ! "
-                f"video/x-raw,width={W},height={H}"
-            )
-
         def get_pipeline_string(self):
             reid_cropper_pipeline = self._build_reid_cropper_pipeline()
-            roi_crop = self._roi_crop_pipeline()
 
             if not self._ui_enabled:
                 # Non-UI path: build the same pipeline as the parent class
                 # but with the ReID cropper inserted after tile detection
-                if reid_cropper_pipeline is None and roi_crop is None:
+                if reid_cropper_pipeline is None:
                     return super().get_pipeline_string()
 
                 source_pipeline = SOURCE_PIPELINE(
@@ -525,14 +480,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
                 )
 
-                pipeline_parts = [source_pipeline]
-                if roi_crop is not None:
-                    pipeline_parts.append(roi_crop)
-                pipeline_parts.append(tile_cropper_pipeline)
-                if reid_cropper_pipeline is not None:
-                    pipeline_parts.append(reid_cropper_pipeline)
-                pipeline_parts.extend([user_callback_pipeline, display_pipeline])
-                return ' ! '.join(pipeline_parts)
+                return (
+                    f'{source_pipeline} ! '
+                    f'{tile_cropper_pipeline} ! '
+                    f'{reid_cropper_pipeline} ! '
+                    f'{user_callback_pipeline} ! '
+                    f'{display_pipeline}'
+                )
 
             # Build pipeline with tee: one branch for display, one for MJPEG appsink
             source_pipeline = SOURCE_PIPELINE(
@@ -594,6 +548,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             )
 
             # Tee splits into display + MJPEG + recording
+            # All branches use leaky queues so a slow branch never stalls the others
             output_pipeline = (
                 f"tee name=ui_tee "
                 f"ui_tee. ! {QUEUE(name='display_branch_q', leaky='downstream')} ! {display_branch} "
@@ -601,15 +556,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 f"ui_tee. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
             )
 
-            if roi_crop is not None:
-                # ROI active: crop before tee so all branches show only the ROI
-                pipeline_parts = [source_pipeline, roi_crop, tile_cropper_pipeline]
-                if reid_cropper_pipeline is not None:
-                    pipeline_parts.append(reid_cropper_pipeline)
-                pipeline_parts.extend([user_callback_pipeline, output_pipeline])
-                return ' ! '.join(pipeline_parts)
-
-            # No ROI: standard pipeline
             pipeline_parts = [source_pipeline, tile_cropper_pipeline]
             if reid_cropper_pipeline is not None:
                 pipeline_parts.append(reid_cropper_pipeline)
@@ -630,9 +576,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
         record_dir=record_dir,
     )
-<<<<<<< HEAD
     user_data.save_gallery_crops = getattr(app.options_menu, 'save_gallery_crops', False)
 
-=======
->>>>>>> parent of 0001284 (Fix params)
     return app

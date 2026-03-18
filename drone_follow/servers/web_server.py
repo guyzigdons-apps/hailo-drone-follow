@@ -43,7 +43,6 @@ class SharedUIState:
         self._lock = threading.Lock()
         self._detections: list = []
         self._following_id: Optional[int] = None
-        self._roi: Optional[dict] = None
         self._frame_jpeg: Optional[bytes] = None
         self._frame_snapshot: Optional[dict] = None
         self._velocity = {
@@ -56,11 +55,6 @@ class SharedUIState:
         self._frame_event = threading.Event()
         self._logs: deque = deque(maxlen=200)
         self._log_counter: int = 0
-
-    def set_roi(self, roi_rect):
-        """Set the detection ROI as {x, y, w, h} normalized dict, or None."""
-        with self._lock:
-            self._roi = roi_rect
 
     def update_detections(self, detections: list, following_id: Optional[int] = None):
         """Called from app_callback with detection metadata."""
@@ -80,7 +74,6 @@ class SharedUIState:
                 "detections": list(self._detections),
                 "following_id": self._following_id,
                 "velocity": dict(self._velocity),
-                "roi": self._roi,
             }
         self._frame_event.set()
         self._frame_event.clear()
@@ -92,7 +85,6 @@ class SharedUIState:
                 "detections": list(self._detections),
                 "following_id": self._following_id,
                 "velocity": dict(self._velocity),
-                "roi": self._roi,
             }
 
     def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str, right_m_s: float = 0.0):
