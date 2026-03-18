@@ -65,16 +65,6 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--reid", "--no-reid", action=argparse.BooleanOptionalAction,
                        default=True,
                        help="Enable RepVGG body-ReID for improved tracking (default: on)")
-    group.add_argument("--save-gallery-crops", action="store_true",
-                       help="Save cropped JPEG of each newly gallery-added person to gallery/")
-    group.add_argument("--roi-x1", type=float, default=0.0,
-                       help="ROI start X in normalized coords 0-1 (default: 0.0)")
-    group.add_argument("--roi-y1", type=float, default=0.0,
-                       help="ROI start Y in normalized coords 0-1 (default: 0.0)")
-    group.add_argument("--roi-x2", type=float, default=1.0,
-                       help="ROI end X in normalized coords 0-1 (default: 1.0)")
-    group.add_argument("--roi-y2", type=float, default=1.0,
-                       help="ROI end Y in normalized coords 0-1 (default: 1.0)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
