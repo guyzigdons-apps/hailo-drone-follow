@@ -21,8 +21,6 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
-- `--horizontal-mirror` / `--vertical-mirror` — Both default to on (= 180° rotation for upside-down camera mount). The library uses a single `videoflip rotate-180` when both are set.
-
 ## Drone Connection
 
 ### USB Serial (real hardware)
@@ -135,3 +133,23 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 Pass `--world NAME` to `start_sim.sh` to load a custom world (uses PX4's native `PX4_GZ_WORLD` env var).
 
 **USB camera with sim:** If using `--input usb` instead of the Gazebo camera, always add `--yaw-only` — forward/altitude commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
+
+## Networking (Dual-Interface: Home WiFi + Field AP)
+
+The Pi has two WiFi interfaces:
+- **wlan0 (built-in RPi WiFi)** — Connects to home/dev WiFi networks
+- **wlan1 (TP-Link USB adapter)** — Dedicated AP mode for field ops (5GHz, channel 36, better antenna/range)
+
+A udev rule (`system/71-usb-wifi.rules`) pins the TP-Link adapter to `wlan1` by MAC address. Both interfaces can operate simultaneously — e.g., SSH via home WiFi (wlan0) while phone connects to drone AP (wlan1).
+
+A boot-time systemd service (`drone-network-mode.service`) runs `system/drone-network-mode.sh`:
+
+1. Waits 30s for NM to connect to any saved WiFi on wlan0
+2. **Home mode** (WiFi found on wlan0): exits, drone app does not start
+3. **Field mode** (no WiFi on wlan0): activates `HailoDrone-AP` profile on wlan1 (SSID: `HailoDrone`, password: `hailodrone`, IP: `10.0.0.1/24`, 5GHz ch36), then starts `drone-follow.service` (user service)
+
+**Files:** `system/drone-network-mode.sh`, `system/drone-network-mode.service`, `system/install.sh`, `system/71-usb-wifi.rules`
+
+**Setup:** `system/install.sh` creates the NM AP profile on wlan1, installs the udev rule, symlinks to system paths, and enables the boot service.
+
+**Known networks:** Any WiFi saved in NetworkManager. Add new ones with `nmcli device wifi connect <SSID> password <pass>`.
