@@ -9,6 +9,17 @@ class FollowMode(str, Enum):
     ORBIT = "orbit"
 
 
+class TrackingMode(str, Enum):
+    """High-level tracking mode for the drone-follow pipeline.
+
+    MOT: Multi-object tracking — all people tracked and displayed,
+         drone waits for user to pick a target.
+    SOT: Single-object tracking — following a specific person.
+    """
+    MOT = "mot"
+    SOT = "sot"
+
+
 @dataclass
 class VelocityCommand:
     """Velocity command in the drone body frame.

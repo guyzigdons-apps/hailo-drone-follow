@@ -63,9 +63,10 @@ class FollowServerHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "status": "success",
                 "following_id": None,
-                "message": "Cleared target, now following largest person",
+                "tracking_mode": "mot",
+                "message": "Cleared target, switched to MOT mode",
             })
-            LOGGER.info("Cleared target, now following largest person")
+            LOGGER.info("Cleared target, switched to MOT mode")
         elif self.path.startswith("/follow/"):
             try:
                 detection_id = int(self.path.split("/follow/")[1])
@@ -85,8 +86,12 @@ class FollowServerHandler(BaseHTTPRequestHandler):
                     return
 
             self.target_state.set_target(detection_id)
-            self._send_json({"status": "success", "following_id": detection_id})
-            LOGGER.info("Now following detection ID: %d", detection_id)
+            self._send_json({
+                "status": "success",
+                "following_id": detection_id,
+                "tracking_mode": "sot",
+            })
+            LOGGER.info("Now following detection ID: %d (SOT mode)", detection_id)
         else:
             self.send_error(404, "Not Found")
 
