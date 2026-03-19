@@ -133,6 +133,10 @@ def _get_velocity(velocity_state, detection, config):
 def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
     """Attach overlay_arrow and overlay_text metadata to ROI for HUD visualization.
 
+    RC stick layout (bottom of frame):
+      Left stick:  yaw (horizontal) + altitude (vertical)
+      Right stick: lateral/roll (horizontal) + forward/backward (vertical)
+
     Works in three modes:
       - With drone connected: reads actual commands from velocity_state
       - Without drone: computes expected commands locally from detection + config
@@ -140,45 +144,55 @@ def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
     """
     fwd, right, down, yaw, mode = _get_velocity(velocity_state, detection, config)
 
-    # HUD center position (bottom-center of frame)
-    cx, cy = 0.5, 0.85
+    # Stick positions (bottom of frame, spaced apart like RC sticks)
+    left_cx, left_cy = 0.35, 0.85    # left stick
+    right_cx, right_cy = 0.65, 0.85  # right stick
 
-    # Scaling: map velocity to arrow length (fraction of frame height)
-    MAX_ARROW_LEN = 0.20
-    MAX_YAW = 60.0       # deg/s for full-length arrow
+    # Scaling
+    MAX_ARROW_LEN = 0.15
+    MAX_YAW = 60.0       # deg/s
     MAX_FWD = 3.0         # m/s
     MAX_DOWN = 2.0        # m/s
+    MAX_LAT = 2.0         # m/s
 
-    # Yaw arrow (horizontal): angle 0 = right, 180 = left
+    def _arrow(cx, cy, angle, length, r, g, b, thickness=3):
+        label = f"x:{cx},y:{cy},angle:{angle},len:{length:.4f},r:{r},g:{g},b:{b},t:{thickness}"
+        roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+
+    # --- Left stick: yaw (horizontal) + altitude (vertical) ---
+    # Yaw: 0 = right, 180 = left — cyan
     if abs(yaw) > 1.0:
         yaw_len = min(abs(yaw) / MAX_YAW, 1.0) * MAX_ARROW_LEN
-        yaw_angle = 0.0 if yaw > 0 else 180.0
-        label = f"x:{cx},y:{cy},angle:{yaw_angle},len:{yaw_len:.4f},r:0,g:220,b:255,t:4"
-        roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+        _arrow(left_cx, left_cy, 0.0 if yaw > 0 else 180.0, yaw_len, 0, 220, 255, 4)
 
-    # Forward/backward arrow (vertical): 90 = up (forward), 270 = down (backward)
+    # Altitude: 90 = up (climb), 270 = down (descend) — yellow
+    if abs(down) > 0.05:
+        alt_len = min(abs(down) / MAX_DOWN, 1.0) * MAX_ARROW_LEN
+        _arrow(left_cx, left_cy, 90.0 if down < 0 else 270.0, alt_len, 255, 220, 0, 3)
+
+    # Left stick crosshair
+    _arrow(left_cx, left_cy, 0, 0.002, 255, 255, 255, 4)
+
+    # --- Right stick: forward/backward (vertical) + lateral (horizontal) ---
+    # Forward: 90 = up, 270 = down — green/orange
     if abs(fwd) > 0.05:
         fwd_len = min(abs(fwd) / MAX_FWD, 1.0) * MAX_ARROW_LEN
-        fwd_angle = 90.0 if fwd > 0 else 270.0
-        color = "r:0,g:255,b:100" if fwd > 0 else "r:255,g:80,b:0"
-        label = f"x:{cx},y:{cy},angle:{fwd_angle},len:{fwd_len:.4f},{color},t:4"
-        roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+        if fwd > 0:
+            _arrow(right_cx, right_cy, 90.0, fwd_len, 0, 255, 100, 4)
+        else:
+            _arrow(right_cx, right_cy, 270.0, fwd_len, 255, 80, 0, 4)
 
-    # Altitude arrow (vertical, offset to the right)
-    if abs(down) > 0.05:
-        alt_cx = cx + 0.06
-        alt_len = min(abs(down) / MAX_DOWN, 1.0) * MAX_ARROW_LEN * 0.7
-        alt_angle = 90.0 if down < 0 else 270.0
-        label = f"x:{alt_cx},y:{cy},angle:{alt_angle},len:{alt_len:.4f},r:255,g:220,b:0,t:3"
-        roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+    # Lateral: 0 = right, 180 = left — magenta
+    if abs(right) > 0.05:
+        lat_len = min(abs(right) / MAX_LAT, 1.0) * MAX_ARROW_LEN
+        _arrow(right_cx, right_cy, 0.0 if right > 0 else 180.0, lat_len, 255, 0, 255, 4)
 
-    # Crosshair dot at HUD center
-    label = f"x:{cx},y:{cy},angle:0,len:0.002,r:255,g:255,b:255,t:4"
-    roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
+    # Right stick crosshair
+    _arrow(right_cx, right_cy, 0, 0.002, 255, 255, 255, 4)
 
-    # Mode text
+    # Mode text (centered between sticks)
     if mode:
-        if mode == "TRACK" or mode == "ORBIT":
+        if mode == "TRACK" or mode == "ORBIT" or mode == "GESTURE":
             color = "r:0,g:255,b:100"
         elif mode.startswith("SEARCH"):
             color = "r:255,g:220,b:0"
@@ -186,7 +200,7 @@ def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
             color = "r:128,g:128,b:128"
         else:
             color = "r:200,g:200,b:200"
-        label = f"x:{cx - 0.03},y:{cy + 0.05},text:{mode},{color},scale:0.6,bg:1"
+        label = f"x:0.47,y:{left_cy + 0.05},text:{mode},{color},scale:0.6,bg:1"
         roi.add_object(hailo.HailoClassification("overlay_text", 0, label, 0.0))
 
 

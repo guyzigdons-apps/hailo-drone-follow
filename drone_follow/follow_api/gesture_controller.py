@@ -93,15 +93,15 @@ def compute_gesture_lateral(
     gesture: Optional[GestureDetection],
     config: ControllerConfig,
 ) -> float:
-    """Compute lateral velocity from hand-face X offset for gesture overlay on follow mode.
+    """Compute lateral velocity from hand distance from frame center.
 
     Returns right_m_s: positive = strafe right, negative = strafe left.
-    Zero when no gesture, no hand, fist, or hand centered on face.
+    Zero when no gesture, no hand, fist, or hand centered.
     """
     if gesture is None or gesture.hand is None or not gesture.hand.is_open:
         return 0.0
 
-    hand_offset_x = gesture.hand.center_x - gesture.face.center_x
+    hand_offset_x = gesture.hand.center_x - 0.5
     offset_deg = hand_offset_x * config.hfov
 
     if abs(offset_deg) < config.gesture_hand_dead_zone_deg:

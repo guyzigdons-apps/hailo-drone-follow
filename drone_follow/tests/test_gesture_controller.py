@@ -216,36 +216,36 @@ class TestGestureLateral:
         g = _gesture(hand=_hand(cx=0.7, is_open=False))
         assert compute_gesture_lateral(g, _config()) == 0.0
 
-    def test_hand_right_of_face_positive_lateral(self):
-        """Hand right of face -> positive lateral (strafe right)."""
-        g = _gesture(face=_face(cx=0.5), hand=_hand(cx=0.7, is_open=True))
+    def test_hand_right_of_center_positive_lateral(self):
+        """Hand right of frame center -> positive lateral (strafe right)."""
+        g = _gesture(hand=_hand(cx=0.7, is_open=True))
         lateral = compute_gesture_lateral(g, _config())
         assert lateral > 0.0
 
-    def test_hand_left_of_face_negative_lateral(self):
-        """Hand left of face -> negative lateral (strafe left)."""
-        g = _gesture(face=_face(cx=0.5), hand=_hand(cx=0.3, is_open=True))
+    def test_hand_left_of_center_negative_lateral(self):
+        """Hand left of frame center -> negative lateral (strafe left)."""
+        g = _gesture(hand=_hand(cx=0.3, is_open=True))
         lateral = compute_gesture_lateral(g, _config())
         assert lateral < 0.0
 
     def test_hand_centered_dead_zone(self):
-        """Hand near face center (within dead zone) -> zero lateral."""
-        g = _gesture(face=_face(cx=0.5), hand=_hand(cx=0.51, is_open=True))
+        """Hand near frame center (within dead zone) -> zero lateral."""
+        g = _gesture(hand=_hand(cx=0.51, is_open=True))
         cfg = _config(gesture_hand_dead_zone_deg=5.0)
         lateral = compute_gesture_lateral(g, cfg)
         assert lateral == 0.0
 
     def test_clamped_to_max(self):
         """Lateral is clamped to gesture_max_lateral."""
-        g = _gesture(face=_face(cx=0.1), hand=_hand(cx=0.9, is_open=True))
+        g = _gesture(hand=_hand(cx=0.9, is_open=True))
         cfg = _config(gesture_max_lateral=1.5)
         lateral = compute_gesture_lateral(g, cfg)
         assert abs(lateral) <= cfg.gesture_max_lateral + 0.01
 
     def test_proportional_to_offset(self):
-        """Larger offset -> larger lateral magnitude."""
-        g_small = _gesture(face=_face(cx=0.5), hand=_hand(cx=0.55, is_open=True))
-        g_large = _gesture(face=_face(cx=0.5), hand=_hand(cx=0.65, is_open=True))
+        """Larger offset from center -> larger lateral magnitude."""
+        g_small = _gesture(hand=_hand(cx=0.55, is_open=True))
+        g_large = _gesture(hand=_hand(cx=0.65, is_open=True))
         cfg = _config(gesture_max_lateral=10.0)  # high clamp so we see proportionality
         lat_small = compute_gesture_lateral(g_small, cfg)
         lat_large = compute_gesture_lateral(g_large, cfg)
