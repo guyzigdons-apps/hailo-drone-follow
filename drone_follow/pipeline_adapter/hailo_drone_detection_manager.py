@@ -144,7 +144,7 @@ def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
     cx, cy = 0.5, 0.85
 
     # Scaling: map velocity to arrow length (fraction of frame height)
-    MAX_ARROW_LEN = 0.12
+    MAX_ARROW_LEN = 0.20
     MAX_YAW = 60.0       # deg/s for full-length arrow
     MAX_FWD = 3.0         # m/s
     MAX_DOWN = 2.0        # m/s
@@ -153,7 +153,7 @@ def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
     if abs(yaw) > 1.0:
         yaw_len = min(abs(yaw) / MAX_YAW, 1.0) * MAX_ARROW_LEN
         yaw_angle = 0.0 if yaw > 0 else 180.0
-        label = f"x:{cx},y:{cy},angle:{yaw_angle},len:{yaw_len:.4f},r:0,g:220,b:255,t:3"
+        label = f"x:{cx},y:{cy},angle:{yaw_angle},len:{yaw_len:.4f},r:0,g:220,b:255,t:4"
         roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
 
     # Forward/backward arrow (vertical): 90 = up (forward), 270 = down (backward)
@@ -161,7 +161,7 @@ def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
         fwd_len = min(abs(fwd) / MAX_FWD, 1.0) * MAX_ARROW_LEN
         fwd_angle = 90.0 if fwd > 0 else 270.0
         color = "r:0,g:255,b:100" if fwd > 0 else "r:255,g:80,b:0"
-        label = f"x:{cx},y:{cy},angle:{fwd_angle},len:{fwd_len:.4f},{color},t:3"
+        label = f"x:{cx},y:{cy},angle:{fwd_angle},len:{fwd_len:.4f},{color},t:4"
         roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
 
     # Altitude arrow (vertical, offset to the right)
@@ -169,7 +169,7 @@ def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
         alt_cx = cx + 0.06
         alt_len = min(abs(down) / MAX_DOWN, 1.0) * MAX_ARROW_LEN * 0.7
         alt_angle = 90.0 if down < 0 else 270.0
-        label = f"x:{alt_cx},y:{cy},angle:{alt_angle},len:{alt_len:.4f},r:255,g:220,b:0,t:2"
+        label = f"x:{alt_cx},y:{cy},angle:{alt_angle},len:{alt_len:.4f},r:255,g:220,b:0,t:3"
         roi.add_object(hailo.HailoClassification("overlay_arrow", 0, label, 0.0))
 
     # Crosshair dot at HUD center

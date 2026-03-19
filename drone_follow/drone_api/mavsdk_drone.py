@@ -361,7 +361,7 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
 
 async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None,
                             ui_state=None, telemetry_cache: Optional[dict] = None,
-                            velocity_state=None):
+                            velocity_state=None, gesture_lateral_state=None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
@@ -439,6 +439,12 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                     down_speed = max(-_ALT_HOLD_MAX_SPEED, min(_ALT_HOLD_MAX_SPEED, -_ALT_HOLD_KP * alt_error))
                     cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
 
+            # Gesture lateral overlay: inject lateral velocity from gesture controller
+            if gesture_lateral_state is not None:
+                lateral = gesture_lateral_state.get()
+                if lateral != 0.0:
+                    cmd = VelocityCommand(cmd.forward_m_s, lateral, cmd.down_m_s, cmd.yawspeed_deg_s)
+
             # Forward-velocity log (throttled)
             if now - _last_fwd_log_time >= _FWD_LOG_INTERVAL and detection is not None:
                 target_bh = config.target_bbox_height
@@ -449,10 +455,13 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
             cmd = await vel_api.send(cmd)
             if drone is None:
                 tag = "TRACK" if detection is not None else "SEARCH"
+                lat_str = f"  Lat:{cmd.right_m_s:+5.2f}m/s" if cmd.right_m_s != 0.0 else ""
                 _log(f"[{tag}] Yaw:{cmd.yawspeed_deg_s:+6.1f}\u00b0/s  "
                      f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
-                     f"Down:{cmd.down_m_s:+5.2f}m/s", level=logging.INFO)
-            if detection is not None and config.follow_mode == "orbit":
+                     f"Down:{cmd.down_m_s:+5.2f}m/s{lat_str}", level=logging.INFO)
+            if detection is not None and config.follow_mode == "gesture" and gesture_lateral_state is not None and gesture_lateral_state.get() != 0.0:
+                mode = "GESTURE"
+            elif detection is not None and config.follow_mode == "orbit":
                 mode = "ORBIT"
             elif detection is not None:
                 mode = "TRACK"

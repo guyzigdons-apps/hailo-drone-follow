@@ -147,6 +147,26 @@ class PalmLockState:
             return self._hand_landmarks_enabled
 
 
+class SharedGestureLateralState:
+    """Thread-safe lateral velocity from gesture overlay.
+
+    Producer: gesture_control_loop (computes lateral from hand-face offset).
+    Consumer: live_control_loop (injects into follow command's right_m_s).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._lateral: float = 0.0
+
+    def update(self, lateral: float):
+        with self._lock:
+            self._lateral = lateral
+
+    def get(self) -> float:
+        with self._lock:
+            return self._lateral
+
+
 class SharedVelocityState:
     """Thread-safe state for passing velocity commands from control loop to pipeline callback."""
 

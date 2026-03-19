@@ -63,6 +63,8 @@ class ControllerConfig:
     gesture_kp_forward: float = 3.0
     gesture_max_forward: float = 1.5
     gesture_arm_dead_zone: float = 0.08
+    gesture_max_lateral: float = 1.5   # max lateral speed from gesture overlay (m/s)
+    gesture_kp_lateral: float = 4.0    # proportional gain for gesture lateral control
 
     target_altitude: float = 3.0
     log_verbosity: str = "normal"  # quiet | normal | debug

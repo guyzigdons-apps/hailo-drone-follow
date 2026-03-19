@@ -19,7 +19,7 @@ exclude = ["configs", "configs.*"]
 
 [project.optional-dependencies]
 hailo = [
-    "hailo-apps @ git+https://github.com/hailocs/hailo-apps-internal.git@feature/combined-fixes-and-features",
+    "hailo-apps @ git+https://github.com/hailocs/hailo-apps-internal.git@test/app-builder-20-apps",
 ]
 
 [project.scripts]

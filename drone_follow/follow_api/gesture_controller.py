@@ -89,6 +89,31 @@ class WaveDetector:
         return self._detected
 
 
+def compute_gesture_lateral(
+    gesture: Optional[GestureDetection],
+    config: ControllerConfig,
+) -> float:
+    """Compute lateral velocity from hand-face X offset for gesture overlay on follow mode.
+
+    Returns right_m_s: positive = strafe right, negative = strafe left.
+    Zero when no gesture, no hand, fist, or hand centered on face.
+    """
+    if gesture is None or gesture.hand is None or not gesture.hand.is_open:
+        return 0.0
+
+    hand_offset_x = gesture.hand.center_x - gesture.face.center_x
+    offset_deg = hand_offset_x * config.hfov
+
+    if abs(offset_deg) < config.gesture_hand_dead_zone_deg:
+        return 0.0
+
+    lateral = math.copysign(
+        config.gesture_kp_lateral * math.sqrt(abs(offset_deg)),
+        hand_offset_x,
+    )
+    return max(-config.gesture_max_lateral, min(config.gesture_max_lateral, lateral))
+
+
 def compute_gesture_velocity_command(
     gesture: Optional[GestureDetection],
     config: ControllerConfig,

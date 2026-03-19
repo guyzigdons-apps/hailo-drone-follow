@@ -64,6 +64,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Record raw video + detections for the entire session (requires --ui)")
     group.add_argument("--gesture", action="store_true",
                        help="Enable gesture control mode (extended pipeline with hand/gesture detection)")
+    group.add_argument("--dry-run", action="store_true",
+                       help="Run control loop without drone connection (for testing gestures/pipeline)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -105,6 +107,7 @@ def main():
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--record", action="store_true")
     ui_pre.add_argument("--gesture", action="store_true")
+    ui_pre.add_argument("--dry-run", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
     ui_state = None
@@ -128,8 +131,10 @@ def main():
     gesture_state = None
     palm_state = None
     palm_lock = None
+    gesture_lateral_state = None
     if ui_pre_args.gesture:
-        from drone_follow.follow_api.state import SharedGestureState, SharedPalmState, PalmLockState
+        from drone_follow.follow_api.state import SharedGestureState, SharedPalmState, PalmLockState, SharedGestureLateralState
+        gesture_lateral_state = SharedGestureLateralState()
         from drone_follow.pipeline_adapter import create_gesture_app
         gesture_state = SharedGestureState()
         palm_state = SharedPalmState()
@@ -152,6 +157,8 @@ def main():
 
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
+    if ui_pre_args.gesture:
+        controller_config.follow_mode = "gesture"
 
     # Give the pipeline callback access to controller config for local velocity computation
     # (needed for HUD arrows when drone control loop isn't connected yet)
@@ -194,6 +201,8 @@ def main():
         _quit_pipeline()
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
+    dry_run = getattr(args, 'dry_run', False) or ui_pre_args.dry_run
+
     def run_drone():
         """Run drone control in a background thread with its own asyncio loop."""
         loop = asyncio.new_event_loop()
@@ -206,7 +215,9 @@ def main():
                         args, shared_state, gesture_state, shutdown,
                         config=controller_config, ui_state=ui_state,
                         pipeline_app=app, velocity_state=velocity_state,
-                        palm_state=palm_state, palm_lock=palm_lock))
+                        palm_state=palm_state, palm_lock=palm_lock,
+                        dry_run=dry_run,
+                        gesture_lateral_state=gesture_lateral_state))
             else:
                 loop.run_until_complete(
                     run_live_drone(args, shared_state, shutdown,

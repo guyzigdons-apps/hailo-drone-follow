@@ -17,6 +17,7 @@ from drone_follow.follow_api.types import VelocityCommand
 from drone_follow.follow_api.config import ControllerConfig
 from drone_follow.follow_api.gesture_controller import (
     compute_gesture_velocity_command,
+    compute_gesture_lateral,
     WaveDetector,
     _face_centering_yaw,
 )
@@ -49,18 +50,19 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                                 altitude_cache=None, ui_state=None,
                                 mode_changed=None, velocity_state=None,
                                 palm_state=None, palm_lock=None,
-                                pipeline_app=None):
-    """Control loop for gesture mode.
+                                pipeline_app=None,
+                                gesture_lateral_state=None):
+    """Gesture lateral overlay loop — produces lateral velocity, not full commands.
 
     Handles palm tracking, wave detection for lock-on, hand landmark toggling,
-    acknowledgment yaw oscillation, and continuous gesture-based velocity commands.
+    and acknowledgment yaw oscillation. After lock-on, computes lateral velocity
+    from hand-face X offset and writes it to gesture_lateral_state. The follow
+    loop (live_control_loop) reads this lateral value and injects it into the
+    follow command's right_m_s axis.
 
-    Palm tracking:
-    - Palm detections are tracked across frames (by the callback's PalmTracker).
-    - Wave detection runs on palm positions (no hand landmarks needed).
-    - When a wave is detected on a specific palm, that palm is "locked".
-    - Hand landmark inference is enabled only after lock-on (saves NPU compute).
-    - If the locked palm is lost, hand landmarks are disabled again.
+    This loop does NOT send velocity commands to the drone — follow mode handles
+    all drone commands. The only exception is the acknowledgment yaw oscillation
+    which is written as a lateral impulse (brief zero lateral during ack).
 
     If mode_changed is provided, the loop exits when it is set.
     """
@@ -68,7 +70,6 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
 
     # Per-palm wave detectors: {palm_track_id: WaveDetector}
     wave_detectors: dict = {}
-    _WAVE_DETECTOR_MAX_AGE_S = 3.0  # remove stale wave detectors
 
     def _get_wave_detector(palm_id):
         if palm_id not in wave_detectors:
@@ -84,6 +85,10 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
         LOGGER.log(level, msg)
         if ui_state is not None:
             ui_state.push_log(msg)
+
+    def _set_lateral(value: float):
+        if gesture_lateral_state is not None:
+            gesture_lateral_state.update(value)
 
     period = 1.0 / max(0.1, config.control_loop_hz)
     last_gesture_time = time.monotonic()
@@ -102,6 +107,7 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
         locked_palm_id = None
         palm_lost_time = None
         ack_start_time = None
+        _set_lateral(0.0)
         if palm_lock is not None:
             palm_lock.unlock()
         if pipeline_app is not None:
@@ -114,6 +120,7 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
         while not shutdown.is_set():
             if mode_changed is not None and mode_changed.is_set():
                 LOGGER.info("[gesture] Mode changed, exiting gesture control loop")
+                _set_lateral(0.0)
                 return
             now = time.monotonic()
 
@@ -133,14 +140,6 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                     last_gesture = gesture
 
             time_since_gesture = now - last_gesture_time
-
-            # Search timeout — hold position
-            if time_since_gesture > config.search_timeout_s and locked_on:
-                _log(f"[gesture] Search timeout ({config.search_timeout_s}s). Holding position.",
-                     level=logging.WARNING)
-                await vel_api.send_zero()
-                await asyncio.sleep(period)
-                continue
 
             # === WAVE DETECTION PHASE (before lock-on) ===
             if not locked_on:
@@ -171,17 +170,9 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                     _log(f"[gesture] Wave detected on palm {wave_palm_id}! "
                          f"Enabling hand landmarks...", level=logging.INFO)
 
-                # Before lock-on, just do face centering
-                if gesture is not None and not locked_on:
-                    yaw = _face_centering_yaw(gesture.face.center_x, config)
-                    cmd = VelocityCommand(0.0, 0.0, 0.0, yaw)
-                    cmd = await vel_api.send(cmd)
-                elif not locked_on:
-                    await vel_api.send_zero()
-
                 if not locked_on:
-                    if ui_state is not None:
-                        ui_state.update_velocity(0.0, 0.0, 0.0, "WAVE-WAIT")
+                    # No lateral before lock-on; follow loop handles everything
+                    _set_lateral(0.0)
                     if velocity_state is not None:
                         velocity_state.update(0.0, 0.0, 0.0, 0.0, "WAVE-WAIT")
                     await asyncio.sleep(period)
@@ -199,56 +190,35 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
             # Unlock if locked palm lost for too long
             if palm_lost_time is not None and (now - palm_lost_time) > _PALM_LOST_TIMEOUT_S:
                 _unlock_palm()
-                await vel_api.send_zero()
-                if velocity_state is not None:
-                    velocity_state.update(0.0, 0.0, 0.0, 0.0, "WAVE-WAIT")
                 await asyncio.sleep(period)
                 continue
 
-            # Acknowledgment phase: yaw oscillation
+            # Acknowledgment phase: zero lateral during ack
             if ack_start_time is not None:
                 elapsed = now - ack_start_time
                 if elapsed < config.gesture_ack_duration_s:
-                    osc_yaw = config.gesture_ack_amplitude_deg * math.sin(
-                        2.0 * math.pi * 4.0 * elapsed)
-                    cmd = VelocityCommand(0.0, 0.0, 0.0, osc_yaw)
-                    cmd = await vel_api.send(cmd)
-                    if ui_state is not None:
-                        ui_state.update_velocity(0.0, 0.0, osc_yaw, "ACK")
+                    _set_lateral(0.0)
                     if velocity_state is not None:
-                        velocity_state.update(0.0, 0.0, 0.0, osc_yaw, "ACK")
+                        velocity_state.update(0.0, 0.0, 0.0, 0.0, "ACK")
                     await asyncio.sleep(period)
                     continue
                 else:
                     ack_start_time = None
                     _log("[gesture] Gesture control active!", level=logging.INFO)
 
-            # Main gesture control (after lock-on + ack)
-            cmd = compute_gesture_velocity_command(
-                gesture, config,
-                last_gesture=last_gesture,
-                search_active=(time_since_gesture >= config.search_enter_delay_s),
-            )
+            # Main gesture lateral (after lock-on + ack)
+            lateral = compute_gesture_lateral(gesture, config)
+            _set_lateral(lateral)
 
-            cmd = await vel_api.send(cmd)
-
-            # Determine mode string for UI
+            # Determine mode string for logging
             if gesture is None:
-                if time_since_gesture >= config.search_enter_delay_s:
-                    mode = "SEARCH"
-                else:
-                    mode = "SEARCH-WAIT"
+                mode = "GESTURE-WAIT"
             elif gesture.hand is None:
-                mode = "FACE-TRACK"
+                mode = "GESTURE-NOHAND"
             elif not gesture.hand.is_open:
                 mode = "FIST-STOP"
             else:
                 mode = "GESTURE"
-
-            if ui_state is not None:
-                ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
-            if velocity_state is not None:
-                velocity_state.update(cmd.forward_m_s, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
 
             # Periodic logging
             if now - _last_log_time >= _LOG_INTERVAL:
@@ -257,20 +227,17 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                 if gesture is not None:
                     hand_str = ("open" if (gesture.hand and gesture.hand.is_open)
                                 else "fist" if gesture.hand else "none")
-                    _log(f"[{mode}] Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+5.2f} "
+                    _log(f"[{mode}] Lateral:{lateral:+5.2f} "
                          f"hand={hand_str} palm={locked_palm_id} palms={palm_count} "
                          f"face=({gesture.face.center_x:.2f},{gesture.face.center_y:.2f})",
                          level=logging.INFO)
                 else:
-                    _log(f"[{mode}] palm={locked_palm_id} palms={palm_count} "
+                    _log(f"[{mode}] Lateral:{lateral:+5.2f} palm={locked_palm_id} palms={palm_count} "
                          f"No gesture detection", level=logging.INFO)
 
             await asyncio.sleep(period)
     except asyncio.CancelledError:
-        try:
-            await vel_api.send_zero()
-        except Exception:
-            pass
+        _set_lateral(0.0)
         # Clean up lock state on exit
         if palm_lock is not None and palm_lock.is_locked:
             palm_lock.unlock()
@@ -458,28 +425,33 @@ async def run_gesture_drone(args, gesture_state, shutdown, shutdown_read_fd=None
 async def _mode_switching_control_loop(drone, shared_state, gesture_state, config,
                                         shutdown, altitude_cache, ui_state,
                                         pipeline_app, velocity_state=None,
-                                        palm_state=None, palm_lock=None):
-    """Control loop wrapper that switches between follow and gesture based on config.follow_mode.
+                                        palm_state=None, palm_lock=None,
+                                        gesture_lateral_state=None):
+    """Control loop wrapper: always runs follow, optionally adds gesture lateral overlay.
 
-    When the mode changes (via web UI config update), the current inner loop is cancelled,
-    the pipeline valve is toggled, and the new loop starts.
+    Follow mode's live_control_loop always runs and handles all drone commands (yaw,
+    forward, altitude, safety). When gesture mode is active, the gesture_control_loop
+    runs alongside and writes a lateral velocity to gesture_lateral_state, which
+    live_control_loop reads and injects into the command's right_m_s axis.
+
+    When the mode changes (via web UI config update), the gesture overlay task is
+    started or stopped. The follow loop continues uninterrupted.
     """
     vel_api = VelocityCommandAPI(drone, config)
 
     first_iteration = True
+    gesture_task = None
+
     while not shutdown.is_set():
         current_mode = config.follow_mode
 
-        # Toggle pipeline gesture inference (skip on first iteration —
-        # pipeline starts with all hailonets active to avoid preroll deadlock;
-        # disable_gesture is only safe once frames are flowing)
+        # Toggle pipeline gesture inference
         if pipeline_app is not None:
             if current_mode == "gesture":
                 pipeline_app.enable_gesture()
             elif not first_iteration:
                 pipeline_app.disable_gesture()
             else:
-                # Schedule deferred disable after a few frames have flowed
                 async def _deferred_disable():
                     await asyncio.sleep(3.0)
                     if not shutdown.is_set() and pipeline_app is not None:
@@ -488,29 +460,36 @@ async def _mode_switching_control_loop(drone, shared_state, gesture_state, confi
                 asyncio.create_task(_deferred_disable())
         first_iteration = False
 
-        # Start the appropriate control loop as a task
+        # Always start follow loop
+        LOGGER.info("[drone] Starting FOLLOW control loop (mode=%s)", current_mode)
+        follow_task = asyncio.create_task(
+            live_control_loop(
+                drone, shared_state, config, shutdown,
+                altitude_cache=altitude_cache, ui_state=ui_state,
+                velocity_state=velocity_state,
+                gesture_lateral_state=gesture_lateral_state if current_mode == "gesture" else None))
+
+        # Start gesture overlay if in gesture mode
         if current_mode == "gesture":
-            LOGGER.info("[drone] Starting GESTURE control loop")
-            loop_task = asyncio.create_task(
+            LOGGER.info("[drone] Starting GESTURE lateral overlay")
+            gesture_task = asyncio.create_task(
                 gesture_control_loop(
                     drone, gesture_state, config, shutdown,
                     altitude_cache=altitude_cache, ui_state=ui_state,
                     velocity_state=velocity_state,
                     palm_state=palm_state, palm_lock=palm_lock,
-                    pipeline_app=pipeline_app))
+                    pipeline_app=pipeline_app,
+                    gesture_lateral_state=gesture_lateral_state))
         else:
-            LOGGER.info("[drone] Starting FOLLOW control loop (mode=%s)", current_mode)
-            loop_task = asyncio.create_task(
-                live_control_loop(
-                    drone, shared_state, config, shutdown,
-                    altitude_cache=altitude_cache, ui_state=ui_state,
-                    velocity_state=velocity_state))
+            gesture_task = None
+            # Clear lateral when leaving gesture mode
+            if gesture_lateral_state is not None:
+                gesture_lateral_state.update(0.0)
 
-        # Poll for mode change while the control loop runs
+        # Poll for mode change while the loops run
         try:
             while not shutdown.is_set():
-                if loop_task.done():
-                    # Inner loop exited on its own (e.g. search timeout)
+                if follow_task.done():
                     break
                 if config.follow_mode != current_mode:
                     LOGGER.info("[drone] Switching from %s to %s",
@@ -518,11 +497,18 @@ async def _mode_switching_control_loop(drone, shared_state, gesture_state, confi
                     break
                 await asyncio.sleep(0.25)
         except asyncio.CancelledError:
-            await _cancel_task(loop_task)
+            await _cancel_task(follow_task)
+            if gesture_task is not None:
+                await _cancel_task(gesture_task)
             raise
 
-        # Cancel the inner loop and send zero before switching
-        await _cancel_task(loop_task)
+        # Cancel loops and send zero before switching
+        await _cancel_task(follow_task)
+        if gesture_task is not None:
+            await _cancel_task(gesture_task)
+            gesture_task = None
+        if gesture_lateral_state is not None:
+            gesture_lateral_state.update(0.0)
         try:
             await vel_api.send_zero()
         except Exception:
@@ -533,11 +519,16 @@ async def run_unified_drone(args, shared_state, gesture_state, shutdown,
                              shutdown_read_fd=None, config=None, ui_state=None,
                              on_connected_cb=None, pipeline_app=None,
                              velocity_state=None,
-                             palm_state=None, palm_lock=None):
+                             palm_state=None, palm_lock=None,
+                             dry_run=False,
+                             gesture_lateral_state=None):
     """Connect to drone and run the mode-switching control loop.
 
     Replaces both run_live_drone and run_gesture_drone. Supports runtime
     switching between follow and gesture modes via config.follow_mode.
+
+    If dry_run=True, skips drone connection entirely and runs the control
+    loop with drone=None (VelocityCommandAPI already handles this).
     """
     import os
 
@@ -557,6 +548,25 @@ async def run_unified_drone(args, shared_state, gesture_state, shutdown,
                 pass
             shutdown.set()
         loop.add_reader(shutdown_read_fd, _on_shutdown_pipe)
+
+    if dry_run:
+        LOGGER.info("[drone] DRY-RUN mode — no drone connection, commands are no-ops")
+        altitude_cache: dict = {}
+        control_task = asyncio.create_task(
+            _mode_switching_control_loop(
+                None, shared_state, gesture_state, config, shutdown,
+                altitude_cache, ui_state, pipeline_app,
+                velocity_state=velocity_state,
+                palm_state=palm_state, palm_lock=palm_lock,
+                gesture_lateral_state=gesture_lateral_state))
+        try:
+            await shutdown.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await _cancel_task(control_task)
+        LOGGER.info("[drone] DRY-RUN done.")
+        return
 
     manage_takeoff_landing = getattr(args, 'takeoff_landing', False)
 
@@ -630,7 +640,8 @@ async def run_unified_drone(args, shared_state, gesture_state, shutdown,
                         drone, shared_state, gesture_state, config, shutdown,
                         altitude_cache, ui_state, pipeline_app,
                         velocity_state=velocity_state,
-                        palm_state=palm_state, palm_lock=palm_lock))
+                        palm_state=palm_state, palm_lock=palm_lock,
+                        gesture_lateral_state=gesture_lateral_state))
 
                 done, pending = await asyncio.wait(
                     [
@@ -660,7 +671,8 @@ async def run_unified_drone(args, shared_state, gesture_state, shutdown,
                             drone, shared_state, gesture_state, config, shutdown,
                             altitude_cache, ui_state, pipeline_app,
                             velocity_state=velocity_state,
-                            palm_state=palm_state, palm_lock=palm_lock))
+                            palm_state=palm_state, palm_lock=palm_lock,
+                            gesture_lateral_state=gesture_lateral_state))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 
