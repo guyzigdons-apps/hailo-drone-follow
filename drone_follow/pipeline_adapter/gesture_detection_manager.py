@@ -391,10 +391,9 @@ def gesture_app_callback(element, buffer, user_data):
                 )
 
             # --- Hand: only extract for locked palm ---
-            # palm_cropper uses cropping-period=3, so hand landmarks are only
-            # computed every 3rd frame. On skip frames, _find_hand_near_palm
-            # returns None. We cache the last good hand per palm track ID and
-            # reuse it on skip frames (the tracker keeps the palm bbox updated).
+            # To reduce NPU load, hand landmarks run every Nth frame.
+            # The callback toggles hand_landmark_hailonet pass-through and
+            # caches the last good HandDetection for skip frames.
             if locked_id is not None and hand_landmarks_on:
                 locked_palm = None
                 for p in tracked_palms:
@@ -402,6 +401,7 @@ def gesture_app_callback(element, buffer, user_data):
                         locked_palm = p
                         break
                 if locked_palm is not None:
+                    # Determine if this frame had landmarks (active on previous toggle)
                     hand, gesture_label = _find_hand_near_palm(
                         roi, locked_palm.center_x, locked_palm.center_y)
                     if hand is not None:
@@ -409,8 +409,7 @@ def gesture_app_callback(element, buffer, user_data):
                         user_data.cached_hand[locked_id] = hand
                         user_data.cached_gesture[locked_id] = gesture_label
                     else:
-                        # Skip frame (cropping-period) — reuse cached hand
-                        # with is_open state preserved from last landmark frame
+                        # Skip frame — reuse cached hand with updated palm position
                         cached = user_data.cached_hand.get(locked_id)
                         if cached is not None:
                             hand = HandDetection(
@@ -423,11 +422,29 @@ def gesture_app_callback(element, buffer, user_data):
                                 timestamp=now,
                             )
                             gesture_label = user_data.cached_gesture.get(locked_id)
+
+                # Toggle hand_landmark_hailonet for NEXT frame
+                user_data.hand_landmark_frame_count += 1
+                hailonet = user_data._hand_landmark_hailonet
+                if hailonet is not None:
+                    should_run = (user_data.hand_landmark_frame_count % user_data.hand_landmark_period) == 0
+                    if should_run and not user_data._landmarks_active:
+                        hailonet.set_property("pass-through", False)
+                        user_data._landmarks_active = True
+                    elif not should_run and user_data._landmarks_active:
+                        hailonet.set_property("pass-through", True)
+                        user_data._landmarks_active = False
+
             elif locked_id is None and not hand_landmarks_on:
                 # Not locked, hand landmarks off — no hand data (expected)
-                # Clear cache when unlocked
                 user_data.cached_hand.clear()
                 user_data.cached_gesture.clear()
+                user_data.hand_landmark_frame_count = 0
+                if user_data._landmarks_active:
+                    hailonet = user_data._hand_landmark_hailonet
+                    if hailonet is not None:
+                        hailonet.set_property("pass-through", True)
+                    user_data._landmarks_active = False
             else:
                 # Fallback: extract any hand (e.g. during transition)
                 hand, gesture_label = _extract_hand_from_roi(roi)
@@ -520,9 +537,14 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             self.controller_config = controller_config
             self.palm_state = palm_state
             self.palm_lock = palm_lock
-            # Cache last HandDetection per palm track ID for cropping-period skip frames
+            # Cache last HandDetection per palm track ID for landmark skip frames
             self.cached_hand = {}        # {palm_track_id: HandDetection}
             self.cached_gesture = {}     # {palm_track_id: str or None}
+            # Frame counter for hand landmark skip: run every Nth frame
+            self.hand_landmark_frame_count = 0
+            self.hand_landmark_period = 3  # run landmarks every 3rd frame
+            self._landmarks_active = False  # current pass-through state
+            self._hand_landmark_hailonet = None  # set after pipeline creation
 
     class GestureTilingApp(GStreamerTilingApp):
         """Tiling + gesture pipeline with EOS handling and optional MJPEG appsink."""
@@ -810,7 +832,6 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 f"use-letterbox=false "
                 f"no-scaling-bbox=true "
                 f"internal-offset=true "
-                f"cropping-period=3 "
                 f"hailoaggregator name=palm_agg "
                 f"palm_cropper. ! "
                 f"{QUEUE(name='palm_bypass_q', max_size_buffers=20)} ! palm_agg.sink_0 "
@@ -900,4 +921,8 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
         record_dir=record_dir, initial_follow_mode=initial_follow_mode,
     )
+    # Store hailonet element reference for callback-driven pass-through toggling
+    el = app.pipeline.get_by_name("hand_landmark_hailonet")
+    if el is not None:
+        user_data._hand_landmark_hailonet = el
     return app
