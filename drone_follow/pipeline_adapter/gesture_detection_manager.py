@@ -391,8 +391,11 @@ def gesture_app_callback(element, buffer, user_data):
                 )
 
             # --- Hand: only extract for locked palm ---
+            # palm_cropper uses cropping-period=3, so hand landmarks are only
+            # computed every 3rd frame. On skip frames, _find_hand_near_palm
+            # returns None. We cache the last good hand per palm track ID and
+            # reuse it on skip frames (the tracker keeps the palm bbox updated).
             if locked_id is not None and hand_landmarks_on:
-                # Find the tracked palm position for the locked ID
                 locked_palm = None
                 for p in tracked_palms:
                     if p.track_id == locked_id:
@@ -401,10 +404,30 @@ def gesture_app_callback(element, buffer, user_data):
                 if locked_palm is not None:
                     hand, gesture_label = _find_hand_near_palm(
                         roi, locked_palm.center_x, locked_palm.center_y)
-                # If locked palm not found in this frame, hand stays None
+                    if hand is not None:
+                        # Fresh landmarks — cache them
+                        user_data.cached_hand[locked_id] = hand
+                        user_data.cached_gesture[locked_id] = gesture_label
+                    else:
+                        # Skip frame (cropping-period) — reuse cached hand
+                        # with is_open state preserved from last landmark frame
+                        cached = user_data.cached_hand.get(locked_id)
+                        if cached is not None:
+                            hand = HandDetection(
+                                center_x=locked_palm.center_x,
+                                center_y=locked_palm.center_y,
+                                wrist_x=cached.wrist_x,
+                                wrist_y=cached.wrist_y,
+                                is_open=cached.is_open,
+                                confidence=cached.confidence,
+                                timestamp=now,
+                            )
+                            gesture_label = user_data.cached_gesture.get(locked_id)
             elif locked_id is None and not hand_landmarks_on:
                 # Not locked, hand landmarks off — no hand data (expected)
-                pass
+                # Clear cache when unlocked
+                user_data.cached_hand.clear()
+                user_data.cached_gesture.clear()
             else:
                 # Fallback: extract any hand (e.g. during transition)
                 hand, gesture_label = _extract_hand_from_roi(roi)
@@ -497,6 +520,9 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             self.controller_config = controller_config
             self.palm_state = palm_state
             self.palm_lock = palm_lock
+            # Cache last HandDetection per palm track ID for cropping-period skip frames
+            self.cached_hand = {}        # {palm_track_id: HandDetection}
+            self.cached_gesture = {}     # {palm_track_id: str or None}
 
     class GestureTilingApp(GStreamerTilingApp):
         """Tiling + gesture pipeline with EOS handling and optional MJPEG appsink."""
@@ -784,6 +810,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 f"use-letterbox=false "
                 f"no-scaling-bbox=true "
                 f"internal-offset=true "
+                f"cropping-period=3 "
                 f"hailoaggregator name=palm_agg "
                 f"palm_cropper. ! "
                 f"{QUEUE(name='palm_bypass_q', max_size_buffers=20)} ! palm_agg.sink_0 "
