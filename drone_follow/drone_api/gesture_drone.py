@@ -173,8 +173,6 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                 if not locked_on:
                     # No lateral before lock-on; follow loop handles everything
                     _set_lateral(0.0)
-                    if velocity_state is not None:
-                        velocity_state.update(0.0, 0.0, 0.0, 0.0, "WAVE-WAIT")
                     await asyncio.sleep(period)
                     continue
 
@@ -198,8 +196,6 @@ async def gesture_control_loop(drone, gesture_state, config, shutdown,
                 elapsed = now - ack_start_time
                 if elapsed < config.gesture_ack_duration_s:
                     _set_lateral(0.0)
-                    if velocity_state is not None:
-                        velocity_state.update(0.0, 0.0, 0.0, 0.0, "ACK")
                     await asyncio.sleep(period)
                     continue
                 else:
