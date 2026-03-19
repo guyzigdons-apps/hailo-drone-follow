@@ -148,12 +148,13 @@ def _attach_velocity_arrows(roi, velocity_state, detection=None, config=None):
     left_cx, left_cy = 0.35, 0.85    # left stick
     right_cx, right_cy = 0.65, 0.85  # right stick
 
-    # Scaling
+    # Scaling: MAX values = full-length arrow. Set to typical operating range,
+    # not theoretical max, so arrows are clearly visible and proportional.
     MAX_ARROW_LEN = 0.15
-    MAX_YAW = 60.0       # deg/s
-    MAX_FWD = 3.0         # m/s
-    MAX_DOWN = 2.0        # m/s
-    MAX_LAT = 2.0         # m/s
+    MAX_YAW = 25.0       # deg/s — typical tracking range is 5-25°/s
+    MAX_FWD = 2.0         # m/s
+    MAX_DOWN = 1.5        # m/s
+    MAX_LAT = 1.5         # m/s — matches gesture_max_lateral
 
     def _arrow(cx, cy, angle, length, r, g, b, thickness=3):
         label = f"x:{cx},y:{cy},angle:{angle},len:{length:.4f},r:{r},g:{g},b:{b},t:{thickness}"
