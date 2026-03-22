@@ -826,12 +826,13 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             # so hailotracker only tracks palms — not persons, faces, or other detections.
             palm_tracker_pipeline = TRACKER_PIPELINE(
                 class_id=100,
-                kalman_dist_thr=0.9,    # was 0.7 — looser Kalman gating for fast hand motion
-                iou_thr=0.9,            # was 0.8 — more permissive matching (cost < 0.9 → IoU > 0.1)
-                init_iou_thr=0.6,       # keep original — controls new-track association
+                kalman_dist_thr=0.95,   # was 0.9 — very loose Kalman gating for fast hand motion
+                iou_thr=0.95,           # was 0.9 — very permissive matching (cost < 0.95 → IoU > 0.05)
+                init_iou_thr=0.8,       # was 0.6 — easier to start new tracks
                 keep_new_frames=2,      # default — confirm quickly once detected
-                keep_tracked_frames=6,  # was 30 — ~200ms grace before tracked→lost (avoid stale phantom tracks)
-                keep_lost_frames=15,    # was 5  — survive 0.5s in lost state for re-association
+                keep_tracked_frames=15, # was 6  — ~500ms grace before tracked→lost
+                keep_lost_frames=30,    # was 15 — survive 1s in lost state for re-association
+                debug=True,             # Log new/lost tracked objects for tuning
                 name="palm_tracker",
             )
 
