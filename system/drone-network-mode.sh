@@ -37,20 +37,27 @@ fi
 
 log "FIELD MODE — no known WiFi. Starting AP on wlan1 + drone-follow."
 
-# Wait for wlan1 (USB WiFi adapter) to appear — it may not be ready at early boot
+# Wait for wlan1 (USB WiFi adapter) to appear AND become ready for activation.
+# NM transitions: unmanaged -> unavailable -> disconnected.
+# The device is only usable once it reaches "disconnected" (supplicant ready).
 DEVICE_TIMEOUT=30
 DEVICE_INTERVAL=2
 elapsed=0
-while ! nmcli -t -f DEVICE device status 2>/dev/null | grep -q '^wlan1$'; do
+while true; do
+    wlan1_state=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null \
+                  | grep '^wlan1:' | cut -d: -f2 || true)
+    if [ "$wlan1_state" = "disconnected" ] || [ "$wlan1_state" = "connected" ]; then
+        break
+    fi
     if [ $elapsed -ge $DEVICE_TIMEOUT ]; then
-        log "ERROR — wlan1 not found after ${DEVICE_TIMEOUT}s. Cannot start AP."
+        log "ERROR — wlan1 not ready after ${DEVICE_TIMEOUT}s (state: ${wlan1_state:-not found}). Cannot start AP."
         exit 1
     fi
     sleep $DEVICE_INTERVAL
     elapsed=$((elapsed + DEVICE_INTERVAL))
-    log "Waiting for wlan1 (${elapsed}s/${DEVICE_TIMEOUT}s)..."
+    log "Waiting for wlan1 to be ready (${elapsed}s/${DEVICE_TIMEOUT}s, state: ${wlan1_state:-not found})..."
 done
-log "wlan1 ready."
+log "wlan1 ready (state: $wlan1_state)."
 
 nmcli connection up "$AP_CONNECTION"
 log "AP active on wlan1: SSID=HailoDrone IP=10.0.0.1 (5GHz ch36)"
