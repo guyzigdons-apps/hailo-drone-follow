@@ -11,6 +11,7 @@ if ! nmcli connection show "HailoDrone-AP" &>/dev/null; then
         autoconnect no ssid "HailoDrone" mode ap \
         wifi.band a wifi.channel 36 \
         wifi-sec.key-mgmt wpa-psk wifi-sec.psk "hailodrone" \
+        wifi-sec.proto rsn wifi-sec.pairwise ccmp wifi-sec.group ccmp wifi-sec.pmf 1 \
         ipv4.method shared ipv4.addresses 10.0.0.1/24 ipv6.method disabled
 else
     echo "HailoDrone-AP connection profile already exists."
