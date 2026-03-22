@@ -35,9 +35,51 @@ sudo ./uninstall.sh
 ## How It Works (Boot Behavior)
 
 1. On boot, `drone-network-mode.service` runs `drone-network-mode.sh`
-2. Waits up to 30s for wlan0 to connect to a known WiFi network
-3. **Home mode** (WiFi found): exits — drone app does not start
-4. **Field mode** (no WiFi): activates AP on wlan1, then starts `drone-follow.service`
+2. If `/boot/firmware/field-mode` exists → skip to step 4 (force field mode)
+3. Waits up to 30s for wlan0 to connect to a known WiFi network
+4. **Home mode** (WiFi found): exits — drone app does not start
+5. **Field mode** (no WiFi): activates AP on wlan1, then starts `drone-follow.service`
+
+## Force Field Mode
+
+When flying near known WiFi networks, the auto-detection may pick up your home WiFi and skip starting the AP. To force field mode regardless:
+
+```bash
+# Enable — always start AP + drone-follow on boot:
+sudo touch /boot/firmware/field-mode
+
+# Disable — return to auto-detection:
+sudo rm /boot/firmware/field-mode
+```
+
+The flag file is on the boot partition, so it can also be created/removed by plugging the SD card into another computer.
+
+## Stopping the App
+
+To stop the drone-follow app (this session only — it will restart on next boot):
+
+```bash
+systemctl --user stop drone-follow.service
+```
+
+To also bring down the AP:
+
+```bash
+sudo systemctl stop drone-network-mode.service
+sudo nmcli connection down HailoDrone-AP
+```
+
+To **disable permanently** so it doesn't start on next boot:
+
+```bash
+# Option 1 — Remove the field-mode flag (returns to auto-detection):
+sudo rm /boot/firmware/field-mode
+
+# Option 2 — Disable the boot service entirely:
+sudo systemctl disable drone-network-mode.service
+```
+
+Re-enable with `sudo systemctl enable drone-network-mode.service` or re-create the field-mode flag.
 
 ## Manual AP Control
 
