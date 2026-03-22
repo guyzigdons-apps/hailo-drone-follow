@@ -15,6 +15,8 @@ Populates SharedGestureState (for gesture control) and SharedDetectionState (for
 import logging
 import math
 import os
+import subprocess
+import threading
 import time
 from typing import Optional
 
@@ -272,6 +274,7 @@ _gesture_log_interval = 1.0
 _gesture_last_log_time = 0.0
 
 
+
 def _get_gesture_mode(user_data):
     """Read current gesture control mode from velocity_state (set by drone control loop)."""
     velocity_state = getattr(user_data, 'velocity_state', None)
@@ -514,7 +517,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
     from hailo_apps.python.core.common.core import get_pipeline_parser
     from hailo_apps.python.core.common.defines import SHARED_VDEVICE_GROUP_ID
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
-        QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
+        QUEUE, DISPLAY_PIPELINE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
         TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
         TRACKER_PIPELINE,
@@ -561,7 +564,8 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             self._recording = False
             self._record_dir = record_dir or os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
-            self._record_lock = __import__("threading").Lock()
+            self._record_lock = threading.Lock()
+            self._ffmpeg_proc = None
             super().__init__(app_callback, user_data, parser=parser)
             if self._ui_enabled:
                 self._connect_mjpeg_sink()
@@ -571,6 +575,9 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             mjpeg_sink = self.pipeline.get_by_name("mjpeg_sink")
             if mjpeg_sink:
                 mjpeg_sink.connect("new-sample", self._on_mjpeg_sample)
+            record_sink = self.pipeline.get_by_name("record_appsink")
+            if record_sink:
+                record_sink.connect("new-sample", self._on_record_sample)
 
         def _on_mjpeg_sample(self, appsink):
             Gst = self._Gst
@@ -581,6 +588,21 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 if success:
                     self._ui_state.update_frame(bytes(map_info.data))
                     buf.unmap(map_info)
+            return Gst.FlowReturn.OK
+
+        def _on_record_sample(self, appsink):
+            """appsink callback: pipe raw RGB frames to ffmpeg subprocess."""
+            Gst = self._Gst
+            sample = appsink.emit("pull-sample")
+            if sample and self._recording and self._ffmpeg_proc:
+                buf = sample.get_buffer()
+                ok, mapinfo = buf.map(Gst.MapFlags.READ)
+                if ok:
+                    try:
+                        self._ffmpeg_proc.stdin.write(mapinfo.data)
+                    except (BrokenPipeError, OSError):
+                        pass
+                    buf.unmap(mapinfo)
             return Gst.FlowReturn.OK
 
         def on_eos(self):
@@ -605,24 +627,30 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             return os.path.join(self._record_dir, f"rec_{ts}.mkv")
 
         def start_recording(self, path=None):
-            Gst = _get_gst()
+            """Spawn ffmpeg subprocess and open valve. Returns the output file path."""
             with self._record_lock:
                 if self._recording or not self._ui_enabled:
                     return None
+
                 valve = self.pipeline.get_by_name("record_valve")
-                filesink = self.pipeline.get_by_name("record_sink")
-                if valve is None or filesink is None:
+                if valve is None:
+                    LOGGER.error("[record] record_valve not found in pipeline")
                     return None
-                encoder = self.pipeline.get_by_name("record_enc")
-                muxer = self.pipeline.get_by_name("record_mux")
+
                 record_path = path or self._generate_record_path()
-                for el in (filesink, muxer, encoder):
-                    if el is not None:
-                        el.set_state(Gst.State.NULL)
-                filesink.set_property("location", record_path)
-                for el in (encoder, muxer, filesink):
-                    if el is not None:
-                        el.sync_state_with_parent()
+                width, height = self.video_width, self.video_height
+                fps = self.frame_rate
+
+                self._ffmpeg_proc = subprocess.Popen([
+                    "ffmpeg", "-y", "-nostdin",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24",
+                    "-s", f"{width}x{height}", "-r", str(fps),
+                    "-i", "pipe:0",
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-tune", "zerolatency", "-b:v", "5000k",
+                    record_path,
+                ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
                 valve.set_property("drop", False)
                 self._recording = True
                 self._current_record_path = record_path
@@ -630,23 +658,32 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 return record_path
 
         def stop_recording(self):
-            Gst = _get_gst()
+            """Close valve and finalize ffmpeg in background. Non-blocking."""
             with self._record_lock:
                 if not self._recording:
                     return None
+
                 valve = self.pipeline.get_by_name("record_valve")
-                if valve is None:
-                    self._recording = False
-                    return None
-                encoder = self.pipeline.get_by_name("record_enc")
-                muxer = self.pipeline.get_by_name("record_mux")
-                filesink = self.pipeline.get_by_name("record_sink")
+                if valve:
+                    valve.set_property("drop", True)
+
                 self._recording = False
-                path = getattr(self, "_current_record_path", None)
-                valve.set_property("drop", True)
-                for el in (encoder, muxer, filesink):
-                    if el is not None:
-                        el.set_state(Gst.State.NULL)
+                path = self._current_record_path
+                proc = self._ffmpeg_proc
+                self._ffmpeg_proc = None
+
+                def _finalize():
+                    try:
+                        if proc and proc.stdin:
+                            proc.stdin.close()
+                        if proc:
+                            proc.wait(timeout=5)
+                    except Exception:
+                        LOGGER.exception("[record] ffmpeg finalize error")
+                    LOGGER.info("[record] Finalized: %s", path)
+
+                threading.Thread(target=_finalize, daemon=True).start()
+
                 LOGGER.info("[record] Stopped recording: %s", path)
                 return path
 
@@ -730,6 +767,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                 video_height=self.video_height,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
+                mirror_image=False,
             )
 
             # --- 2. Tiling (person + face detection, YOLOv8n) ---
@@ -788,12 +826,12 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
             # so hailotracker only tracks palms — not persons, faces, or other detections.
             palm_tracker_pipeline = TRACKER_PIPELINE(
                 class_id=100,
-                kalman_dist_thr=0.7,
-                iou_thr=0.8,
-                init_iou_thr=0.6,
-                keep_new_frames=2,
-                keep_tracked_frames=30,
-                keep_lost_frames=5,
+                kalman_dist_thr=0.9,    # was 0.7 — looser Kalman gating for fast hand motion
+                iou_thr=0.9,            # was 0.8 — more permissive matching (cost < 0.9 → IoU > 0.1)
+                init_iou_thr=0.6,       # keep original — controls new-track association
+                keep_new_frames=2,      # default — confirm quickly once detected
+                keep_tracked_frames=6,  # was 30 — ~200ms grace before tracked→lost (avoid stale phantom tracks)
+                keep_lost_frames=15,    # was 5  — survive 0.5s in lost state for re-association
                 name="palm_tracker",
             )
 
@@ -867,11 +905,7 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                     f"{display_pipeline}"
                 )
             else:
-                display_branch = DISPLAY_PIPELINE(
-                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
-                    community_overlay=True,
-                    overlay_props={"hud_overlay": True, "use_custom_colors": True},
-                )
+                # MJPEG branch (no overlay — React draws bboxes client-side)
                 mjpeg_branch = (
                     f"videoconvert n-threads=2 ! "
                     f"videorate max-rate={self._ui_fps} ! "
@@ -879,18 +913,25 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
                     f"jpegenc quality=70 ! "
                     f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
                 )
-                record_branch = (
-                    f"valve name=record_valve drop=true ! "
-                    f"{OVERLAY_PIPELINE(name='record_overlay', community=True, hud_overlay=True, use_custom_colors=True)} ! "
+
+                # Shared overlay, then split into display + record
+                overlay_branch = (
+                    f"hailooverlay_community name=hailo_overlay hud-overlay=true use-custom-colors=true ! "
+                    f"tee name=overlay_tee "
+                    f"overlay_tee. ! {QUEUE(name='display_q')} ! "
                     f"videoconvert n-threads=2 ! "
-                    f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
-                    f"matroskamux name=record_mux ! filesink name=record_sink async=false location=/dev/null"
+                    f"fpsdisplaysink name=hailo_display video-sink={self.video_sink} "
+                    f"sync={self.sync} text-overlay={self.show_fps} signal-fps-measurements=true "
+                    f"overlay_tee. ! {QUEUE(name='record_q', max_size_buffers=1)} ! "
+                    f"valve name=record_valve drop=true ! "
+                    f"videoconvert n-threads=2 ! video/x-raw,format=RGB ! "
+                    f"appsink name=record_appsink emit-signals=true drop=true sync=false async=false max-buffers=1"
                 )
+
                 output_pipeline = (
                     f"tee name=ui_tee "
-                    f"ui_tee. ! {QUEUE(name='display_branch_q', leaky='downstream')} ! {display_branch} "
-                    f"ui_tee. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
-                    f"ui_tee. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
+                    f"ui_tee. ! {QUEUE(name='overlay_q', leaky='downstream')} ! {overlay_branch} "
+                    f"ui_tee. ! {QUEUE(name='mjpeg_q', leaky='downstream')} ! {mjpeg_branch}"
                 )
                 pipeline_string = (
                     f"{source_pipeline} ! "
