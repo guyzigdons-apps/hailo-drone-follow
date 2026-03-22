@@ -7,6 +7,7 @@ DRONE_USER="hailo"
 DRONE_SERVICE="drone-follow.service"
 SETTLE_TIMEOUT=30
 CHECK_INTERVAL=5
+FORCE_FIELD_FLAG="/boot/firmware/field-mode"
 
 log() { logger -t "$LOG_TAG" "$*"; echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
@@ -17,19 +18,40 @@ is_wifi_connected() {
     [ -n "$con" ] && [ "$con" != "$AP_CONNECTION" ]
 }
 
-log "Waiting up to ${SETTLE_TIMEOUT}s for known WiFi..."
-elapsed=0
-while [ $elapsed -lt $SETTLE_TIMEOUT ]; do
-    if is_wifi_connected; then
-        log "HOME MODE — connected to known WiFi. Drone app will NOT start."
-        exit 0
-    fi
-    sleep $CHECK_INTERVAL
-    elapsed=$((elapsed + CHECK_INTERVAL))
-    log "No WiFi yet (${elapsed}s/${SETTLE_TIMEOUT}s)"
-done
+# Force field mode: skip WiFi check, always start AP + drone-follow
+if [ -f "$FORCE_FIELD_FLAG" ]; then
+    log "FORCE FIELD MODE — $FORCE_FIELD_FLAG exists. Skipping WiFi check."
+else
+    log "Waiting up to ${SETTLE_TIMEOUT}s for known WiFi..."
+    elapsed=0
+    while [ $elapsed -lt $SETTLE_TIMEOUT ]; do
+        if is_wifi_connected; then
+            log "HOME MODE — connected to known WiFi. Drone app will NOT start."
+            exit 0
+        fi
+        sleep $CHECK_INTERVAL
+        elapsed=$((elapsed + CHECK_INTERVAL))
+        log "No WiFi yet (${elapsed}s/${SETTLE_TIMEOUT}s)"
+    done
+fi
 
 log "FIELD MODE — no known WiFi. Starting AP on wlan1 + drone-follow."
+
+# Wait for wlan1 (USB WiFi adapter) to appear — it may not be ready at early boot
+DEVICE_TIMEOUT=30
+DEVICE_INTERVAL=2
+elapsed=0
+while ! nmcli -t -f DEVICE device status 2>/dev/null | grep -q '^wlan1$'; do
+    if [ $elapsed -ge $DEVICE_TIMEOUT ]; then
+        log "ERROR — wlan1 not found after ${DEVICE_TIMEOUT}s. Cannot start AP."
+        exit 1
+    fi
+    sleep $DEVICE_INTERVAL
+    elapsed=$((elapsed + DEVICE_INTERVAL))
+    log "Waiting for wlan1 (${elapsed}s/${DEVICE_TIMEOUT}s)..."
+done
+log "wlan1 ready."
+
 nmcli connection up "$AP_CONNECTION"
 log "AP active on wlan1: SSID=HailoDrone IP=10.0.0.1 (5GHz ch36)"
 
