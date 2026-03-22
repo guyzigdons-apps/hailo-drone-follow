@@ -148,8 +148,10 @@ A boot-time systemd service (`drone-network-mode.service`) runs `system/drone-ne
 2. **Home mode** (WiFi found on wlan0): exits, drone app does not start
 3. **Field mode** (no WiFi on wlan0): activates `HailoDrone-AP` profile on wlan1 (SSID: `HailoDrone`, password: `hailodrone`, IP: `10.0.0.1/24`, 5GHz ch36), then starts `drone-follow.service` (user service)
 
+**AP Security:** Explicit WPA2 (RSN + CCMP) with PMF disabled. This is required — NetworkManager's default PMF setting causes phones to see the AP as WPA3 with unknown frequency, preventing connection.
+
 **Files:** `system/drone-network-mode.sh`, `system/drone-network-mode.service`, `system/install.sh`, `system/71-usb-wifi.rules`
 
-**Setup:** `system/install.sh` creates the NM AP profile on wlan1, installs the udev rule, symlinks to system paths, and enables the boot service.
+**Setup:** `system/install.sh` creates the NM AP profile on wlan1, installs the udev rule, symlinks to system paths, and enables the boot service. If the AP profile already exists with old settings, delete it first: `sudo nmcli connection delete HailoDrone-AP` then re-run `system/install.sh`.
 
 **Known networks:** Any WiFi saved in NetworkManager. Add new ones with `nmcli device wifi connect <SSID> password <pass>`.
