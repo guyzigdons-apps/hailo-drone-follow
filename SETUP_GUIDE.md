@@ -98,6 +98,8 @@ git clone -b fix/rpi4-hw-decode https://github.com/barakbk-hailo/qopenHD.git
 
 ```bash
 cd ~/OpenHD && sudo ./build_native.sh all
+cd ~/OpenHD && sudo ./build_native.sh driver
+
 ```
 
 ### 3. Build QOpenHD
