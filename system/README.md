@@ -95,6 +95,20 @@ Runs it again to stop. Check status with `nmcli device status`.
 
 wlan0 remains unaffected — you can have home WiFi and the AP running simultaneously.
 
+## WiFi Regulatory Domain
+
+The Pi must use the correct country regulatory domain — a mismatch causes phones to refuse 5GHz connections (they won't even see the AP). Set via:
+
+```bash
+# Persistent (applied at boot):
+echo 'options cfg80211 ieee80211_regdom="IL"' | sudo tee /etc/modprobe.d/wifi-regdomain.conf
+
+# Immediate (current session):
+sudo iw reg set IL
+```
+
+Verify with `iw reg get` — the first line should show your country code.
+
 ## Adding Known WiFi Networks
 
 ```bash
