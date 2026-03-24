@@ -1,0 +1,36 @@
+h2. ReID FPS Benchmark - HW Only
+
+|| Model || Batch 1 || Batch 2 || Batch 4 || Batch 8 || Batch 16 ||
+| osnet_x1_0 | 178.909 | 287.428 | 425.548 | 574.856 | 703.251 |
+| repvgg_a0_person_reid_2048 | N/A | N/A | N/A | N/A | N/A |
+| repvgg_a0_person_reid_512 | 5205.5 | 5205.5 | 5205.5 | 5206.02 | 5205.59 |
+
+h2. ReID FPS Benchmark - Streaming
+
+|| Model || Batch 1 || Batch 2 || Batch 4 || Batch 8 || Batch 16 ||
+| osnet_x1_0 | 178.909 | 287.428 | 425.545 | 574.855 | 703.248 |
+| repvgg_a0_person_reid_2048 | N/A | N/A | N/A | N/A | N/A |
+| repvgg_a0_person_reid_512 | 5204.81 | 5205.66 | 5205.19 | 5205.62 | 5205.71 |
+
+h2. ReID HW Latency (ms)
+
+|| Model || Batch 1 || Batch 2 || Batch 4 || Batch 8 || Batch 16 ||
+| osnet_x1_0 | 4.86169 | 6.09985 | 8.05261 | 11.7524 | 18.6837 |
+| repvgg_a0_person_reid_2048 | N/A | N/A | N/A | N/A | N/A |
+| repvgg_a0_person_reid_512 | 0.671925 | 0.708522 | 0.762487 | 0.785523 | 0.796956 |
+
+h2. ReID Overall Latency (ms)
+
+|| Model || Batch 1 || Batch 2 || Batch 4 || Batch 8 || Batch 16 ||
+| osnet_x1_0 | 5.57 | 6.81 | 9.05 | 13.35 | 21.66 |
+| repvgg_a0_person_reid_2048 | N/A | N/A | N/A | N/A | N/A |
+| repvgg_a0_person_reid_512 | 0.75 | 0.83 | 1.00 | 1.33 | 2.00 |
+
+h2. Test Configuration
+* *Time per run:* 30s
+* *Batch sizes:* 1 2 4 8 16
+* *HEF directory:* /usr/local/hailo/resources/models/hailo8
+* *Date:* 2026-03-24 02:08
+* *Device:* Executing on device: 0001:01:00.0
+Identifying board
+Control Protocol Version: 2
