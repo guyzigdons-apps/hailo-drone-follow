@@ -163,7 +163,7 @@ OpenHD via UDP RTP.
 ### Step 1 — Air: Start OpenHD
 
 ```bash
-sudo /usr/local/bin/openhd --air --clean-start
+sudo /usr/local/bin/openhd --air
 ```
 
 ### Step 2 — Air: Start drone-follow
@@ -190,7 +190,7 @@ drone-follow --input rpi --openhd-stream --horizontal-mirror \
 ### Step 3 — Ground: Start OpenHD
 
 ```bash
-sudo /usr/local/bin/openhd --ground --clean-start
+sudo /usr/local/bin/openhd --ground
 ```
 
 ### Step 4 — Ground: Start QOpenHD
