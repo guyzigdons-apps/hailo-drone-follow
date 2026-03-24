@@ -223,12 +223,6 @@ class RepVGG512Extractor(HailoReIDExtractor):
         super().__init__(hef_path=hef_path, **kwargs)
 
 
-class RepVGG2048Extractor(HailoReIDExtractor):
-    """RepVGG A0 2048-dim extractor. 256x128 input."""
-
-    def __init__(self, hef_path: str = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_2048.hef", **kwargs):
-        super().__init__(hef_path=hef_path, **kwargs)
-
 
 # ── Cross-matching matrix ──
 if __name__ == "__main__":
