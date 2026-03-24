@@ -46,6 +46,8 @@ def add_drone_args(parser) -> None:
     group.add_argument("--target-altitude", type=float, default=3.0,
                        help="Target altitude in metres (default: 3.0). Also used as takeoff height with --takeoff-landing.")
     group.add_argument("--mission-duration", type=float, default=300.0)
+    group.add_argument("--no-drone", action="store_true",
+                       help="Run control loop in print-only mode without a drone (for testing)")
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +303,7 @@ async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asynci
         pass
 
 
-async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None, ui_state=None):
+async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None, ui_state=None, target_state=None, rc_override_fn=None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
@@ -389,12 +391,26 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                      f"final={cmd.forward_m_s:+.2f}", level=logging.DEBUG)
                 _last_fwd_log_time = now
 
+            # Apply RC controller override (additive — operator can nudge while AI follows)
+            rc_fwd = rc_right = rc_down = rc_yaw = 0.0
+            if rc_override_fn is not None:
+                rc_fwd, rc_right, rc_down, rc_yaw = rc_override_fn()
+                if rc_fwd or rc_right or rc_down or rc_yaw:
+                    cmd = VelocityCommand(
+                        cmd.forward_m_s + rc_fwd,
+                        cmd.right_m_s + rc_right,
+                        cmd.down_m_s + rc_down,
+                        cmd.yawspeed_deg_s + rc_yaw,
+                    )
+
             cmd = await vel_api.send(cmd)
             if drone is None:
                 tag = "TRACK" if detection is not None else "SEARCH"
+                rc_str = (f"  RC[fwd={rc_fwd:+.2f} right={rc_right:+.2f} down={rc_down:+.2f} yaw={rc_yaw:+.1f}]"
+                          if any((rc_fwd, rc_right, rc_down, rc_yaw)) else "")
                 _log(f"[{tag}] Yaw:{cmd.yawspeed_deg_s:+6.1f}\u00b0/s  "
                      f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
-                     f"Down:{cmd.down_m_s:+5.2f}m/s", level=logging.INFO)
+                     f"Down:{cmd.down_m_s:+5.2f}m/s{rc_str}", level=logging.INFO)
             if ui_state is not None:
                 if detection is not None and config.follow_mode == "orbit":
                     mode = "ORBIT"
@@ -411,10 +427,12 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
             if now - _last_log_time >= _LOG_INTERVAL:
                 _last_log_time = now
                 alt_str = f" alt={altitude_cache['m']:.1f}m" if altitude_cache and altitude_cache.get("m") is not None else ""
+                rc_log_str = (f" RC[fwd={rc_fwd:+.2f} right={rc_right:+.2f} down={rc_down:+.2f} yaw={rc_yaw:+.1f}]"
+                              if any((rc_fwd, rc_right, rc_down, rc_yaw)) else "")
                 if detection is not None:
                     _log(f"[TRACK] Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+5.2f} Down:{cmd.down_m_s:+5.2f}"
                          f" pos=({detection.center_x:.2f},{detection.center_y:.2f}) bbox_h={detection.bbox_height:.2f}"
-                         f" target={config.target_bbox_height:.2f}{alt_str}", level=logging.INFO)
+                         f" target={config.target_bbox_height:.2f}{alt_str}{rc_log_str}", level=logging.INFO)
                 elif time_since_detection < config.search_enter_delay_s:
                     _log(f"[SEARCH-WAIT] entering search in {config.search_enter_delay_s - time_since_detection:.1f}s{alt_str}", level=logging.INFO)
                 else:
@@ -515,7 +533,7 @@ async def _wait_for_connection(drone: System) -> bool:
 
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         config=None, ui_state=None):
+                         config=None, ui_state=None, target_state=None, rc_override_fn=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If config is provided, use it directly (allows live mutation from web UI).
@@ -523,6 +541,15 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
     """
     if config is None:
         config = ControllerConfig.from_args(args)
+
+    # --no-drone: run control loop in print-only mode without MAVSDK
+    if getattr(args, 'no_drone', False):
+        LOGGER.info("[drone] --no-drone mode: running control loop without drone connection")
+        altitude_cache: dict = {}
+        await live_control_loop(None, shared_state, config, shutdown, altitude_cache,
+                                ui_state=ui_state, target_state=target_state,
+                                rc_override_fn=rc_override_fn)
+        return
 
     if shutdown_read_fd is not None:
         loop = asyncio.get_running_loop()
@@ -607,7 +634,9 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                 altitude_cache: dict = {}
                 alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
                 control_task = asyncio.create_task(
-                    live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
+                    live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
+                                      ui_state=ui_state, target_state=target_state,
+                                      rc_override_fn=rc_override_fn))
 
                 done, pending = await asyncio.wait(
                     [
@@ -636,7 +665,9 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     offboard_lost = asyncio.Event()
                     vel_api.reset_filter()
                     control_task = asyncio.create_task(
-                        live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
+                        live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
+                                          ui_state=ui_state, target_state=target_state,
+                                          rc_override_fn=rc_override_fn))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 

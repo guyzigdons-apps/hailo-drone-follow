@@ -88,6 +88,14 @@ class OpenHDBridge:
         self._explicit_follow_id = 0
         self._current_bitrate_kbps = 0  # dedup repeated bitrate updates
 
+        # RC controller override (from ground station sticks)
+        self._rc_lock = threading.Lock()
+        self._rc_fwd: float = 0.0
+        self._rc_right: float = 0.0
+        self._rc_down: float = 0.0
+        self._rc_yaw: float = 0.0
+        self._rc_timestamp: float = 0.0  # 0 = never received
+
     def start(self):
         """Start listener and reporter daemon threads."""
         if self._running:
@@ -139,6 +147,12 @@ class OpenHDBridge:
                 msg = json.loads(data.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 LOGGER.warning("[openhd_bridge] Invalid JSON received")
+                continue
+
+            # RC controller override: {"rc": {"fwd": 0.5, "right": 0.0, "down": 0.0, "yaw": 30.0}}
+            rc = msg.get("rc")
+            if rc is not None:
+                self._apply_rc_override(rc)
                 continue
 
             param_name = msg.get("param")
@@ -232,6 +246,30 @@ class OpenHDBridge:
             setattr(self._config, python_name, old_value)
             LOGGER.warning("[openhd_bridge] Rejected %s=%s: %s",
                            python_name, py_value, e)
+
+    def _apply_rc_override(self, rc: dict):
+        """Store incoming RC controller override velocities (m/s and deg/s)."""
+        with self._rc_lock:
+            self._rc_fwd = float(rc.get("fwd", 0.0))
+            self._rc_right = float(rc.get("right", 0.0))
+            self._rc_down = float(rc.get("down", 0.0))
+            self._rc_yaw = float(rc.get("yaw", 0.0))
+            self._rc_timestamp = time.monotonic()
+        LOGGER.debug("[openhd_bridge] RC override: fwd=%+.2f right=%+.2f down=%+.2f yaw=%+.1f",
+                     self._rc_fwd, self._rc_right, self._rc_down, self._rc_yaw)
+
+    _RC_STALE_S = 0.5
+
+    def get_rc_override(self):
+        """Return (fwd_m_s, right_m_s, down_m_s, yaw_deg_s) from ground station controller.
+
+        Returns all zeros if no RC message has been received within the staleness window,
+        so a lost uplink safely reverts to pure follow-controller output.
+        """
+        with self._rc_lock:
+            if time.monotonic() - self._rc_timestamp > self._RC_STALE_S:
+                return (0.0, 0.0, 0.0, 0.0)
+            return (self._rc_fwd, self._rc_right, self._rc_down, self._rc_yaw)
 
     # -- Reporter: Python -> OpenHD ------------------------------------------
 

@@ -27,10 +27,18 @@ NC='\033[0m'
 
 # Parse flags
 START_BRIDGE=false
+BRIDGE_RTP_HOST=""
 WORLD=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --bridge) START_BRIDGE=true; shift ;;
+        --bridge-rtp)
+            START_BRIDGE=true
+            if [ -z "$2" ] || [[ "$2" == --* ]]; then
+                echo -e "${RED}Error: --bridge-rtp requires a destination host (e.g. 10.0.0.2)${NC}"
+                exit 1
+            fi
+            BRIDGE_RTP_HOST="$2"; shift 2 ;;
         --world)
             if [ -z "$2" ] || [[ "$2" == --* ]]; then
                 echo -e "${RED}Error: --world requires a world name${NC}"
@@ -41,7 +49,7 @@ while [[ $# -gt 0 ]]; do
             WORLD="$2"; shift 2 ;;
         *)
             echo -e "${RED}Unknown argument: $1${NC}"
-            echo "Usage: $0 [--bridge] [--world NAME]"
+            echo "Usage: $0 [--bridge] [--bridge-rtp HOST] [--world NAME]"
             exit 1 ;;
     esac
 done
@@ -82,7 +90,11 @@ fi
 echo "  MAVLink:    udp://localhost:14540"
 
 if $START_BRIDGE; then
-    echo "  Bridge:     video_bridge.py -> udp://127.0.0.1:5600"
+    if [ -n "$BRIDGE_RTP_HOST" ]; then
+        echo "  Bridge:     video_bridge.py --rtp -> udp://${BRIDGE_RTP_HOST}:5500 (H.264 RTP)"
+    else
+        echo "  Bridge:     video_bridge.py -> udp://127.0.0.1:5600 (JPEG)"
+    fi
 else
     echo "  Camera:     use --bridge or run sim/bridge/video_bridge.py separately"
 fi
@@ -91,8 +103,14 @@ echo ""
 # Start video bridge in background if requested
 BRIDGE_PID=""
 if $START_BRIDGE; then
-    echo -e "${GREEN}Starting video bridge...${NC}"
-    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python python3 "$BRIDGE_SCRIPT" &
+    if [ -n "$BRIDGE_RTP_HOST" ]; then
+        echo -e "${GREEN}Starting video bridge (H.264 RTP -> ${BRIDGE_RTP_HOST}:5500)...${NC}"
+        PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python python3 "$BRIDGE_SCRIPT" \
+            --rtp --host "$BRIDGE_RTP_HOST" &
+    else
+        echo -e "${GREEN}Starting video bridge (JPEG -> localhost:5600)...${NC}"
+        PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python python3 "$BRIDGE_SCRIPT" &
+    fi
     BRIDGE_PID=$!
 fi
 
