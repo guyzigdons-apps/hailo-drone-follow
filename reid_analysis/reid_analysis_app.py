@@ -133,7 +133,7 @@ def app_callback(element, buffer, user_data):
                 if best_sim >= user_data.threshold:
                     # Matched existing person
                     name = user_data.gallery_names[best_idx]
-                    save_path = user_data.match_dir / name / f"frame_{frame_count:04d}_{j}.jpg"
+                    save_path = user_data.match_dir / name / f"frame_{frame_count:04d}.jpg"
                     cv2.imwrite(str(save_path), crop)
                 else:
                     # New person — add to gallery
@@ -178,8 +178,13 @@ def main():
         threshold=args.threshold,
     )
 
+    # Subclass to stop on EOS instead of looping the video
+    class ReIDTilingApp(GStreamerTilingApp):
+        def on_eos(self):
+            self.shutdown()
+
     # Create and run tiling pipeline app
-    app = GStreamerTilingApp(app_callback, user_data, parser=parser)
+    app = ReIDTilingApp(app_callback, user_data, parser=parser)
     app.run()
 
     # Cleanup
