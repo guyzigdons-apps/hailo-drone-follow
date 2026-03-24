@@ -10,6 +10,7 @@ from .state import SharedDetectionState, FollowTargetState
 from .controller import (
     compute_velocity_command,
     ForwardSmoother,
+    reset_forward_dead_zone,
     _distance_to_bbox_height,
     _effective_target_bbox_height,
     _calculate_forward_speed,
@@ -24,6 +25,7 @@ __all__ = [
     "FollowTargetState",
     "compute_velocity_command",
     "ForwardSmoother",
+    "reset_forward_dead_zone",
     "_distance_to_bbox_height",
     "_effective_target_bbox_height",
     "_calculate_forward_speed",

@@ -22,7 +22,8 @@ class ControllerConfig:
     person_height_m: float = 1.7               # assumed person height for distance calculation
     kp_forward: float = 3.0
     kp_backward: float = 5.0
-    dead_zone_height_percent: float = 5.0  # dead zone as % of target_bbox_height (default 5%)
+    dead_zone_height_percent: float = 15.0  # dead zone as % of target_bbox_height (default 15%)
+    dead_zone_reenter_percent: float = 8.0  # hysteresis: re-enter dead zone at this % (< dead_zone_height_percent)
     max_forward: float = 2.0
     max_backward: float = 3.0
     detection_timeout_s: float = 0.5
@@ -44,8 +45,8 @@ class ControllerConfig:
     yaw_alpha: float = 0.3              # yaw EMA factor (0=very smooth, 1=no smoothing)
     # Forward smoothing: estimate person velocity and smooth commands
     smooth_forward: bool = True         # enable forward velocity smoothing
-    forward_alpha: float = 0.1          # EMA smoothing factor (0=ignore new, 1=no smoothing)
-    kd_forward: float = 2.0            # derivative gain: anticipate person movement
+    forward_alpha: float = 0.25         # EMA smoothing factor (0=ignore new, 1=no smoothing)
+    kd_forward: float = 1.0            # derivative gain: anticipate person movement
 
     follow_mode: str = "follow"       # "follow" or "orbit"
     orbit_speed_m_s: float = 1.0      # lateral velocity for orbit (m/s)
@@ -114,7 +115,9 @@ class ControllerConfig:
         # Controller gains and loop behavior
         group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
         group.add_argument("--dead-zone-height-percent", type=float, default=defaults.dead_zone_height_percent,
-                           help="Forward dead zone as %% of target bbox height (default: 5)")
+                           help="Forward dead zone as %% of target bbox height (default: 15)")
+        group.add_argument("--dead-zone-reenter-percent", type=float, default=defaults.dead_zone_reenter_percent,
+                           help="Hysteresis: re-enter dead zone at this %% (default: 8, must be < dead-zone-height-percent)")
         group.add_argument("--yaw-gain", dest="kp_yaw", type=float, default=defaults.kp_yaw)
         group.add_argument("--forward-gain", dest="kp_forward", type=float, default=defaults.kp_forward)
         group.add_argument("--backward-gain", dest="kp_backward", type=float, default=defaults.kp_backward,
@@ -213,6 +216,7 @@ class ControllerConfig:
             target_distance_m=target_distance,
             person_height_m=_arg("person_height", "person_height_m", default=defaults.person_height_m),
             dead_zone_height_percent=_arg("dead_zone_height_percent", default=defaults.dead_zone_height_percent),
+            dead_zone_reenter_percent=_arg("dead_zone_reenter_percent", default=defaults.dead_zone_reenter_percent),
             reference_altitude_m=ref_alt,
             fixed_altitude=fixed_alt,
             yaw_only=yaw_only,

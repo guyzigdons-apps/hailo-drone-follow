@@ -9,6 +9,7 @@ from drone_follow.follow_api import (
     Detection,
     ControllerConfig,
     compute_velocity_command,
+    reset_forward_dead_zone,
 )
 
 
@@ -19,6 +20,14 @@ def _det(cx=0.5, cy=0.5, bh=0.3):
         center_x=cx, center_y=cy, bbox_height=bh,
         timestamp=time.monotonic(),
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_dead_zone():
+    """Reset hysteresis dead zone state before each test."""
+    reset_forward_dead_zone()
+    yield
+    reset_forward_dead_zone()
 
 
 @pytest.fixture
@@ -371,6 +380,81 @@ class TestConfigFromArgsMutualExclusivity:
             ControllerConfig.from_args(SimpleNamespace(
                 target_distance=8.0, target_bbox_height=0.3,
             ))
+
+
+class TestForwardHysteresis:
+    """Tests for the hysteresis dead zone on forward/backward control."""
+
+    def test_stays_in_dead_zone_below_exit_threshold(self):
+        """Error below exit threshold keeps controller in dead zone."""
+        cfg = ControllerConfig(
+            yaw_only=False, dead_zone_height_percent=15.0,
+            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
+        )
+        # 10% error = below 15% exit threshold -> stays in dead zone
+        bh = cfg.target_bbox_height * 0.90  # 10% smaller
+        cmd = compute_velocity_command(_det(bh=bh), cfg)
+        assert cmd.forward_m_s == 0.0
+
+    def test_exits_dead_zone_above_exit_threshold(self):
+        """Error above exit threshold breaks out of dead zone."""
+        cfg = ControllerConfig(
+            yaw_only=False, dead_zone_height_percent=15.0,
+            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
+        )
+        # 20% error = above 15% exit threshold -> should move
+        bh = cfg.target_bbox_height * 0.80  # 20% smaller (far away)
+        cmd = compute_velocity_command(_det(bh=bh), cfg)
+        assert cmd.forward_m_s > 0.0
+
+    def test_hysteresis_stays_active_between_thresholds(self):
+        """After exiting dead zone, error between reenter and exit keeps moving."""
+        cfg = ControllerConfig(
+            yaw_only=False, dead_zone_height_percent=15.0,
+            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
+        )
+        # First: break out with large error
+        bh_far = cfg.target_bbox_height * 0.80  # 20% error
+        cmd1 = compute_velocity_command(_det(bh=bh_far), cfg)
+        assert cmd1.forward_m_s > 0.0
+
+        # Now: error drops to 10% (between 8% reenter and 15% exit) -> still moving
+        bh_mid = cfg.target_bbox_height * 0.90  # 10% error
+        cmd2 = compute_velocity_command(_det(bh=bh_mid), cfg)
+        assert cmd2.forward_m_s > 0.0, "Should stay active due to hysteresis"
+
+    def test_hysteresis_reenters_dead_zone_below_reenter_threshold(self):
+        """After exiting dead zone, error below reenter threshold stops movement."""
+        cfg = ControllerConfig(
+            yaw_only=False, dead_zone_height_percent=15.0,
+            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
+        )
+        # First: break out with large error
+        bh_far = cfg.target_bbox_height * 0.80
+        compute_velocity_command(_det(bh=bh_far), cfg)
+
+        # Now: error drops to 5% (below 8% reenter) -> back to dead zone
+        bh_close = cfg.target_bbox_height * 0.95  # 5% error
+        cmd = compute_velocity_command(_det(bh=bh_close), cfg)
+        assert cmd.forward_m_s == 0.0, "Should re-enter dead zone"
+
+    def test_ramp_produces_smooth_transition(self):
+        """Command right at exit threshold should be smaller than well beyond it."""
+        cfg = ControllerConfig(
+            yaw_only=False, dead_zone_height_percent=15.0,
+            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
+        )
+        exit_dz = (cfg.dead_zone_height_percent / 100.0) * cfg.target_bbox_height
+        # Just past exit threshold
+        bh_edge = cfg.target_bbox_height - exit_dz * 1.05
+        cmd_edge = compute_velocity_command(_det(bh=bh_edge), cfg)
+
+        # Well past ramp region
+        reset_forward_dead_zone()
+        bh_far = cfg.target_bbox_height - exit_dz * 3.0
+        cmd_far = compute_velocity_command(_det(bh=bh_far), cfg)
+
+        assert 0.0 < cmd_edge.forward_m_s < cmd_far.forward_m_s
 
 
 class TestOrbitMode:
