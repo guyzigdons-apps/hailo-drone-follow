@@ -2,206 +2,167 @@
 """
 ReID Video Analysis App
 =======================
-Processes a video file to detect persons (YOLO on Hailo NPU), extract ReID
-embeddings, build a gallery from the first frame, and match subsequent frames
-against the gallery — saving crops organized by identity.
+Uses GStreamerTilingApp (same as drone_follow) for person detection with
+Hailo NPU tiling pipeline. Extracts ReID embeddings, builds a gallery
+from the first frame, and matches subsequent frames against the gallery.
 
 Usage:
     source setup_env.sh
-    python reid_analysis_app.py --video 12354541-hd_1280_720_25fps.mp4
+    python reid_analysis_app.py --input 12354541-hd_1280_720_25fps.mp4 \
+        --tiles-x 2 --tiles-y 3 --reid-model repvgg --threshold 0.7
 """
 
-import argparse
 import os
 import sys
+import threading
 from pathlib import Path
 
 import cv2
+import hailo
 import numpy as np
 
-# ── Hailo-apps imports ──
-from hailo_apps.python.core.common.hailo_inference import HailoInfer
-from hailo_apps.python.core.common.toolbox import default_preprocess
-from hailo_apps.python.standalone_apps.object_detection.object_detection_post_process import (
-    extract_detections,
-)
+from hailo_apps.python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
+from hailo_apps.python.core.common.core import get_pipeline_parser
+from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
+from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import GStreamerTilingApp
 
-# ── Local ReID imports ──
 from reid_embedding_extractor import RepVGG512Extractor, OSNetExtractor
 
-COCO_PERSON_CLASS = 0
 
-# Tiling config
-TILES_X = 2
-TILES_Y = 3
-TILE_OVERLAP = 0.15  # 15% overlap between tiles
-NMS_IOU_THRESHOLD = 0.4
+# ---------------------------------------------------------------------------
+# User data — shared between callback and main thread
+# ---------------------------------------------------------------------------
 
+class ReIDUserData(app_callback_class):
+    def __init__(self, reid_extractor, output_dir, threshold):
+        super().__init__()
+        self.reid_extractor = reid_extractor
+        self.threshold = threshold
 
-def _compute_iou(box_a, box_b):
-    """Compute IoU between two boxes in (ymin, xmin, ymax, xmax) format."""
-    y1 = max(box_a[0], box_b[0])
-    x1 = max(box_a[1], box_b[1])
-    y2 = min(box_a[2], box_b[2])
-    x2 = min(box_a[3], box_b[3])
-    inter = max(0, y2 - y1) * max(0, x2 - x1)
-    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
-    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
+        self.orig_dir = Path(output_dir) / "orig_person_images"
+        self.match_dir = Path(output_dir) / "person_images"
+        self.orig_dir.mkdir(parents=True, exist_ok=True)
+        self.match_dir.mkdir(parents=True, exist_ok=True)
 
+        # Gallery state (grows as new persons are discovered)
+        self.gallery_embeddings = []
+        self.gallery_names = []
 
-def _nms(boxes, scores, iou_threshold):
-    """Apply NMS on (ymin, xmin, ymax, xmax) boxes. Returns kept indices."""
-    if not boxes:
-        return []
-    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
-    keep = []
-    suppressed = set()
-    for i in order:
-        if i in suppressed:
-            continue
-        keep.append(i)
-        for j in order:
-            if j in suppressed or j == i:
-                continue
-            if _compute_iou(boxes[i], boxes[j]) > iou_threshold:
-                suppressed.add(j)
-    return keep
+        self.total_crops = 0
+        self._lock = threading.Lock()
 
 
-def _run_yolo_single(hailo_infer, image, model_w, model_h, config_data):
-    """Run YOLO on a single image, return person boxes as (ymin, xmin, ymax, xmax) in image pixel coords and scores."""
-    preprocessed = default_preprocess(image, model_w, model_h)
-    bindings = hailo_infer._create_bindings(hailo_infer.configured_model, [preprocessed])
-    hailo_infer.configured_model.wait_for_async_ready(timeout_ms=10000)
-    job = hailo_infer.configured_model.run_async(bindings, lambda *args, **kwargs: None)
-    job.wait(timeout_ms=10000)
+# ---------------------------------------------------------------------------
+# Pipeline callback
+# ---------------------------------------------------------------------------
 
-    result = bindings[0].output().get_buffer()
-    detections = extract_detections(image, result, config_data)
-
-    boxes, scores = [], []
-    for i in range(detections["num_detections"]):
-        if detections["detection_classes"][i] == COCO_PERSON_CLASS:
-            boxes.append(detections["detection_boxes"][i])
-            scores.append(detections["detection_scores"][i])
-    return boxes, scores
-
-
-def detect_persons(hailo_infer, frame, model_w, model_h, config_data):
-    """
-    Run YOLO detection with 2x3 tiling on a single frame.
-    Splits the frame into overlapping tiles, runs YOLO on each,
-    maps detections back to full-frame coordinates, and applies NMS.
-
-    Returns:
-        List of (ymin, xmin, ymax, xmax) pixel-coordinate tuples for persons.
-    """
-    frame_h, frame_w = frame.shape[:2]
-
-    # Compute tile sizes with overlap
-    tile_w = int(frame_w / (TILES_X - (TILES_X - 1) * TILE_OVERLAP))
-    tile_h = int(frame_h / (TILES_Y - (TILES_Y - 1) * TILE_OVERLAP))
-    step_x = int(tile_w * (1 - TILE_OVERLAP))
-    step_y = int(tile_h * (1 - TILE_OVERLAP))
-
-    all_boxes = []
-    all_scores = []
-
-    for ty in range(TILES_Y):
-        for tx in range(TILES_X):
-            x_start = min(tx * step_x, frame_w - tile_w)
-            y_start = min(ty * step_y, frame_h - tile_h)
-            x_start = max(0, x_start)
-            y_start = max(0, y_start)
-            x_end = min(x_start + tile_w, frame_w)
-            y_end = min(y_start + tile_h, frame_h)
-
-            tile = frame[y_start:y_end, x_start:x_end]
-            tile_boxes, tile_scores = _run_yolo_single(hailo_infer, tile, model_w, model_h, config_data)
-
-            # Map tile-local pixel coords back to full frame
-            for box, score in zip(tile_boxes, tile_scores):
-                ymin, xmin, ymax, xmax = box
-                all_boxes.append((ymin + y_start, xmin + x_start, ymax + y_start, xmax + x_start))
-                all_scores.append(score)
-
-    # Apply NMS to merge duplicates from overlapping tiles
-    kept = _nms(all_boxes, all_scores, NMS_IOU_THRESHOLD)
-    return [all_boxes[i] for i in kept]
+def _add_to_gallery(user_data, crop, emb, frame_count):
+    """Add a new person to the gallery. Returns the new person_id."""
+    person_id = len(user_data.gallery_embeddings)
+    name = f"person_{person_id}"
+    user_data.gallery_embeddings.append(emb)
+    user_data.gallery_names.append(name)
+    # Save first-seen crop as the reference image
+    cv2.imwrite(str(user_data.orig_dir / f"{name}.jpg"), crop)
+    # Create per-person directory and save this crop there too
+    person_dir = user_data.match_dir / name
+    person_dir.mkdir(exist_ok=True)
+    cv2.imwrite(str(person_dir / f"frame_{frame_count:04d}.jpg"), crop)
+    return person_id
 
 
-def crop_persons(frame, boxes):
-    """Crop person regions from the frame. Returns list of BGR crops."""
-    h, w = frame.shape[:2]
+def app_callback(element, buffer, user_data):
+    if buffer is None:
+        return
+
+    frame_count = user_data.get_count()
+
+    # Extract person detections from Hailo metadata
+    roi = hailo.get_roi_from_buffer(buffer)
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    persons = [d for d in detections if d.get_label() == "person"]
+
+    if not persons:
+        return
+
+    # Extract frame as numpy array
+    pad = element.get_static_pad("src")
+    format, width, height = get_caps_from_pad(pad)
+    frame = get_numpy_from_buffer(buffer, format, width, height)
+    if frame is None:
+        return
+
+    # Convert RGB to BGR for OpenCV
+    if format == "RGB":
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    else:
+        frame_bgr = frame
+
+    # Crop persons from frame using normalized bbox coordinates
     crops = []
-    for box in boxes:
-        ymin, xmin, ymax, xmax = box
-        ymin, xmin = max(0, int(ymin)), max(0, int(xmin))
-        ymax, xmax = min(h, int(ymax)), min(w, int(xmax))
-        if ymax > ymin and xmax > xmin:
-            crops.append(frame[ymin:ymax, xmin:xmax].copy())
-    return crops
+    for person in persons:
+        bbox = person.get_bbox()
+        x1 = max(0, int(bbox.xmin() * width))
+        y1 = max(0, int(bbox.ymin() * height))
+        x2 = min(width, int((bbox.xmin() + bbox.width()) * width))
+        y2 = min(height, int((bbox.ymin() + bbox.height()) * height))
+        if x2 > x1 and y2 > y1:
+            crops.append(frame_bgr[y1:y2, x1:x2].copy())
+
+    if not crops:
+        return
+
+    # Extract ReID embeddings
+    embeddings = user_data.reid_extractor.extract_embeddings_batch(crops)
+
+    with user_data._lock:
+        for j, (crop, emb) in enumerate(zip(crops, embeddings)):
+            user_data.total_crops += 1
+
+            if not user_data.gallery_embeddings:
+                # First person ever — create new gallery entry
+                person_id = _add_to_gallery(user_data, crop, emb, frame_count)
+                print(f"Frame {frame_count}: new person_{person_id} (first detection)")
+            else:
+                # Match against gallery
+                gallery_matrix = np.stack(user_data.gallery_embeddings)
+                similarities = gallery_matrix @ emb
+                best_idx = int(np.argmax(similarities))
+                best_sim = float(similarities[best_idx])
+
+                if best_sim >= user_data.threshold:
+                    # Matched existing person
+                    name = user_data.gallery_names[best_idx]
+                    save_path = user_data.match_dir / name / f"frame_{frame_count:04d}_{j}.jpg"
+                    cv2.imwrite(str(save_path), crop)
+                else:
+                    # New person — add to gallery
+                    person_id = _add_to_gallery(user_data, crop, emb, frame_count)
+                    print(f"Frame {frame_count}: new person_{person_id} (best match {best_sim:.3f} < {user_data.threshold})")
+
+    if frame_count % 100 == 0:
+        print(f"  Frame {frame_count} processed, {user_data.total_crops} total crops")
 
 
-def match_to_gallery(query_embedding, gallery_matrix, threshold):
-    """
-    Match a query embedding against the gallery.
-    Returns (person_id, similarity) if match found, else (None, best_sim).
-    """
-    if gallery_matrix.shape[0] == 0:
-        return None, 0.0
-    similarities = gallery_matrix @ query_embedding
-    best_idx = int(np.argmax(similarities))
-    best_sim = float(similarities[best_idx])
-    if best_sim >= threshold:
-        return best_idx, best_sim
-    return None, best_sim
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="ReID Video Analysis — detect, embed, match persons across frames")
-    parser.add_argument("--video", type=str, default="12354541-hd_1280_720_25fps.mp4", help="Input video file")
-    parser.add_argument("--yolo-hef", type=str, default="/usr/local/hailo/resources/models/hailo8/yolov8m.hef",
-                        help="YOLO HEF model path")
+    # Build parser with pipeline args + our custom args
+    parser = get_pipeline_parser()
     parser.add_argument("--reid-model", type=str, choices=["repvgg", "osnet"], default="repvgg",
                         help="ReID model to use")
-    parser.add_argument("--threshold", type=float, default=0.7, help="Cosine similarity threshold for matching")
-    parser.add_argument("--score-threshold", type=float, default=0.5, help="YOLO confidence threshold")
-    parser.add_argument("--output-dir", type=str, default=".", help="Base output directory")
-    args = parser.parse_args()
+    parser.add_argument("--threshold", type=float, default=0.7,
+                        help="Cosine similarity threshold for matching")
+    parser.add_argument("--output-dir", type=str, default=".",
+                        help="Base output directory")
+    # Pre-parse to get our custom args before GStreamerTilingApp consumes them
+    args, _ = parser.parse_known_args()
 
-    # ── Validate video ──
-    if not os.path.isfile(args.video):
-        print(f"Video not found: {args.video}")
-        sys.exit(1)
-
-    # ── Output dirs ──
-    output_dir = Path(args.output_dir)
-    orig_dir = output_dir / "orig_person_images"
-    match_dir = output_dir / "person_images"
-    orig_dir.mkdir(parents=True, exist_ok=True)
-    match_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── Config for YOLO post-processing ──
-    config_data = {
-        "visualization_params": {
-            "score_thres": args.score_threshold,
-            "max_boxes_to_draw": 50,
-        }
-    }
-
-    # ── Init models ──
-    print(f"Loading YOLO model: {args.yolo_hef}")
-    hailo_infer = HailoInfer(args.yolo_hef, batch_size=1)
-    input_shape = hailo_infer.get_input_shape()
-    if len(input_shape) == 4:
-        model_h, model_w = input_shape[1], input_shape[2]
-    else:
-        model_h, model_w = input_shape[0], input_shape[1]
-    print(f"YOLO input: {model_w}x{model_h}")
-
+    # Init ReID extractor
     print(f"Loading ReID model: {args.reid_model}")
     if args.reid_model == "repvgg":
         reid_extractor = RepVGG512Extractor()
@@ -209,83 +170,29 @@ def main():
         reid_extractor = OSNetExtractor()
     print(f"ReID: {reid_extractor.model_name}, dim={reid_extractor.embedding_dim}")
 
-    # ── Open video ──
-    cap = cv2.VideoCapture(args.video)
-    if not cap.isOpened():
-        print(f"Cannot open video: {args.video}")
-        sys.exit(1)
+    # Create user data
+    user_data = ReIDUserData(
+        reid_extractor=reid_extractor,
+        output_dir=args.output_dir,
+        threshold=args.threshold,
+    )
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    print(f"Video: {total_frames} frames, {fps:.1f} FPS")
+    # Create and run tiling pipeline app
+    app = GStreamerTilingApp(app_callback, user_data, parser=parser)
+    app.run()
 
-    # ── Gallery state ──
-    gallery_embeddings = []  # List of 1D embedding vectors
-    gallery_names = []       # List of person names ("person_0", "person_1", ...)
-
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        frame_idx += 1
-
-        # Detect persons
-        person_boxes = detect_persons(hailo_infer, frame, model_w, model_h, config_data)
-
-        if not person_boxes:
-            if frame_idx % 100 == 0:
-                print(f"  Frame {frame_idx}/{total_frames}: no persons detected")
-            continue
-
-        # Crop persons
-        crops = crop_persons(frame, person_boxes)
-        if not crops:
-            continue
-
-        # Extract ReID embeddings
-        embeddings = reid_extractor.extract_embeddings_batch(crops)
-
-        if frame_idx == 1:
-            # ── First frame: build gallery ──
-            for i, (crop, emb) in enumerate(zip(crops, embeddings)):
-                name = f"person_{i}"
-                gallery_embeddings.append(emb)
-                gallery_names.append(name)
-
-                # Save original crop
-                cv2.imwrite(str(orig_dir / f"{name}.jpg"), crop)
-
-                # Create match directory
-                (match_dir / name).mkdir(exist_ok=True)
-
-            gallery_matrix = np.stack(gallery_embeddings)  # (N, D)
-            print(f"Frame 1: gallery built with {len(gallery_names)} persons: {gallery_names}")
-        else:
-            # ── Subsequent frames: match against gallery ──
-            for crop, emb in zip(crops, embeddings):
-                person_id, sim = match_to_gallery(emb, gallery_matrix, args.threshold)
-                if person_id is not None:
-                    name = gallery_names[person_id]
-                    save_path = match_dir / name / f"frame_{frame_idx}.jpg"
-                    cv2.imwrite(str(save_path), crop)
-
-        if frame_idx % 100 == 0:
-            print(f"  Frame {frame_idx}/{total_frames} processed")
-
-    cap.release()
-    hailo_infer.close()
+    # Cleanup
     reid_extractor.release()
 
-    # ── Summary ──
-    print(f"\nDone! Processed {frame_idx} frames.")
-    print(f"Gallery: {len(gallery_names)} persons")
-    print(f"Original crops: {orig_dir}/")
-    for name in gallery_names:
-        person_dir = match_dir / name
-        n_matches = len(list(person_dir.glob("*.jpg")))
-        print(f"  {name}: {n_matches} matched frames in {person_dir}/")
+    # Summary
+    print(f"\nDone!")
+    print(f"Total person crops saved: {user_data.total_crops}")
+    print(f"Unique persons found: {len(user_data.gallery_names)}")
+    print(f"First-seen crops: {user_data.orig_dir}/")
+    for name in user_data.gallery_names:
+        person_dir = user_data.match_dir / name
+        n_crops = len(list(person_dir.glob("*.jpg")))
+        print(f"  {name}: {n_crops} crops in {person_dir}/")
 
 
 if __name__ == "__main__":
