@@ -62,13 +62,13 @@ class HailoReIDExtractor:
         self._config_ctx = self._infer_model.configure()
         self._configured_model = self._config_ctx.__enter__()
 
-        # Cache input shape from HEF: (batch, H, W, C)
+        # Cache input shape from HEF: (H, W, C) or (batch, H, W, C)
         vstream_info = self._hef.get_input_vstream_infos()[0]
-        self._input_h, self._input_w, self._input_c = (
-            vstream_info.shape[1],
-            vstream_info.shape[2],
-            vstream_info.shape[3],
-        )
+        shape = vstream_info.shape
+        if len(shape) == 4:
+            self._input_h, self._input_w, self._input_c = shape[1], shape[2], shape[3]
+        else:
+            self._input_h, self._input_w, self._input_c = shape[0], shape[1], shape[2]
 
     # ── Properties ──
 
@@ -186,7 +186,7 @@ class HailoReIDExtractor:
 
         # Run async inference
         self._configured_model.wait_for_async_ready(timeout_ms=10000)
-        job = self._configured_model.run_async(bindings_list, lambda *args: None)
+        job = self._configured_model.run_async(bindings_list, lambda *args, **kwargs: None)
         job.wait(timeout_ms=10000)
 
         # Collect outputs
