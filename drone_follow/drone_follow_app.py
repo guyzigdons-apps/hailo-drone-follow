@@ -66,6 +66,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Enable gesture control mode (extended pipeline with hand/gesture detection)")
     group.add_argument("--dry-run", action="store_true",
                        help="Run control loop without drone connection (for testing gestures/pipeline)")
+    group.add_argument("--no-overlay", action="store_true",
+                       help="Disable detection overlay on display/recording (clean video for test datasets)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -108,6 +110,7 @@ def main():
     ui_pre.add_argument("--record", action="store_true")
     ui_pre.add_argument("--gesture", action="store_true")
     ui_pre.add_argument("--dry-run", action="store_true")
+    ui_pre.add_argument("--no-overlay", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
     ui_state = None
@@ -144,13 +147,15 @@ def main():
             eos_reached=eos_reached, ui_state=ui_state,
             ui_fps=ui_pre_args.ui_fps, parser=parser,
             record_dir=recordings_dir, velocity_state=velocity_state,
-            palm_state=palm_state, palm_lock=palm_lock)
+            palm_state=palm_state, palm_lock=palm_lock,
+            no_overlay=ui_pre_args.no_overlay)
     else:
         from drone_follow.pipeline_adapter import create_app
         app = create_app(shared_state, target_state=target_state,
                          eos_reached=eos_reached, ui_state=ui_state,
                          ui_fps=ui_pre_args.ui_fps, parser=parser,
-                         record_dir=recordings_dir, velocity_state=velocity_state)
+                         record_dir=recordings_dir, velocity_state=velocity_state,
+                         no_overlay=ui_pre_args.no_overlay)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)

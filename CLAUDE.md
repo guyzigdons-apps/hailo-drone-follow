@@ -1,5 +1,9 @@
 # CLAUDE.md — Project Context for drone-follow
 
+## MCP Servers
+
+- **hailo-docs** — Use for Hailo HailoRT, TAPPAS, Dataflow Compiler, and hardware documentation questions (API usage, model compilation, GStreamer integration, HEF files, scheduling, etc.).
+
 ## Project Overview
 
 A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hailo NPU) for person detection and MAVSDK for PX4 drone control. Runs on a Raspberry Pi 5 with Hailo-8L accelerator mounted on a drone with a Cube Orange+ flight controller.
@@ -144,9 +148,19 @@ A udev rule (`system/71-usb-wifi.rules`) pins the TP-Link adapter to `wlan1` by 
 
 A boot-time systemd service (`drone-network-mode.service`) runs `system/drone-network-mode.sh`:
 
-1. Waits 30s for NM to connect to any saved WiFi on wlan0
-2. **Home mode** (WiFi found on wlan0): exits, drone app does not start
-3. **Field mode** (no WiFi on wlan0): activates `HailoDrone-AP` profile on wlan1 (SSID: `HailoDrone`, password: `hailodrone`, IP: `10.0.0.1/24`, 5GHz ch36), then starts `drone-follow.service` (user service)
+1. If `/boot/firmware/field-mode` exists → **force field mode** (skip WiFi check, go straight to step 3)
+2. Waits 30s for NM to connect to any saved WiFi on wlan0
+3. **Home mode** (WiFi found on wlan0): exits, drone app does not start
+4. **Field mode** (no WiFi on wlan0): activates `HailoDrone-AP` profile on wlan1 (SSID: `HailoDrone`, password: `hailodrone`, IP: `10.0.0.1/24`, 5GHz ch36), then starts `drone-follow.service` (user service)
+
+**Force field mode:** Use this when flying near known WiFi networks. The flag file is on the boot partition, so it can also be created/removed by plugging the SD card into another computer.
+```bash
+# Enable — always start AP + drone-follow on boot:
+sudo touch /boot/firmware/field-mode
+
+# Disable — return to auto-detection:
+sudo rm /boot/firmware/field-mode
+```
 
 **AP Security:** Explicit WPA2 (RSN + CCMP) with PMF disabled. This is required — NetworkManager's default PMF setting causes phones to see the AP as WPA3 with unknown frequency, preventing connection.
 

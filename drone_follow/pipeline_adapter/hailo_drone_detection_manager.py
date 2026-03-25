@@ -304,7 +304,7 @@ def app_callback(element, buffer, user_data):
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None, record_dir=None,
-               velocity_state=None, controller_config=None):
+               velocity_state=None, controller_config=None, no_overlay=False):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -349,11 +349,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
         def __init__(self, app_callback, user_data, parser=None, eos_reached=None,
-                     ui_enabled=False, ui_state=None, ui_fps=30, record_dir=None):
+                     ui_enabled=False, ui_state=None, ui_fps=30, record_dir=None,
+                     no_overlay=False):
             self._eos_reached = eos_reached
             self._ui_enabled = ui_enabled
             self._ui_state = ui_state
             self._ui_fps = ui_fps
+            self._no_overlay = no_overlay
             self._recording = False
             self._record_dir = record_dir or os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
@@ -539,8 +541,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             # Shared overlay, then split into display + record
             # Inline the overlay element (no OVERLAY_PIPELINE helper) to avoid double-queue
+            overlay_element = "" if self._no_overlay else "hailooverlay_community name=hailo_overlay hud-overlay=true ! "
             overlay_branch = (
-                f"hailooverlay_community name=hailo_overlay hud-overlay=true ! "
+                f"{overlay_element}"
                 f"tee name=overlay_tee "
                 f"overlay_tee. ! {QUEUE(name='display_q')} ! "
                 f"videoconvert n-threads=2 ! "
@@ -575,6 +578,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
-        record_dir=record_dir,
+        record_dir=record_dir, no_overlay=no_overlay,
     )
     return app

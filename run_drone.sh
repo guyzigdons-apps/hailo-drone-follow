@@ -3,17 +3,28 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export DISPLAY=:0
 
-# Wait for serial device to appear (USB enumeration can be slow on boot)
-SERIAL_DEV="/dev/ttyACM0"
-SERIAL_TIMEOUT=30
-elapsed=0
-while [ ! -e "$SERIAL_DEV" ] && [ $elapsed -lt $SERIAL_TIMEOUT ]; do
-    echo "Waiting for $SERIAL_DEV... (${elapsed}s/${SERIAL_TIMEOUT}s)"
-    sleep 2
-    elapsed=$((elapsed + 2))
+# Check if --dry-run is among the arguments (skip serial wait if so)
+DRY_RUN=false
+for arg in "$@"; do
+    if [[ "$arg" == "--dry-run" ]]; then
+        DRY_RUN=true
+        break
+    fi
 done
-if [ ! -e "$SERIAL_DEV" ]; then
-    echo "WARNING: $SERIAL_DEV not found after ${SERIAL_TIMEOUT}s, proceeding anyway"
+
+# Wait for serial device (skip in dry-run)
+if ! $DRY_RUN; then
+    SERIAL_DEV="/dev/ttyACM0"
+    SERIAL_TIMEOUT=30
+    elapsed=0
+    while [ ! -e "$SERIAL_DEV" ] && [ $elapsed -lt $SERIAL_TIMEOUT ]; do
+        echo "Waiting for $SERIAL_DEV... (${elapsed}s/${SERIAL_TIMEOUT}s)"
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+    if [ ! -e "$SERIAL_DEV" ]; then
+        echo "WARNING: $SERIAL_DEV not found after ${SERIAL_TIMEOUT}s, proceeding anyway"
+    fi
 fi
 
 # Log to timestamped file and terminal
@@ -23,4 +34,4 @@ LOG_FILE="$LOG_DIR/flight_$(date '+%Y-%m-%d_%H-%M-%S').log"
 echo "Logging to $LOG_FILE"
 
 source venv/bin/activate
-drone-follow --input rpi --tiles-x 1 --tiles-y 1 --ui --record --serial 2>&1 | tee "$LOG_FILE"
+drone-follow --input rpi --tiles-x 1 --tiles-y 1 --ui --record --serial "$@" 2>&1 | tee "$LOG_FILE"
