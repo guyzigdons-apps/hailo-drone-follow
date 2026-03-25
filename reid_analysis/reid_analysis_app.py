@@ -3,17 +3,21 @@
 ReID Video Analysis App
 =======================
 Uses GStreamerTilingApp (same as drone_follow) for person detection with
-Hailo NPU tiling pipeline. Extracts ReID embeddings, builds a gallery
-from the first frame, and matches subsequent frames against the gallery.
+Hailo NPU tiling pipeline. Extracts ReID embeddings, matches against a
+gallery using pluggable strategies, and logs every match decision for
+offline evaluation.
 
 Usage:
     source setup_env.sh
-    python reid_analysis_app.py --input 12354541-hd_1280_720_25fps.mp4 \
-        --tiles-x 2 --tiles-y 3 --reid-model repvgg --threshold 0.7
+    python reid_analysis/reid_analysis_app.py \
+        --input 12354541-hd_1280_720_25fps.mp4 \
+        --tiles-x 2 --tiles-y 3 \
+        --reid-model repvgg --threshold 0.7 \
+        --gallery-strategy first_only
 """
 
+import json
 import os
-import sys
 import threading
 from pathlib import Path
 
@@ -27,6 +31,7 @@ from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import GStreamerTilingApp
 
 from reid_embedding_extractor import RepVGG512Extractor, OSNetExtractor
+from gallery_strategies import create_strategy, STRATEGIES
 
 
 # ---------------------------------------------------------------------------
@@ -34,42 +39,39 @@ from reid_embedding_extractor import RepVGG512Extractor, OSNetExtractor
 # ---------------------------------------------------------------------------
 
 class ReIDUserData(app_callback_class):
-    def __init__(self, reid_extractor, output_dir, threshold):
+    def __init__(self, reid_extractor, gallery, output_dir, threshold, match_log_path):
         super().__init__()
         self.reid_extractor = reid_extractor
+        self.gallery = gallery
         self.threshold = threshold
 
         self.orig_dir = Path(output_dir) / "orig_person_images"
         self.match_dir = Path(output_dir) / "person_images"
+        # Clean previous run results
+        import shutil
+        if self.orig_dir.exists():
+            shutil.rmtree(self.orig_dir)
+        if self.match_dir.exists():
+            shutil.rmtree(self.match_dir)
         self.orig_dir.mkdir(parents=True, exist_ok=True)
         self.match_dir.mkdir(parents=True, exist_ok=True)
 
-        # Gallery state (grows as new persons are discovered)
-        self.gallery_embeddings = []
-        self.gallery_names = []
-
         self.total_crops = 0
         self._lock = threading.Lock()
+
+        # Match log — JSONL file for offline evaluation
+        self._log_file = open(match_log_path, "w")
+
+    def log_match(self, entry: dict):
+        self._log_file.write(json.dumps(entry) + "\n")
+
+    def close_log(self):
+        self._log_file.close()
 
 
 # ---------------------------------------------------------------------------
 # Pipeline callback
 # ---------------------------------------------------------------------------
-
-def _add_to_gallery(user_data, crop, emb, frame_count):
-    """Add a new person to the gallery. Returns the new person_id."""
-    person_id = len(user_data.gallery_embeddings)
-    name = f"person_{person_id}"
-    user_data.gallery_embeddings.append(emb)
-    user_data.gallery_names.append(name)
-    # Save first-seen crop as the reference image
-    cv2.imwrite(str(user_data.orig_dir / f"{name}.jpg"), crop)
-    # Create per-person directory and save this crop there too
-    person_dir = user_data.match_dir / name
-    person_dir.mkdir(exist_ok=True)
-    cv2.imwrite(str(person_dir / f"frame_{frame_count:04d}.jpg"), crop)
-    return person_id
-
 
 def app_callback(element, buffer, user_data):
     if buffer is None:
@@ -87,13 +89,13 @@ def app_callback(element, buffer, user_data):
 
     # Extract frame as numpy array
     pad = element.get_static_pad("src")
-    format, width, height = get_caps_from_pad(pad)
-    frame = get_numpy_from_buffer(buffer, format, width, height)
+    fmt, width, height = get_caps_from_pad(pad)
+    frame = get_numpy_from_buffer(buffer, fmt, width, height)
     if frame is None:
         return
 
     # Convert RGB to BGR for OpenCV
-    if format == "RGB":
+    if fmt == "RGB":
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     else:
         frame_bgr = frame
@@ -118,32 +120,53 @@ def app_callback(element, buffer, user_data):
     with user_data._lock:
         for j, (crop, emb) in enumerate(zip(crops, embeddings)):
             user_data.total_crops += 1
+            gallery = user_data.gallery
 
-            if not user_data.gallery_embeddings:
-                # First person ever — create new gallery entry
-                person_id = _add_to_gallery(user_data, crop, emb, frame_count)
-                print(f"Frame {frame_count}: new person_{person_id} (first detection)")
+            if gallery.size == 0:
+                # First person ever
+                name = f"person_{gallery.size}"
+                gallery.add_person(name, emb)
+                _save_new_person(user_data, name, crop, frame_count)
+                user_data.log_match({
+                    "frame": frame_count, "crop_idx": j,
+                    "predicted_id": name, "similarity": 1.0, "is_new": True,
+                })
+                print(f"Frame {frame_count}: new {name} (first detection)")
             else:
-                # Match against gallery
-                gallery_matrix = np.stack(user_data.gallery_embeddings)
-                similarities = gallery_matrix @ emb
-                best_idx = int(np.argmax(similarities))
-                best_sim = float(similarities[best_idx])
+                matched_name, best_sim = gallery.match(emb, user_data.threshold)
 
-                if best_sim >= user_data.threshold:
+                if matched_name is not None:
                     # Matched existing person
-                    name = user_data.gallery_names[best_idx]
-                    save_path = user_data.match_dir / name / f"frame_{frame_count:04d}.jpg"
+                    gallery.update(matched_name, emb, frame_count)
+                    save_path = user_data.match_dir / matched_name / f"frame_{frame_count:04d}.jpg"
                     cv2.imwrite(str(save_path), crop)
+                    user_data.log_match({
+                        "frame": frame_count, "crop_idx": j,
+                        "predicted_id": matched_name, "similarity": round(best_sim, 4),
+                        "is_new": False,
+                    })
                 else:
-                    # New person — add to gallery
-                    person_id = _add_to_gallery(user_data, crop, emb, frame_count)
-                    print(f"Frame {frame_count}: new person_{person_id} (best match {best_sim:.3f} < {user_data.threshold})")
+                    # New person
+                    name = f"person_{gallery.size}"
+                    gallery.add_person(name, emb)
+                    _save_new_person(user_data, name, crop, frame_count)
+                    user_data.log_match({
+                        "frame": frame_count, "crop_idx": j,
+                        "predicted_id": name, "similarity": round(best_sim, 4),
+                        "is_new": True,
+                    })
+                    print(f"Frame {frame_count}: new {name} (best match {best_sim:.3f} < {user_data.threshold})")
 
     if frame_count % 100 == 0:
         print(f"  Frame {frame_count} processed, {user_data.total_crops} total crops")
 
 
+def _save_new_person(user_data, name, crop, frame_count):
+    """Save reference image and first crop for a new person."""
+    cv2.imwrite(str(user_data.orig_dir / f"{name}.jpg"), crop)
+    person_dir = user_data.match_dir / name
+    person_dir.mkdir(exist_ok=True)
+    cv2.imwrite(str(person_dir / f"frame_{frame_count:04d}.jpg"), crop)
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +174,6 @@ def app_callback(element, buffer, user_data):
 # ---------------------------------------------------------------------------
 
 def main():
-    # Build parser with pipeline args + our custom args
     parser = get_pipeline_parser()
     parser.add_argument("--reid-model", type=str, choices=["repvgg", "osnet"], default="repvgg",
                         help="ReID model to use")
@@ -160,7 +182,13 @@ def main():
     parser.add_argument("--output-dir", type=str,
                         default=os.path.dirname(os.path.abspath(__file__)),
                         help="Base output directory")
-    # Pre-parse to get our custom args before GStreamerTilingApp consumes them
+    parser.add_argument("--gallery-strategy", type=str, choices=list(STRATEGIES.keys()),
+                        default="first_only", help="Gallery update strategy")
+    parser.add_argument("--gallery-update-interval", type=int, default=10,
+                        help="Update interval for update_every_n strategy")
+    parser.add_argument("--gallery-max-size", type=int, default=10,
+                        help="Max embeddings per person for multi_embedding strategy")
+
     args, _ = parser.parse_known_args()
 
     # Init ReID extractor
@@ -171,11 +199,26 @@ def main():
         reid_extractor = OSNetExtractor()
     print(f"ReID: {reid_extractor.model_name}, dim={reid_extractor.embedding_dim}")
 
+    # Init gallery strategy
+    strategy_kwargs = {}
+    if args.gallery_strategy == "update_every_n":
+        strategy_kwargs["n"] = args.gallery_update_interval
+    elif args.gallery_strategy == "multi_embedding":
+        strategy_kwargs["max_k"] = args.gallery_max_size
+    gallery = create_strategy(args.gallery_strategy, **strategy_kwargs)
+    print(f"Gallery strategy: {args.gallery_strategy}")
+
+    # Match log path
+    output_dir = Path(args.output_dir)
+    match_log_path = output_dir / "match_log.jsonl"
+
     # Create user data
     user_data = ReIDUserData(
         reid_extractor=reid_extractor,
+        gallery=gallery,
         output_dir=args.output_dir,
         threshold=args.threshold,
+        match_log_path=str(match_log_path),
     )
 
     # Subclass to stop on EOS instead of looping the video
@@ -188,14 +231,16 @@ def main():
     app.run()
 
     # Cleanup
+    user_data.close_log()
     reid_extractor.release()
 
     # Summary
     print(f"\nDone!")
     print(f"Total person crops saved: {user_data.total_crops}")
-    print(f"Unique persons found: {len(user_data.gallery_names)}")
+    print(f"Unique persons found: {gallery.size}")
+    print(f"Match log: {match_log_path}")
     print(f"First-seen crops: {user_data.orig_dir}/")
-    for name in user_data.gallery_names:
+    for name in gallery.names:
         person_dir = user_data.match_dir / name
         n_crops = len(list(person_dir.glob("*.jpg")))
         print(f"  {name}: {n_crops} crops in {person_dir}/")
