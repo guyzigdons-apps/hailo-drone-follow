@@ -35,20 +35,23 @@ import argparse
 
 
 class TestPoseCLIFlag:
-    def test_pose_flag_registered(self):
-        """The --pose flag is parseable alongside --gesture."""
+    def test_gesture_flag_enables_pose_by_default(self):
+        """--gesture alone uses pose pipeline (default)."""
         parser = argparse.ArgumentParser()
         parser.add_argument("--gesture", action="store_true")
-        parser.add_argument("--pose", action="store_true")
-        args = parser.parse_args(["--gesture", "--pose"])
+        parser.add_argument("--hand-landmark", action="store_true")
+        args = parser.parse_args(["--gesture"])
         assert args.gesture is True
-        assert args.pose is True
+        assert args.hand_landmark is False
 
-    def test_pose_flag_default_false(self):
+    def test_hand_landmark_flag_opts_into_old_pipeline(self):
+        """--gesture --hand-landmark uses the cascaded palm/hand pipeline."""
         parser = argparse.ArgumentParser()
-        parser.add_argument("--pose", action="store_true")
-        args = parser.parse_args([])
-        assert args.pose is False
+        parser.add_argument("--gesture", action="store_true")
+        parser.add_argument("--hand-landmark", action="store_true")
+        args = parser.parse_args(["--gesture", "--hand-landmark"])
+        assert args.gesture is True
+        assert args.hand_landmark is True
 
 
 class TestPoseGestureAppImport:

@@ -25,6 +25,26 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
+- `--gesture` — Enable gesture control mode (default: pose-based with T-pose/X-pose)
+- `--hand-landmark` — Use hand-landmark pipeline for gesture control instead of pose (requires `--gesture`, close range ~1-2m)
+
+## Gesture Control
+
+Two gesture pipelines are available:
+
+### Pose-based (default with `--gesture`)
+Uses YOLOv8-Pose model for full-body skeleton keypoints. Works at **2-10m range**.
+- **T-pose** (arms extended horizontally, hold 3s) → lock onto person
+- **X-pose** (arms crossed over chest, hold 2s) → disengage
+- **Raised wrist** (wrist above shoulder) → open hand / forward command
+- **Lowered wrist** (wrist below shoulder) → fist / stop
+
+### Hand-landmark (with `--gesture --hand-landmark`)
+Uses cascaded palm detection + hand landmark models. Works at **1-2m range**.
+- **Wave** (hand oscillation) → lock onto person
+- **Open palm** → directional control from hand-face offset
+- **Fist** → stop
+
 ## Drone Connection
 
 ### USB Serial (real hardware)
@@ -57,6 +77,14 @@ By default (no `--takeoff-landing`), the app streams zero setpoints and waits fo
 # Dev machine with USB camera + flight controller:
 source setup_env.sh
 drone-follow --input usb --serial --ui
+
+# Gesture control (pose-based, default):
+source setup_env.sh
+drone-follow --input usb --gesture --dry-run --ui
+
+# Gesture control (hand-landmark, close range):
+source setup_env.sh
+drone-follow --input usb --gesture --hand-landmark --dry-run --ui
 
 # Simulation (see Simulation section for full setup):
 source setup_env.sh
