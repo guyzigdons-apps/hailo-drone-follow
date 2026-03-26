@@ -626,7 +626,7 @@ def create_pose_gesture_app(shared_state, gesture_state, target_state=None, eos_
 
             # --- 5. Display / UI output ---
             if not self._ui_enabled:
-                overlay_element = "" if self._no_overlay else "hailooverlay name=hailo_overlay ! "
+                overlay_element = "" if self._no_overlay else "hailooverlay_community name=hailo_overlay hud-overlay=true use-custom-colors=true ! "
                 display_pipeline = (
                     f"{overlay_element}"
                     f"videoconvert n-threads=2 ! "
@@ -651,7 +651,7 @@ def create_pose_gesture_app(shared_state, gesture_state, target_state=None, eos_
                 )
 
                 # Overlay, then tee into display + record paths
-                overlay_element = "" if self._no_overlay else "hailooverlay name=hailo_overlay ! "
+                overlay_element = "" if self._no_overlay else "hailooverlay_community name=hailo_overlay hud-overlay=true use-custom-colors=true ! "
                 overlay_branch = (
                     f"{overlay_element}"
                     f"tee name=overlay_tee "
