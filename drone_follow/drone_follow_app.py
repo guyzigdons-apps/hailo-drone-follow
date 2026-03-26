@@ -64,6 +64,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Record raw video + detections for the entire session (requires --ui)")
     group.add_argument("--gesture", action="store_true",
                        help="Enable gesture control mode (extended pipeline with hand/gesture detection)")
+    group.add_argument("--pose", action="store_true",
+                       help="Use pose-estimation pipeline for gesture control (requires --gesture)")
     group.add_argument("--dry-run", action="store_true",
                        help="Run control loop without drone connection (for testing gestures/pipeline)")
     group.add_argument("--no-overlay", action="store_true",
@@ -109,6 +111,7 @@ def main():
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--record", action="store_true")
     ui_pre.add_argument("--gesture", action="store_true")
+    ui_pre.add_argument("--pose", action="store_true")
     ui_pre.add_argument("--dry-run", action="store_true")
     ui_pre.add_argument("--no-overlay", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
@@ -136,19 +139,32 @@ def main():
     palm_lock = None
     gesture_lateral_state = None
     if ui_pre_args.gesture:
-        from drone_follow.follow_api.state import SharedGestureState, SharedPalmState, PalmLockState, SharedGestureLateralState
+        from drone_follow.follow_api.state import SharedGestureState, SharedGestureLateralState
         gesture_lateral_state = SharedGestureLateralState()
-        from drone_follow.pipeline_adapter import create_gesture_app
         gesture_state = SharedGestureState()
-        palm_state = SharedPalmState()
-        palm_lock = PalmLockState()
-        app = create_gesture_app(
-            shared_state, gesture_state, target_state=target_state,
-            eos_reached=eos_reached, ui_state=ui_state,
-            ui_fps=ui_pre_args.ui_fps, parser=parser,
-            record_dir=recordings_dir, velocity_state=velocity_state,
-            palm_state=palm_state, palm_lock=palm_lock,
-            no_overlay=ui_pre_args.no_overlay)
+
+        if ui_pre_args.pose:
+            # Pose-based gesture: no palm/hand models, uses YOLOv8-Pose wrist keypoints
+            from drone_follow.pipeline_adapter import create_pose_gesture_app
+            app = create_pose_gesture_app(
+                shared_state, gesture_state, target_state=target_state,
+                eos_reached=eos_reached, ui_state=ui_state,
+                ui_fps=ui_pre_args.ui_fps, parser=parser,
+                record_dir=recordings_dir, velocity_state=velocity_state,
+                no_overlay=ui_pre_args.no_overlay)
+        else:
+            # Original cascaded palm/hand gesture pipeline
+            from drone_follow.follow_api.state import SharedPalmState, PalmLockState
+            palm_state = SharedPalmState()
+            palm_lock = PalmLockState()
+            from drone_follow.pipeline_adapter import create_gesture_app
+            app = create_gesture_app(
+                shared_state, gesture_state, target_state=target_state,
+                eos_reached=eos_reached, ui_state=ui_state,
+                ui_fps=ui_pre_args.ui_fps, parser=parser,
+                record_dir=recordings_dir, velocity_state=velocity_state,
+                palm_state=palm_state, palm_lock=palm_lock,
+                no_overlay=ui_pre_args.no_overlay)
     else:
         from drone_follow.pipeline_adapter import create_app
         app = create_app(shared_state, target_state=target_state,
