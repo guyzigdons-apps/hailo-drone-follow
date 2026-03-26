@@ -70,6 +70,17 @@ class PalmDetection:
 
 
 @dataclass
+class WristDetection:
+    """A wrist keypoint from pose estimation (COCO keypoint 9 or 10)."""
+    x: float              # frame-normalized [0,1]
+    y: float
+    shoulder_x: float     # corresponding shoulder keypoint
+    shoulder_y: float
+    confidence: float
+    timestamp: float
+
+
+@dataclass
 class GestureDetection:
     face: FaceDetection
     hand: Optional[HandDetection]   # None when no hand visible
