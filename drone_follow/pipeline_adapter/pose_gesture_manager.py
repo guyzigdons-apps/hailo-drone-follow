@@ -214,11 +214,11 @@ _pose_last_log_time: float = 0.0
 _pose_log_interval: float = 1.0
 
 
-def _colorize_pose_detections(roi, persons, person_to_id, active_person_id, active_wrist_side=None):
-    """Colorize person detections and landmark keypoints based on lock state.
+def _colorize_pose_detections(roi, persons, person_to_id, active_person_id, hand_state=None):
+    """Colorize person detections based on lock state.
 
-    - Active (wave-locked) person bbox: cyan (0x00FFFF)
-    - Active person's wrist landmarks: green (highlighted by modifying landmark points)
+    - Active (wave-locked) person bbox: cyan (0x00FFFF) with "LOCKED" label
+    - Shows hand state (OPEN/FIST) on the locked person's overlay label
     """
     import hailo
 
@@ -234,6 +234,13 @@ def _colorize_pose_detections(roi, persons, person_to_id, active_person_id, acti
             # Cyan bbox for active person
             color_cls = hailo.HailoClassification("overlay_color", 0x00FFFF, "", 0.0)
             det.add_object(color_cls)
+            # Add "LOCKED" or hand state label visible on overlay
+            if hand_state is not None:
+                label = "OPEN" if hand_state else "FIST"
+                state_cls = hailo.HailoClassification("pose_gesture", 0, label, 1.0)
+            else:
+                state_cls = hailo.HailoClassification("pose_gesture", 0, "LOCKED", 1.0)
+            det.add_object(state_cls)
 
 
 def pose_gesture_app_callback(element, buffer, user_data):
@@ -390,7 +397,8 @@ def pose_gesture_app_callback(element, buffer, user_data):
             _update_ui(ui_state, persons, person_to_id, following_id)
 
     # --- Colorize active person ---
-    _colorize_pose_detections(roi, persons, person_to_id, user_data.active_person_id)
+    hand_state = hand.is_open if hand is not None else None
+    _colorize_pose_detections(roi, persons, person_to_id, user_data.active_person_id, hand_state)
 
     # --- Periodic logging with wrist debug info ---
     if now - _pose_last_log_time >= _pose_log_interval:
