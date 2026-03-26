@@ -358,6 +358,30 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
             self._record_lock = threading.Lock()
             self._shm_rebuild_pending = False
+
+            # Pre-detect SHM resolution BEFORE super().__init__() so that
+            # the tiling configuration (tile grid, overlap, batch size) is
+            # computed with the correct frame dimensions.  Without this,
+            # the base class configures tiling for the CLI default (e.g.
+            # 1280x720) while the SHM source actually delivers 640x480,
+            # causing a buffer size mismatch → Hailo DMA crash.
+            if parser is not None:
+                _pre_args, _ = parser.parse_known_args()
+                _pre_input = getattr(_pre_args, 'input', None)
+                if _pre_input and str(_pre_input).startswith('shm://'):
+                    shm_res = _read_shm_resolution()
+                    if shm_res is not None:
+                        shm_w, shm_h, shm_fps = shm_res
+                        LOGGER.info(
+                            "Pre-init: SHM metadata says %dx%d@%d — "
+                            "injecting into parser defaults",
+                            shm_w, shm_h, shm_fps)
+                        # Override the parser defaults so the base class
+                        # sees the correct resolution during configure().
+                        parser.set_defaults(
+                            width=shm_w, height=shm_h,
+                            frame_rate=shm_fps)
+
             super().__init__(app_callback, user_data, parser=parser)
             # After base class init, sync resolution from SHM metadata if in
             # SHM mode so that self.video_width/height are correct for any
@@ -442,8 +466,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             Re-reads the OpenHD metadata file so the new pipeline uses
             the correct caps for the (potentially changed) resolution.
-            Performs a careful teardown to avoid segfaults from in-flight
-            Hailo inference buffers.
+            Performs a careful teardown to avoid kernel warnings from the
+            Hailo PCIe driver's DMA buffer mapping (find_vma race on
+            kernel 6.12+).
             """
             import gi
             gi.require_version("Gst", "1.0")
@@ -464,22 +489,64 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 self.video_height = new_h
                 self.frame_rate = new_fps
 
-            # Pre-teardown: transition the old pipeline through READY first
-            # so in-flight Hailo inference buffers are drained gracefully
-            # before we go to NULL (which is more aggressive).
+            # Pre-teardown: transition the old pipeline through READY/NULL
+            # explicitly so in-flight Hailo inference buffers are drained
+            # before we create the new pipeline.
             if self.pipeline:
-                LOGGER.debug("SHM rebuild: pipeline PLAYING -> READY (drain buffers)")
-                self.pipeline.set_state(Gst.State.READY)
-                result, _state, _pending = self.pipeline.get_state(5 * Gst.SECOND)
-                if result != Gst.StateChangeReturn.SUCCESS:
-                    LOGGER.warning("SHM rebuild: READY transition incomplete (result=%s), continuing", result)
+                LOGGER.debug("SHM rebuild: pipeline PLAYING -> NULL (drain Hailo buffers)")
+                self.pipeline.set_state(Gst.State.NULL)
+                self.pipeline.get_state(5 * Gst.SECOND)
+                bus = self.pipeline.get_bus()
+                if bus:
+                    bus.remove_signal_watch()
+                self.pipeline = None
+                # The Hailo PCIe driver needs time to fully release DMA
+                # buffer mappings before new ones can be allocated.
+                # Without this delay, hailo_vdma_buffer_map triggers
+                # kernel warnings (find_vma race) and a segfault.
+                LOGGER.debug("SHM rebuild: waiting for Hailo DMA release")
+                time.sleep(2.0)
 
             # Reset ByteTracker to clear stale predictions from old resolution
             if hasattr(self, 'user_data') and hasattr(self.user_data, 'byte_tracker'):
                 self.user_data.byte_tracker.reset()
                 LOGGER.debug("SHM rebuild: ByteTracker reset")
 
-            return self._rebuild_pipeline()
+            # Now build a fresh pipeline from scratch (skip base class
+            # teardown since we already did it above).
+            self.watchdog_paused = True
+            self.rebuild_count += 1
+            try:
+                LOGGER.debug("SHM rebuild: creating new pipeline")
+                pipeline_string = self.get_pipeline_string()
+                LOGGER.debug("SHM rebuild: pipeline string: %s", pipeline_string)
+
+                self.pipeline = Gst.parse_launch(pipeline_string)
+
+                bus = self.pipeline.get_bus()
+                bus.add_signal_watch()
+                bus.connect("message", self.bus_call, self.loop)
+
+                self._connect_callback()
+                self._on_pipeline_rebuilt()
+
+                from hailo_apps.python.core.gstreamer.gstreamer_app import disable_qos
+                disable_qos(self.pipeline)
+
+                ret = self.pipeline.set_state(Gst.State.PLAYING)
+                if ret == Gst.StateChangeReturn.FAILURE:
+                    LOGGER.error("SHM rebuild: failed to start new pipeline")
+                    self.loop.quit()
+                    return False
+
+                LOGGER.info("SHM rebuild: pipeline rebuilt and playing")
+                self.watchdog_paused = False
+            except Exception as e:
+                LOGGER.error("SHM rebuild: exception: %s", e)
+                import traceback
+                traceback.print_exc()
+                self.loop.quit()
+            return False
 
         def on_eos(self):
             if self._eos_reached is not None:
@@ -612,21 +679,42 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 config_json=self.labels_json,
             )
 
-            tiling_mode = 1 if self.use_multi_scale else 0
-            scale_level = self.scale_level if self.use_multi_scale else 0
-            tile_cropper_pipeline = TILE_CROPPER_PIPELINE(
-                detection_pipeline,
-                name='tile_cropper_wrapper',
-                internal_offset=True,
-                scale_level=scale_level,
-                tiling_mode=tiling_mode,
-                tiles_along_x_axis=self.tiles_x,
-                tiles_along_y_axis=self.tiles_y,
-                overlap_x_axis=self.overlap_x,
-                overlap_y_axis=self.overlap_y,
-                iou_threshold=self.iou_threshold,
-                border_threshold=self.border_threshold,
+            # Detect identity case: 1x1 tiles where frame matches model
+            # input exactly.  The hailotilecropper has a DMA buffer-pool
+            # negotiation bug in this passthrough path (no scaling needed)
+            # that crashes the Hailo PCIe driver.  Skip the tile cropper
+            # entirely — the inference pipeline processes the full frame
+            # directly and produces identical results since coordinates
+            # map 1:1 when frame_size == model_input_size.
+            skip_tiling = (
+                self.tiles_x == 1 and self.tiles_y == 1
+                and not self.use_multi_scale
+                and self.video_width == self.model_input_width
+                and self.video_height == self.model_input_height
             )
+
+            if skip_tiling:
+                LOGGER.info(
+                    "Bypassing tile cropper: 1x1 tiles with frame "
+                    "(%dx%d) matching model input — direct inference",
+                    self.video_width, self.video_height,
+                )
+            else:
+                tiling_mode = 1 if self.use_multi_scale else 0
+                scale_level = self.scale_level if self.use_multi_scale else 0
+                tile_cropper_pipeline = TILE_CROPPER_PIPELINE(
+                    detection_pipeline,
+                    name='tile_cropper_wrapper',
+                    internal_offset=True,
+                    scale_level=scale_level,
+                    tiling_mode=tiling_mode,
+                    tiles_along_x_axis=self.tiles_x,
+                    tiles_along_y_axis=self.tiles_y,
+                    overlap_x_axis=self.overlap_x,
+                    overlap_y_axis=self.overlap_y,
+                    iou_threshold=self.iou_threshold,
+                    border_threshold=self.border_threshold,
+                )
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
@@ -675,7 +763,11 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             else:
                 output_pipeline = primary_branch
 
-            pipeline_parts = [source_pipeline, tile_cropper_pipeline]
+            if skip_tiling:
+                # Direct pipeline: source → inference → callback → output
+                pipeline_parts = [source_pipeline, detection_pipeline]
+            else:
+                pipeline_parts = [source_pipeline, tile_cropper_pipeline]
             pipeline_parts.extend([user_callback_pipeline, output_pipeline])
 
             return ' ! '.join(pipeline_parts)

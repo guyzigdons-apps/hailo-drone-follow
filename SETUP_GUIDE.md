@@ -66,6 +66,15 @@ git clone -b feature/openhd-integration-new \
 cd ~/OpenHD && sudo ./build_native.sh all
 ```
 
+> **Important — WiFi driver & reboot:** The `all` target builds the WiFi
+> driver (rtl88x2bu via DKMS). A kernel update or `apt upgrade` on the next
+> reboot can overwrite the driver module. If Wi-Fi stops working after a
+> reboot, rebuild **only** the driver:
+> ```bash
+> cd ~/OpenHD && sudo ./build_native.sh driver
+> sudo reboot
+> ```
+
 Rebuilding after code changes only:
 ```bash
 cd ~/OpenHD/OpenHD
@@ -89,7 +98,7 @@ sudo cp ~/hailo-drone-follow/df_params.json /usr/local/share/openhd/df_params.js
 sudo dd if=/dev/urandom of=/usr/local/share/openhd/txrx.key bs=32 count=1 2>/dev/null
 ```
 
-### 6. Configure Camera Mode
+### 6. Enable SHM passthrough (for SHM mode)
 
 See the [Camera Modes](#camera-modes) section below for choosing and
 configuring Mode A or Mode B.
@@ -98,7 +107,13 @@ configuring Mode A or Mode B.
 
 ## Ground Unit Setup
 
-### 1. Clone
+### 1. Install system prerequisites
+
+```bash
+sudo apt install -y dkms
+```
+
+### 2. Clone
 
 ```bash
 cd ~
@@ -108,13 +123,20 @@ git clone -b main https://github.com/barakbk-hailo/OpenHD-SysUtils.git
 git clone -b fix/rpi4-hw-decode https://github.com/barakbk-hailo/qopenHD.git
 ```
 
-### 2. Build OpenHD
+### 3. Build OpenHD
 
 ```bash
 cd ~/OpenHD && sudo ./build_native.sh all
 ```
 
-### 3. Build QOpenHD
+> **Important — WiFi driver & reboot:** Same caveat as the air unit.
+> If Wi-Fi breaks after a reboot, rebuild the driver alone:
+> ```bash
+> cd ~/OpenHD && sudo ./build_native.sh driver
+> sudo reboot
+> ```
+
+### 4. Build QOpenHD
 
 ```bash
 cd ~/qopenHD && sudo ./install_build_dep.sh rpi
@@ -124,7 +146,7 @@ qmake ../.. && make -j$(nproc)
 
 Binary: `~/qopenHD/build/release/QOpenHD`
 
-### 4. Deploy df_params.json & encryption key
+### 5. Deploy df_params.json & encryption key
 
 ```bash
 sudo mkdir -p /usr/local/share/openhd
@@ -133,7 +155,7 @@ scp pi@<air-ip>:/usr/local/share/openhd/txrx.key /tmp/txrx.key
 sudo cp /tmp/txrx.key /usr/local/share/openhd/txrx.key
 ```
 
-### 5. CLI-only mode (recommended)
+### 6. CLI-only mode (recommended)
 
 ```bash
 sudo systemctl set-default multi-user.target && sudo reboot
@@ -202,7 +224,7 @@ drone-follow --input shm:///tmp/openhd_raw_video --no-display \
 ### Step 1 — Air: Start OpenHD
 
 ```bash
-sudo /usr/local/bin/openhd --air --clean-start
+sudo /usr/local/bin/openhd --air
 ```
 
 ### Step 2 — Air: Start drone-follow
@@ -228,7 +250,7 @@ drone-follow --input shm:///tmp/openhd_raw_video --no-display \
 ### Step 3 — Ground: Start OpenHD
 
 ```bash
-sudo /usr/local/bin/openhd --ground --clean-start
+sudo /usr/local/bin/openhd --ground
 ```
 
 ### Step 4 — Ground: Start QOpenHD
@@ -248,6 +270,76 @@ sudo env -u DISPLAY -u WAYLAND_DISPLAY \
 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
     ./build/release/QOpenHD_hailo_dynamic -platform wayland
 ```
+
+---
+
+## Ground Recording & Offline Embedding
+
+QOpenHD can record the live video stream on the ground unit along with
+detection metadata and HUD overlay data. Embedding (compositing BBs and HUD
+onto the video) is done offline with a Python script.
+
+### Recording (in QOpenHD)
+
+Open the **Ground Recording** sidebar panel (Panel 9). Controls:
+
+- **Start/Stop Recording** — tees the raw H.264 stream to file (zero CPU overhead)
+- **Save HUD overlay** toggle — when ON, captures HUD graphics as sparse RGBA
+  tiles alongside the video (`.osd` file)
+
+On stop, the raw `.h264` is automatically muxed to `.mp4` and the raw file is
+deleted. Recordings are saved to `~/Videos/`:
+
+| File | Contents |
+|------|----------|
+| `ground_YYYYMMDD_HHMMSS.mp4` | Raw video (H.264 in MP4 container) |
+| `ground_YYYYMMDD_HHMMSS.jsonl` | Detection bounding boxes (one JSON line per frame) |
+| `ground_YYYYMMDD_HHMMSS.osd` | HUD overlay (OSD3 binary — sparse RGBA tiles) |
+
+### Embedding (offline Python script)
+
+The embed tool composites detections and/or HUD overlay onto the recorded
+video. It runs on the Pi (when OpenHD is off) or on any machine with
+`ffmpeg`, `numpy`, and `Pillow`.
+
+**Location:** `~/qopenHD/tools/embed_recording.py`
+
+**Install dependencies** (if not already available):
+```bash
+pip install numpy Pillow
+```
+
+**Basic usage:**
+```bash
+# Embed latest recording — detections + HUD at 1080p (defaults):
+python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4
+
+# Detections only, keep original resolution:
+python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4 \
+    --no-hud -r original
+
+# HUD only, no bounding boxes:
+python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4 \
+    --no-detections
+
+# Process all recordings in a directory:
+python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ --all
+```
+
+**CLI flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--detections` / `--no-detections` | on | Include detection bounding boxes |
+| `--hud` / `--no-hud` | on | Include HUD overlay |
+| `-r WxH` | `1920x1080` | Output resolution (`original` to keep source res) |
+| `--crf N` | 20 | H.264 quality (lower = better, 0–51) |
+| `--preset` | fast | x264 speed/quality tradeoff |
+| `--suffix` | `_embed` | Output filename suffix |
+| `--all` | off | Process all recordings in directory |
+
+**To use on another machine**, copy the recording files (`.mp4`, `.jsonl`,
+`.osd`) and the script to the host — no QOpenHD build required.
 
 ---
 
