@@ -176,6 +176,11 @@ def main():
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
 
+    # Quiet noisy loggers in pose-gesture mode so [pose-gesture] logs are visible
+    if ui_pre_args.gesture and ui_pre_args.pose:
+        logging.getLogger("drone_follow.control").setLevel(logging.WARNING)
+        logging.getLogger("drone_follow.gesture").setLevel(logging.WARNING)
+
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
     if ui_pre_args.gesture:

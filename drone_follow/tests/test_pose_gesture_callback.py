@@ -98,13 +98,22 @@ class TestWristToHandDetection:
         assert hand.center_x == pytest.approx(0.4)
         assert hand.wrist_x == pytest.approx(0.4)
 
+    def test_wrist_near_shoulder_maps_to_open(self):
+        """Wrist slightly below shoulder (within 10% margin) still counts as open."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import wrist_to_hand_detection
+        wrist = WristDetection(x=0.4, y=0.55, shoulder_x=0.4, shoulder_y=0.5,
+                                confidence=0.9, timestamp=1.0)
+        hand = wrist_to_hand_detection(wrist)
+        assert hand is not None
+        assert hand.is_open is True  # wrist 0.05 below shoulder, within 0.10 margin
+
     def test_lowered_wrist_maps_to_fist(self):
         from drone_follow.pipeline_adapter.pose_gesture_manager import wrist_to_hand_detection
         wrist = WristDetection(x=0.4, y=0.7, shoulder_x=0.4, shoulder_y=0.5,
                                 confidence=0.9, timestamp=1.0)
         hand = wrist_to_hand_detection(wrist)
         assert hand is not None
-        assert hand.is_open is False  # wrist below shoulder
+        assert hand.is_open is False  # wrist 0.20 below shoulder, beyond 0.10 margin
 
 
 class TestSelectActiveWrist:

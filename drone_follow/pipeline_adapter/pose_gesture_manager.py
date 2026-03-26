@@ -132,7 +132,11 @@ def wrist_to_hand_detection(wrist: WristDetection) -> HandDetection:
     Returns:
         HandDetection compatible with gesture controller.
     """
-    is_open = wrist.y < wrist.shoulder_y  # lower y = higher in frame
+    # Wrist is "raised" if within 10% of frame height below the shoulder.
+    # This tolerance handles natural arm positions where the wrist is near
+    # shoulder level but not strictly above it.
+    margin = 0.10
+    is_open = wrist.y < (wrist.shoulder_y + margin)
     return HandDetection(
         center_x=wrist.x,
         center_y=wrist.y,
@@ -388,24 +392,48 @@ def pose_gesture_app_callback(element, buffer, user_data):
     # --- Colorize active person ---
     _colorize_pose_detections(roi, persons, person_to_id, user_data.active_person_id)
 
-    # --- Periodic logging with wave debug info ---
+    # --- Periodic logging with wrist debug info ---
     if now - _pose_last_log_time >= _pose_log_interval:
         _pose_last_log_time = now
+
+        # Wrist position detail for the target person
+        wrist_str = "no-kps"
+        if persons and selected_detection is not None:
+            # Re-extract wrist info for logging (only runs at log interval, not every frame)
+            best_for_log = None
+            for p in persons:
+                tid = person_to_id.get(id(p))
+                target_tid = target_state.get_target() if target_state else None
+                if tid == target_tid:
+                    best_for_log = p
+                    break
+            if best_for_log is not None:
+                import hailo as _hailo_log
+                log_kps = _extract_pose_keypoints(best_for_log, best_for_log.get_bbox())
+                if log_kps:
+                    lw = wrist_from_pose_keypoints(log_kps, "left", now)
+                    rw = wrist_from_pose_keypoints(log_kps, "right", now)
+                    parts = []
+                    if lw:
+                        delta = lw.shoulder_y - lw.y
+                        parts.append(f"L({lw.x:.2f},{lw.y:.2f}) sh={lw.shoulder_y:.2f} d={delta:+.2f}")
+                    if rw:
+                        delta = rw.shoulder_y - rw.y
+                        parts.append(f"R({rw.x:.2f},{rw.y:.2f}) sh={rw.shoulder_y:.2f} d={delta:+.2f}")
+                    wrist_str = " | ".join(parts) if parts else "no-wrists"
+
         hand_str = "none"
         if hand is not None:
-            hand_str = f"{'open' if hand.is_open else 'fist'} ({hand.center_x:.2f},{hand.center_y:.2f})"
-        face_str = "none"
-        if selected_detection is not None:
-            face_str = f"({selected_detection.center_x:.2f},{selected_detection.center_y:.2f})"
+            hand_str = f"{'OPEN' if hand.is_open else 'fist'} ({hand.center_x:.2f},{hand.center_y:.2f})"
         active_id = user_data.active_person_id
-        lock_str = f"active={active_id}" if active_id is not None else "active=none"
-        # Wave detector debug: show reversal count per person
+        lock_str = f"LOCKED={active_id}" if active_id is not None else "unlocked"
+        # Wave detector reversal counts
         wave_dbg = ""
         for tid, wd in user_data.wave_detectors.items():
             rev_count = len(wd._reversals)
             wave_dbg += f" wd[{tid}]={rev_count}rev"
-        log_msg = (f"[pose-gesture] hand={hand_str} person={face_str} "
-                   f"{lock_str} persons={len(persons)}{wave_dbg}")
+        log_msg = (f"[pose-gesture] {lock_str} hand={hand_str} "
+                   f"wrists=[{wrist_str}] persons={len(persons)}{wave_dbg}")
         LOGGER.info(log_msg)
         if ui_state is not None:
             ui_state.push_log(log_msg)
