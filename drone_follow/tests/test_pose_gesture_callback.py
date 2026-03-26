@@ -142,14 +142,19 @@ class TestSelectActiveWrist:
 
 
 class TestDetectTpose:
-    """Test T-pose detection from keypoints."""
+    """Test T-pose detection from keypoints.
+
+    T-pose requires: wrists + elbows at shoulder height, elbows between
+    shoulder and wrist, arms spread wide.
+    """
 
     def test_tpose_detected(self):
-        """Arms horizontal at shoulder height, spread wide."""
+        """Arms fully extended horizontal — classic T-pose."""
         from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
         kps = _make_keypoints(
             left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
-            left_wrist=(0.1, 0.5), right_wrist=(0.9, 0.5),  # wide spread, same height
+            left_elbow=(0.25, 0.5), right_elbow=(0.75, 0.5),
+            left_wrist=(0.1, 0.5), right_wrist=(0.9, 0.5),
         )
         assert detect_tpose(kps) is True
 
@@ -158,7 +163,8 @@ class TestDetectTpose:
         from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
         kps = _make_keypoints(
             left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
-            left_wrist=(0.1, 0.55), right_wrist=(0.9, 0.45),  # slight offset
+            left_elbow=(0.25, 0.53), right_elbow=(0.75, 0.47),
+            left_wrist=(0.1, 0.55), right_wrist=(0.9, 0.45),
         )
         assert detect_tpose(kps) is True
 
@@ -167,7 +173,8 @@ class TestDetectTpose:
         from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
         kps = _make_keypoints(
             left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
-            left_wrist=(0.35, 0.8), right_wrist=(0.65, 0.8),  # down at sides
+            left_elbow=(0.38, 0.65), right_elbow=(0.62, 0.65),
+            left_wrist=(0.35, 0.8), right_wrist=(0.65, 0.8),
         )
         assert detect_tpose(kps) is False
 
@@ -176,11 +183,45 @@ class TestDetectTpose:
         from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
         kps = _make_keypoints(
             left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
-            left_wrist=(0.42, 0.5), right_wrist=(0.58, 0.5),  # inside shoulders
+            left_elbow=(0.41, 0.5), right_elbow=(0.59, 0.5),
+            left_wrist=(0.42, 0.5), right_wrist=(0.58, 0.5),
         )
         assert detect_tpose(kps) is False
 
-    def test_missing_keypoints_not_tpose(self):
+    def test_bent_arms_raised_not_tpose(self):
+        """Hands raised to shoulder height but elbows bent (not extended).
+        Elbows are below shoulder height — should NOT trigger T-pose."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_elbow=(0.38, 0.7), right_elbow=(0.62, 0.7),  # elbows low
+            left_wrist=(0.3, 0.5), right_wrist=(0.7, 0.5),    # wrists at shoulder
+        )
+        assert detect_tpose(kps) is False
+
+    def test_elbows_not_between_shoulder_and_wrist(self):
+        """Elbows outside the shoulder-to-wrist span (e.g., behind body)."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_elbow=(0.45, 0.5), right_elbow=(0.55, 0.5),  # elbows INSIDE shoulders
+            left_wrist=(0.1, 0.5), right_wrist=(0.9, 0.5),
+        )
+        # Elbows should be between shoulder and wrist X, not inside shoulder span
+        # Left: shoulder=0.4, wrist=0.1, elbow=0.45 → 0.45 > 0.4 → not between
+        assert detect_tpose(kps) is False
+
+    def test_missing_elbow_not_tpose(self):
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_elbow=(0.25, 0.5), right_elbow=(0.75, 0.5),
+            left_wrist=(0.1, 0.5), right_wrist=(0.9, 0.5),
+        )
+        kps[7] = None  # LEFT_ELBOW
+        assert detect_tpose(kps) is False
+
+    def test_missing_wrist_not_tpose(self):
         from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
         kps = _make_keypoints()
         kps[LEFT_WRIST] = None
@@ -224,18 +265,58 @@ class TestDetectXpose:
         assert detect_xpose(kps) is False
 
 
-class TestWaveDetectionWithWrist:
-    """Verify WaveDetector works with wrist X coordinates (same as palm X)."""
+class TestPoseHoldTimer:
+    """Test hold timer for sustained pose detection."""
 
-    def test_wrist_oscillation_detects_wave(self):
-        wd = WaveDetector(reversals_needed=3, window_s=2.0)
+    def test_triggers_after_hold_duration(self):
+        from drone_follow.pipeline_adapter.pose_gesture_manager import PoseHoldTimer
+        timer = PoseHoldTimer(hold_duration_s=2.0)
         t = 0.0
-        # Simulate wrist oscillating left-right
-        positions = [0.3, 0.5, 0.3, 0.5, 0.3]
-        detected = False
-        for x in positions:
-            t += 0.2
-            if wd.update(x, t):
-                detected = True
+        # Hold for 2.5 seconds
+        for _ in range(25):
+            t += 0.1
+            result = timer.update(True, t)
+            if result:
                 break
-        assert detected
+        assert result is True
+        assert t >= 2.0
+
+    def test_resets_on_interruption(self):
+        from drone_follow.pipeline_adapter.pose_gesture_manager import PoseHoldTimer
+        timer = PoseHoldTimer(hold_duration_s=2.0)
+        # Hold for 1 second then break
+        for i in range(10):
+            timer.update(True, i * 0.1)
+        timer.update(False, 1.1)  # break
+        # Hold again for 1.5 seconds — should NOT trigger (restarted)
+        triggered = False
+        for i in range(15):
+            if timer.update(True, 1.2 + i * 0.1):
+                triggered = True
+                break
+        assert not triggered  # only 1.5s of the new hold, needs 2.0
+
+    def test_no_double_trigger(self):
+        from drone_follow.pipeline_adapter.pose_gesture_manager import PoseHoldTimer
+        timer = PoseHoldTimer(hold_duration_s=1.0)
+        # Hold for 2 seconds
+        triggers = 0
+        for i in range(20):
+            if timer.update(True, i * 0.1):
+                triggers += 1
+        assert triggers == 1  # only fires once
+
+    def test_reset_allows_retrigger(self):
+        from drone_follow.pipeline_adapter.pose_gesture_manager import PoseHoldTimer
+        timer = PoseHoldTimer(hold_duration_s=1.0)
+        # First trigger
+        for i in range(15):
+            timer.update(True, i * 0.1)
+        assert timer._triggered
+        timer.reset()
+        # Second trigger
+        triggered = False
+        for i in range(15):
+            if timer.update(True, 2.0 + i * 0.1):
+                triggered = True
+        assert triggered

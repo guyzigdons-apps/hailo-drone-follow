@@ -175,28 +175,46 @@ def select_active_wrist(
 def detect_tpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
                  y_tolerance: float = 0.12,
                  min_arm_spread: float = 0.25) -> bool:
-    """Detect T-pose: both arms extended horizontally at shoulder height.
+    """Detect T-pose: both arms fully extended horizontally at shoulder height.
 
-    Criteria:
-    - Both wrists at roughly shoulder height (within y_tolerance)
-    - Both wrists outside their respective shoulders (arms spread)
-    - Wrist-to-wrist horizontal spread > min_arm_spread
+    Checks (all must pass):
+    1. Both wrists at shoulder Y height (within y_tolerance)
+    2. Both elbows at shoulder Y height (within y_tolerance) — prevents
+       false positives from bent-arm raises (hands near head)
+    3. Elbows horizontally between their shoulder and wrist — confirms
+       arm is extended outward, not bent upward
+    4. Wrists extend beyond the shoulder span
+    5. Wrist-to-wrist horizontal spread > min_arm_spread
     """
     lw = keypoints.get(LEFT_WRIST)
     rw = keypoints.get(RIGHT_WRIST)
     ls = keypoints.get(LEFT_SHOULDER)
     rs = keypoints.get(RIGHT_SHOULDER)
-    if not all([lw, rw, ls, rs]):
+    le = keypoints.get(LEFT_ELBOW)
+    re = keypoints.get(RIGHT_ELBOW)
+    if not all([lw, rw, ls, rs, le, re]):
         return False
 
-    # Both wrists near shoulder height
+    # 1. Both wrists near shoulder height
     if abs(lw[1] - ls[1]) > y_tolerance:
         return False
     if abs(rw[1] - rs[1]) > y_tolerance:
         return False
 
-    # Wrists must extend beyond the shoulder span (direction-agnostic,
-    # works whether person faces toward or away from camera).
+    # 2. Both elbows near shoulder height (arms horizontal, not bent up)
+    if abs(le[1] - ls[1]) > y_tolerance:
+        return False
+    if abs(re[1] - rs[1]) > y_tolerance:
+        return False
+
+    # 3. Elbows between shoulder and wrist horizontally (arm extended outward)
+    # Use min/max to be direction-agnostic (works facing toward or away from camera)
+    if not (min(ls[0], lw[0]) <= le[0] <= max(ls[0], lw[0])):
+        return False
+    if not (min(rs[0], rw[0]) <= re[0] <= max(rs[0], rw[0])):
+        return False
+
+    # 4. Wrists extend beyond the shoulder span
     shoulder_left_x = min(ls[0], rs[0])
     shoulder_right_x = max(ls[0], rs[0])
     wrist_left_x = min(lw[0], rw[0])
@@ -206,7 +224,7 @@ def detect_tpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
     if wrist_right_x < shoulder_right_x:
         return False
 
-    # Sufficient horizontal spread
+    # 5. Sufficient horizontal spread
     arm_spread = wrist_right_x - wrist_left_x
     if arm_spread < min_arm_spread:
         return False
@@ -217,12 +235,12 @@ def detect_tpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
 def detect_xpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
                  cross_tolerance: float = 0.15,
                  y_tolerance: float = 0.20) -> bool:
-    """Detect X-pose: arms crossed over chest.
+    """Detect X-pose: arms crossed over chest, wrists overlapping.
 
-    Criteria:
-    - Wrists are crossed: left wrist is to the RIGHT of right wrist
-    - Both wrists between shoulder and hip height
-    - Wrists close together (within cross_tolerance)
+    Checks (all must pass):
+    1. Wrists are crossed: left wrist X > right wrist X (swapped sides)
+    2. Wrists close together (within cross_tolerance distance)
+    3. Both wrists in the torso region (near shoulder height)
     """
     lw = keypoints.get(LEFT_WRIST)
     rw = keypoints.get(RIGHT_WRIST)
@@ -231,16 +249,16 @@ def detect_xpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
     if not all([lw, rw, ls, rs]):
         return False
 
-    # Wrists are crossed: left wrist x > right wrist x
+    # 1. Wrists are crossed: left wrist x > right wrist x
     if lw[0] <= rw[0]:
         return False
 
-    # Wrists close together
+    # 2. Wrists close together
     wrist_dist = math.sqrt((lw[0] - rw[0]) ** 2 + (lw[1] - rw[1]) ** 2)
     if wrist_dist > cross_tolerance:
         return False
 
-    # Both wrists in the torso region (between shoulders and a margin below)
+    # 3. Both wrists in the torso region (between shoulders and a margin below)
     shoulder_y = (ls[1] + rs[1]) / 2
     if lw[1] < shoulder_y - y_tolerance or lw[1] > shoulder_y + y_tolerance * 2:
         return False
@@ -248,6 +266,58 @@ def detect_xpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
         return False
 
     return True
+
+
+class PoseHoldTimer:
+    """Requires a pose to be held continuously for a duration before triggering.
+
+    Usage:
+        timer = PoseHoldTimer(hold_duration_s=3.0)
+        # Called every frame:
+        if timer.update(is_pose_detected, timestamp):
+            # Pose held long enough — trigger action
+    """
+
+    def __init__(self, hold_duration_s: float = 3.0):
+        self.hold_duration_s = hold_duration_s
+        self._start_time: Optional[float] = None
+        self._triggered = False
+
+    def update(self, detected: bool, timestamp: float) -> bool:
+        """Update with current frame's detection result. Returns True once when hold completes."""
+        if not detected:
+            self._start_time = None
+            self._triggered = False
+            return False
+
+        if self._triggered:
+            return False  # already fired, don't re-trigger
+
+        if self._start_time is None:
+            self._start_time = timestamp
+            return False
+
+        if (timestamp - self._start_time) >= self.hold_duration_s:
+            self._triggered = True
+            return True
+
+        return False
+
+    def reset(self):
+        """Reset the timer for reuse."""
+        self._start_time = None
+        self._triggered = False
+
+    @property
+    def elapsed(self) -> float:
+        """Seconds the pose has been held so far (0.0 if not holding)."""
+        if self._start_time is None:
+            return 0.0
+        return time.monotonic() - self._start_time
+
+    @property
+    def is_holding(self) -> bool:
+        return self._start_time is not None and not self._triggered
 
 
 # ---------------------------------------------------------------------------
@@ -292,33 +362,51 @@ _pose_last_log_time: float = 0.0
 _pose_log_interval: float = 1.0
 
 
-def _colorize_pose_detections(roi, persons, person_to_id, active_person_id, hand_state=None):
-    """Colorize person detections based on lock state.
+def _colorize_pose_detections(roi, persons, person_to_id, user_data, hand_state=None):
+    """Colorize person detections based on lock state and hold progress.
 
-    - Active (wave-locked) person bbox: cyan (0x00FFFF) with "LOCKED" label
-    - Shows hand state (OPEN/FIST) on the locked person's overlay label
+    - Active (locked) person bbox: cyan (0x00FFFF) with state label
+    - Person holding T-pose: yellow (0xFFFF00) with countdown
+    - Active person holding X-pose: red bbox with countdown
     """
     import hailo
+
+    active_person_id = user_data.active_person_id
 
     for det in roi.get_objects_typed(hailo.HAILO_DETECTION):
         if det.get_label() != "person":
             continue
 
-        # Find this detection's track ID
         track_ids = det.get_objects_typed(hailo.HAILO_UNIQUE_ID)
         track_id = track_ids[0].get_id() if track_ids else None
 
         if active_person_id is not None and track_id == active_person_id:
-            # Cyan bbox for active person
-            color_cls = hailo.HailoClassification("overlay_color", 0x00FFFF, "", 0.0)
-            det.add_object(color_cls)
-            # Show state label on overlay
-            if hand_state is not None:
+            # Check if X-pose is being held (disengage countdown)
+            if user_data.xpose_timer.is_holding:
+                elapsed = user_data.xpose_timer.elapsed
+                color_cls = hailo.HailoClassification("overlay_color", 0xFF4444, "", 0.0)
+                det.add_object(color_cls)
+                label = f"X-DISENGAGE {elapsed:.1f}s"
+            elif hand_state is not None:
+                color_cls = hailo.HailoClassification("overlay_color", 0x00FFFF, "", 0.0)
+                det.add_object(color_cls)
                 label = "OPEN" if hand_state else "FIST"
             else:
+                color_cls = hailo.HailoClassification("overlay_color", 0x00FFFF, "", 0.0)
+                det.add_object(color_cls)
                 label = "T-LOCKED"
             state_cls = hailo.HailoClassification("pose_gesture", 0, label, 1.0)
             det.add_object(state_cls)
+        elif active_person_id is None and track_id is not None:
+            # Check if T-pose is being held (lock countdown)
+            timer = user_data.tpose_timers.get(track_id)
+            if timer is not None and timer.is_holding:
+                elapsed = timer.elapsed
+                color_cls = hailo.HailoClassification("overlay_color", 0xFFFF00, "", 0.0)
+                det.add_object(color_cls)
+                label = f"T-POSE {elapsed:.1f}s"
+                state_cls = hailo.HailoClassification("pose_gesture", 0, label, 1.0)
+                det.add_object(state_cls)
 
 
 def pose_gesture_app_callback(element, buffer, user_data):
@@ -404,27 +492,35 @@ def pose_gesture_app_callback(element, buffer, user_data):
             if keypoints:
                 face = face_from_pose_keypoints(keypoints, best.get_confidence(), now)
 
-            # --- T-pose / X-pose detection ---
+            # --- T-pose / X-pose detection with hold timers ---
             visible_ids = set(person_to_id.values())
 
             # If active person lost its track, clear it
             if (user_data.active_person_id is not None
                     and user_data.active_person_id not in visible_ids):
                 user_data.active_person_id = None
+                user_data.xpose_timer.reset()
                 LOGGER.info("[pose-gesture] Active person lost — unlocked")
 
-            # X-pose on active person → disengage
+            # Clean up T-pose timers for persons no longer visible
+            stale = [pid for pid in user_data.tpose_timers if pid not in visible_ids]
+            for pid in stale:
+                del user_data.tpose_timers[pid]
+
+            # X-pose on active person → disengage (after hold)
             if user_data.active_person_id is not None:
                 active_person = person_by_id.get(user_data.active_person_id)
                 if active_person is not None:
                     ap_bbox = active_person.get_bbox()
                     ap_kps = _extract_pose_keypoints(active_person, ap_bbox)
-                    if ap_kps and detect_xpose(ap_kps):
-                        LOGGER.info("[pose-gesture] X-pose detected on person %d — DISENGAGED",
+                    is_xpose = ap_kps and detect_xpose(ap_kps)
+                    if user_data.xpose_timer.update(is_xpose, now):
+                        LOGGER.info("[pose-gesture] X-pose held — person %d DISENGAGED",
                                     user_data.active_person_id)
                         user_data.active_person_id = None
+                        user_data.xpose_timer.reset()
 
-            # T-pose on any person → engage (only if no active person)
+            # T-pose on any person → engage (after hold, only if no active person)
             if user_data.active_person_id is None:
                 for person in persons:
                     p_tid = person_to_id.get(id(person))
@@ -432,9 +528,13 @@ def pose_gesture_app_callback(element, buffer, user_data):
                         continue
                     p_bbox = person.get_bbox()
                     p_kps = _extract_pose_keypoints(person, p_bbox)
-                    if p_kps and detect_tpose(p_kps):
+                    is_tpose = p_kps and detect_tpose(p_kps)
+                    if p_tid not in user_data.tpose_timers:
+                        user_data.tpose_timers[p_tid] = PoseHoldTimer(
+                            hold_duration_s=user_data._tpose_hold_s)
+                    if user_data.tpose_timers[p_tid].update(is_tpose, now):
                         user_data.active_person_id = p_tid
-                        LOGGER.info("[pose-gesture] T-pose detected on person %d — LOCKED", p_tid)
+                        LOGGER.info("[pose-gesture] T-pose held — person %d LOCKED", p_tid)
                         break
 
             # --- Map active wrist to HandDetection after wave ---
@@ -468,7 +568,7 @@ def pose_gesture_app_callback(element, buffer, user_data):
 
     # --- Colorize active person ---
     hand_state = hand.is_open if hand is not None else None
-    _colorize_pose_detections(roi, persons, person_to_id, user_data.active_person_id, hand_state)
+    _colorize_pose_detections(roi, persons, person_to_id, user_data, hand_state)
 
     # --- Periodic logging with wrist debug info ---
     if now - _pose_last_log_time >= _pose_log_interval:
@@ -505,15 +605,17 @@ def pose_gesture_app_callback(element, buffer, user_data):
             hand_str = f"{'OPEN' if hand.is_open else 'fist'} ({hand.center_x:.2f},{hand.center_y:.2f})"
         active_id = user_data.active_person_id
         lock_str = f"T-LOCKED={active_id}" if active_id is not None else "unlocked (do T-pose to lock)"
-        # Pose detection debug
+        # Pose + hold timer debug
         pose_dbg = ""
         if persons and selected_detection is not None:
             best_for_pose = None
+            best_tid = None
             for p in persons:
                 tid = person_to_id.get(id(p))
                 target_tid = target_state.get_target() if target_state else None
                 if tid == target_tid:
                     best_for_pose = p
+                    best_tid = tid
                     break
             if best_for_pose is not None:
                 p_kps = _extract_pose_keypoints(best_for_pose, best_for_pose.get_bbox())
@@ -521,9 +623,12 @@ def pose_gesture_app_callback(element, buffer, user_data):
                     is_t = detect_tpose(p_kps)
                     is_x = detect_xpose(p_kps)
                     if is_t:
-                        pose_dbg = " pose=T-POSE!"
+                        timer = user_data.tpose_timers.get(best_tid)
+                        hold = f" {timer.elapsed:.1f}s" if timer and timer.is_holding else ""
+                        pose_dbg = f" pose=T-POSE{hold}"
                     elif is_x:
-                        pose_dbg = " pose=X-POSE!"
+                        hold = f" {user_data.xpose_timer.elapsed:.1f}s" if user_data.xpose_timer.is_holding else ""
+                        pose_dbg = f" pose=X-POSE{hold}"
         log_msg = (f"[pose-gesture] {lock_str} hand={hand_str} "
                    f"wrists=[{wrist_str}] persons={len(persons)}{pose_dbg}")
         LOGGER.info(log_msg)
@@ -576,9 +681,14 @@ def create_pose_gesture_app(shared_state, gesture_state, target_state=None, eos_
             self.byte_tracker = byte_tracker
             self.velocity_state = velocity_state
             self.controller_config = controller_config
-            # Wave detection state (runs in callback, not in drone control loop)
-            self.wave_detectors = {}       # legacy, kept for compat
-            self.active_person_id = None   # track ID of the wave-qualified person
+            self.active_person_id = None   # track ID of the locked person
+            # Hold timers: pose must be sustained for N seconds before triggering
+            # Configurable here — not CLI flags, tuned in code
+            TPOSE_HOLD_S = 3.0   # seconds to hold T-pose before locking
+            XPOSE_HOLD_S = 2.0   # seconds to hold X-pose before disengaging
+            self.tpose_timers = {}   # {person_track_id: PoseHoldTimer}
+            self.xpose_timer = PoseHoldTimer(hold_duration_s=XPOSE_HOLD_S)
+            self._tpose_hold_s = TPOSE_HOLD_S
 
     class PoseGestureApp(GStreamerApp):
         """Pose estimation pipeline with EOS handling and optional MJPEG appsink."""
