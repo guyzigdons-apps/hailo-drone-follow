@@ -13,6 +13,7 @@ from drone_follow.follow_api.types import (
     FaceDetection, HandDetection, GestureDetection, WristDetection,
 )
 from drone_follow.follow_api.gesture_controller import WaveDetector
+from drone_follow.pipeline_adapter.pose_gesture_manager import LEFT_WRIST, RIGHT_WRIST
 
 
 # --- Helper to simulate pose keypoints as a dict ---
@@ -138,6 +139,89 @@ class TestSelectActiveWrist:
     def test_no_wrists_returns_none(self):
         from drone_follow.pipeline_adapter.pose_gesture_manager import select_active_wrist
         assert select_active_wrist(None, None) is None
+
+
+class TestDetectTpose:
+    """Test T-pose detection from keypoints."""
+
+    def test_tpose_detected(self):
+        """Arms horizontal at shoulder height, spread wide."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_wrist=(0.1, 0.5), right_wrist=(0.9, 0.5),  # wide spread, same height
+        )
+        assert detect_tpose(kps) is True
+
+    def test_tpose_with_slight_y_offset(self):
+        """Arms near shoulder height within tolerance."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_wrist=(0.1, 0.55), right_wrist=(0.9, 0.45),  # slight offset
+        )
+        assert detect_tpose(kps) is True
+
+    def test_arms_down_not_tpose(self):
+        """Arms at sides = not T-pose."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_wrist=(0.35, 0.8), right_wrist=(0.65, 0.8),  # down at sides
+        )
+        assert detect_tpose(kps) is False
+
+    def test_arms_not_spread_not_tpose(self):
+        """Arms at shoulder height but not spread wide."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_wrist=(0.42, 0.5), right_wrist=(0.58, 0.5),  # inside shoulders
+        )
+        assert detect_tpose(kps) is False
+
+    def test_missing_keypoints_not_tpose(self):
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_tpose
+        kps = _make_keypoints()
+        kps[LEFT_WRIST] = None
+        assert detect_tpose(kps) is False
+
+
+class TestDetectXpose:
+    """Test X-pose (arms crossed) detection."""
+
+    def test_xpose_detected(self):
+        """Arms crossed over chest — left wrist right of right wrist."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_xpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_wrist=(0.55, 0.55), right_wrist=(0.45, 0.55),  # crossed
+        )
+        assert detect_xpose(kps) is True
+
+    def test_uncrossed_arms_not_xpose(self):
+        """Normal arm position — not crossed."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_xpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_wrist=(0.35, 0.7), right_wrist=(0.65, 0.7),  # normal sides
+        )
+        assert detect_xpose(kps) is False
+
+    def test_wrists_crossed_but_too_far_apart(self):
+        """Crossed but wrists far apart — not a tight X."""
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_xpose
+        kps = _make_keypoints(
+            left_shoulder=(0.4, 0.5), right_shoulder=(0.6, 0.5),
+            left_wrist=(0.8, 0.55), right_wrist=(0.2, 0.55),  # crossed but wide
+        )
+        assert detect_xpose(kps) is False
+
+    def test_missing_keypoints_not_xpose(self):
+        from drone_follow.pipeline_adapter.pose_gesture_manager import detect_xpose
+        kps = _make_keypoints()
+        kps[RIGHT_WRIST] = None
+        assert detect_xpose(kps) is False
 
 
 class TestWaveDetectionWithWrist:

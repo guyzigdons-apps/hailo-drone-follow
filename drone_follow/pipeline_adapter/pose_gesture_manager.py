@@ -172,8 +172,81 @@ def select_active_wrist(
     return left if left.y < right.y else right
 
 
+def detect_tpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
+                 y_tolerance: float = 0.12,
+                 min_arm_spread: float = 0.25) -> bool:
+    """Detect T-pose: both arms extended horizontally at shoulder height.
+
+    Criteria:
+    - Both wrists at roughly shoulder height (within y_tolerance)
+    - Both wrists outside their respective shoulders (arms spread)
+    - Wrist-to-wrist horizontal spread > min_arm_spread
+    """
+    lw = keypoints.get(LEFT_WRIST)
+    rw = keypoints.get(RIGHT_WRIST)
+    ls = keypoints.get(LEFT_SHOULDER)
+    rs = keypoints.get(RIGHT_SHOULDER)
+    if not all([lw, rw, ls, rs]):
+        return False
+
+    # Both wrists near shoulder height
+    if abs(lw[1] - ls[1]) > y_tolerance:
+        return False
+    if abs(rw[1] - rs[1]) > y_tolerance:
+        return False
+
+    # Wrists outside shoulders (left wrist left of left shoulder, right wrist right of right shoulder)
+    if lw[0] > ls[0]:  # left wrist should be to the LEFT (smaller x)
+        return False
+    if rw[0] < rs[0]:  # right wrist should be to the RIGHT (larger x)
+        return False
+
+    # Sufficient horizontal spread
+    arm_spread = abs(rw[0] - lw[0])
+    if arm_spread < min_arm_spread:
+        return False
+
+    return True
+
+
+def detect_xpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
+                 cross_tolerance: float = 0.15,
+                 y_tolerance: float = 0.20) -> bool:
+    """Detect X-pose: arms crossed over chest.
+
+    Criteria:
+    - Wrists are crossed: left wrist is to the RIGHT of right wrist
+    - Both wrists between shoulder and hip height
+    - Wrists close together (within cross_tolerance)
+    """
+    lw = keypoints.get(LEFT_WRIST)
+    rw = keypoints.get(RIGHT_WRIST)
+    ls = keypoints.get(LEFT_SHOULDER)
+    rs = keypoints.get(RIGHT_SHOULDER)
+    if not all([lw, rw, ls, rs]):
+        return False
+
+    # Wrists are crossed: left wrist x > right wrist x
+    if lw[0] <= rw[0]:
+        return False
+
+    # Wrists close together
+    wrist_dist = math.sqrt((lw[0] - rw[0]) ** 2 + (lw[1] - rw[1]) ** 2)
+    if wrist_dist > cross_tolerance:
+        return False
+
+    # Both wrists in the torso region (between shoulders and a margin below)
+    shoulder_y = (ls[1] + rs[1]) / 2
+    if lw[1] < shoulder_y - y_tolerance or lw[1] > shoulder_y + y_tolerance * 2:
+        return False
+    if rw[1] < shoulder_y - y_tolerance or rw[1] > shoulder_y + y_tolerance * 2:
+        return False
+
+    return True
+
+
 # ---------------------------------------------------------------------------
-# Task 3: GStreamer callback helpers and callback
+# GStreamer callback helpers and callback
 # ---------------------------------------------------------------------------
 
 def _extract_pose_keypoints(detection, bbox) -> Dict[int, Tuple[float, float]]:
@@ -234,12 +307,12 @@ def _colorize_pose_detections(roi, persons, person_to_id, active_person_id, hand
             # Cyan bbox for active person
             color_cls = hailo.HailoClassification("overlay_color", 0x00FFFF, "", 0.0)
             det.add_object(color_cls)
-            # Add "LOCKED" or hand state label visible on overlay
+            # Show state label on overlay
             if hand_state is not None:
                 label = "OPEN" if hand_state else "FIST"
-                state_cls = hailo.HailoClassification("pose_gesture", 0, label, 1.0)
             else:
-                state_cls = hailo.HailoClassification("pose_gesture", 0, "LOCKED", 1.0)
+                label = "T-LOCKED"
+            state_cls = hailo.HailoClassification("pose_gesture", 0, label, 1.0)
             det.add_object(state_cls)
 
 
@@ -326,45 +399,37 @@ def pose_gesture_app_callback(element, buffer, user_data):
             if keypoints:
                 face = face_from_pose_keypoints(keypoints, best.get_confidence(), now)
 
-            # --- Wave detection: runs on all visible persons ---
-            # Build map of track_id -> (person, keypoints) for wave candidates
+            # --- T-pose / X-pose detection ---
             visible_ids = set(person_to_id.values())
-
-            # Clean up wave detectors for persons no longer visible
-            stale = [pid for pid in user_data.wave_detectors if pid not in visible_ids]
-            for pid in stale:
-                del user_data.wave_detectors[pid]
 
             # If active person lost its track, clear it
             if (user_data.active_person_id is not None
                     and user_data.active_person_id not in visible_ids):
                 user_data.active_person_id = None
+                LOGGER.info("[pose-gesture] Active person lost — unlocked")
 
-            # Run wave detection on each visible person (only if no active person yet)
+            # X-pose on active person → disengage
+            if user_data.active_person_id is not None:
+                active_person = person_by_id.get(user_data.active_person_id)
+                if active_person is not None:
+                    ap_bbox = active_person.get_bbox()
+                    ap_kps = _extract_pose_keypoints(active_person, ap_bbox)
+                    if ap_kps and detect_xpose(ap_kps):
+                        LOGGER.info("[pose-gesture] X-pose detected on person %d — DISENGAGED",
+                                    user_data.active_person_id)
+                        user_data.active_person_id = None
+
+            # T-pose on any person → engage (only if no active person)
             if user_data.active_person_id is None:
-                cfg = getattr(user_data, 'controller_config', None)
                 for person in persons:
                     p_tid = person_to_id.get(id(person))
                     if p_tid is None:
                         continue
                     p_bbox = person.get_bbox()
                     p_kps = _extract_pose_keypoints(person, p_bbox)
-                    if not p_kps:
-                        continue
-                    left_wrist = wrist_from_pose_keypoints(p_kps, "left", now)
-                    right_wrist = wrist_from_pose_keypoints(p_kps, "right", now)
-                    active_wrist = select_active_wrist(left_wrist, right_wrist)
-                    if active_wrist is None:
-                        continue
-                    if p_tid not in user_data.wave_detectors:
-                        user_data.wave_detectors[p_tid] = WaveDetector(
-                            reversals_needed=cfg.gesture_wave_reversals if cfg else 3,
-                            window_s=cfg.gesture_wave_window_s if cfg else 1.5,
-                        )
-                    wd = user_data.wave_detectors[p_tid]
-                    if wd.update(active_wrist.x, now):
+                    if p_kps and detect_tpose(p_kps):
                         user_data.active_person_id = p_tid
-                        LOGGER.info("[pose-gesture] Wave detected on person %d — active", p_tid)
+                        LOGGER.info("[pose-gesture] T-pose detected on person %d — LOCKED", p_tid)
                         break
 
             # --- Map active wrist to HandDetection after wave ---
@@ -434,14 +499,28 @@ def pose_gesture_app_callback(element, buffer, user_data):
         if hand is not None:
             hand_str = f"{'OPEN' if hand.is_open else 'fist'} ({hand.center_x:.2f},{hand.center_y:.2f})"
         active_id = user_data.active_person_id
-        lock_str = f"LOCKED={active_id}" if active_id is not None else "unlocked"
-        # Wave detector reversal counts
-        wave_dbg = ""
-        for tid, wd in user_data.wave_detectors.items():
-            rev_count = len(wd._reversals)
-            wave_dbg += f" wd[{tid}]={rev_count}rev"
+        lock_str = f"T-LOCKED={active_id}" if active_id is not None else "unlocked (do T-pose to lock)"
+        # Pose detection debug
+        pose_dbg = ""
+        if persons and selected_detection is not None:
+            best_for_pose = None
+            for p in persons:
+                tid = person_to_id.get(id(p))
+                target_tid = target_state.get_target() if target_state else None
+                if tid == target_tid:
+                    best_for_pose = p
+                    break
+            if best_for_pose is not None:
+                p_kps = _extract_pose_keypoints(best_for_pose, best_for_pose.get_bbox())
+                if p_kps:
+                    is_t = detect_tpose(p_kps)
+                    is_x = detect_xpose(p_kps)
+                    if is_t:
+                        pose_dbg = " pose=T-POSE!"
+                    elif is_x:
+                        pose_dbg = " pose=X-POSE!"
         log_msg = (f"[pose-gesture] {lock_str} hand={hand_str} "
-                   f"wrists=[{wrist_str}] persons={len(persons)}{wave_dbg}")
+                   f"wrists=[{wrist_str}] persons={len(persons)}{pose_dbg}")
         LOGGER.info(log_msg)
         if ui_state is not None:
             ui_state.push_log(log_msg)
@@ -493,7 +572,7 @@ def create_pose_gesture_app(shared_state, gesture_state, target_state=None, eos_
             self.velocity_state = velocity_state
             self.controller_config = controller_config
             # Wave detection state (runs in callback, not in drone control loop)
-            self.wave_detectors = {}       # {person_track_id: WaveDetector}
+            self.wave_detectors = {}       # legacy, kept for compat
             self.active_person_id = None   # track ID of the wave-qualified person
 
     class PoseGestureApp(GStreamerApp):
