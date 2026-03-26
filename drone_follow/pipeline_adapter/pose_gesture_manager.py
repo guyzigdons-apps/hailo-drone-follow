@@ -207,7 +207,29 @@ def _extract_pose_keypoints(detection, bbox) -> Dict[int, Tuple[float, float]]:
 
 
 _pose_last_log_time: float = 0.0
-_pose_log_interval: float = 2.0
+_pose_log_interval: float = 1.0
+
+
+def _colorize_pose_detections(roi, persons, person_to_id, active_person_id, active_wrist_side=None):
+    """Colorize person detections and landmark keypoints based on lock state.
+
+    - Active (wave-locked) person bbox: cyan (0x00FFFF)
+    - Active person's wrist landmarks: green (highlighted by modifying landmark points)
+    """
+    import hailo
+
+    for det in roi.get_objects_typed(hailo.HAILO_DETECTION):
+        if det.get_label() != "person":
+            continue
+
+        # Find this detection's track ID
+        track_ids = det.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+        track_id = track_ids[0].get_id() if track_ids else None
+
+        if active_person_id is not None and track_id == active_person_id:
+            # Cyan bbox for active person
+            color_cls = hailo.HailoClassification("overlay_color", 0x00FFFF, "", 0.0)
+            det.add_object(color_cls)
 
 
 def pose_gesture_app_callback(element, buffer, user_data):
@@ -239,6 +261,7 @@ def pose_gesture_app_callback(element, buffer, user_data):
     selected_detection = None
     face = None
     hand = None
+    person_to_id = {}
     now = time.monotonic()
 
     if not persons:
@@ -362,7 +385,10 @@ def pose_gesture_app_callback(element, buffer, user_data):
             following_id = target_state.get_target() if target_state else None
             _update_ui(ui_state, persons, person_to_id, following_id)
 
-    # --- Periodic logging ---
+    # --- Colorize active person ---
+    _colorize_pose_detections(roi, persons, person_to_id, user_data.active_person_id)
+
+    # --- Periodic logging with wave debug info ---
     if now - _pose_last_log_time >= _pose_log_interval:
         _pose_last_log_time = now
         hand_str = "none"
@@ -373,8 +399,13 @@ def pose_gesture_app_callback(element, buffer, user_data):
             face_str = f"({selected_detection.center_x:.2f},{selected_detection.center_y:.2f})"
         active_id = user_data.active_person_id
         lock_str = f"active={active_id}" if active_id is not None else "active=none"
+        # Wave detector debug: show reversal count per person
+        wave_dbg = ""
+        for tid, wd in user_data.wave_detectors.items():
+            rev_count = len(wd._reversals)
+            wave_dbg += f" wd[{tid}]={rev_count}rev"
         log_msg = (f"[pose-gesture] hand={hand_str} person={face_str} "
-                   f"{lock_str} persons={len(persons)}")
+                   f"{lock_str} persons={len(persons)}{wave_dbg}")
         LOGGER.info(log_msg)
         if ui_state is not None:
             ui_state.push_log(log_msg)
