@@ -59,13 +59,13 @@ class ControllerConfig:
     gesture_ack_duration_s: float = 1.0
     gesture_ack_amplitude_deg: float = 30.0
     gesture_hand_dead_zone_deg: float = 5.0
-    gesture_kp_hand_yaw: float = 4.0
-    gesture_max_yawspeed: float = 60.0
-    gesture_kp_forward: float = 3.0
-    gesture_max_forward: float = 1.5
+    gesture_kp_hand_yaw: float = 1.5
+    gesture_max_yawspeed: float = 20.0
+    gesture_kp_forward: float = 1.0
+    gesture_max_forward: float = 0.5
     gesture_arm_dead_zone: float = 0.08
-    gesture_max_lateral: float = 1.5   # max lateral speed from gesture overlay (m/s)
-    gesture_kp_lateral: float = 0.3    # proportional gain for gesture lateral control
+    gesture_max_lateral: float = 0.5   # max lateral speed from gesture overlay (m/s)
+    gesture_kp_lateral: float = 0.1    # proportional gain for gesture lateral control
 
     target_altitude: float = 3.0
     log_verbosity: str = "normal"  # quiet | normal | debug

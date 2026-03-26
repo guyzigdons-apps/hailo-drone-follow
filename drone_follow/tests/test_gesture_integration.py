@@ -137,10 +137,10 @@ class TestGestureConfig:
         assert cfg.gesture_ack_duration_s == 1.0
         assert cfg.gesture_ack_amplitude_deg == 30.0
         assert cfg.gesture_hand_dead_zone_deg == 5.0
-        assert cfg.gesture_kp_hand_yaw == 4.0
-        assert cfg.gesture_max_yawspeed == 60.0
-        assert cfg.gesture_kp_forward == 3.0
-        assert cfg.gesture_max_forward == 1.5
+        assert cfg.gesture_kp_hand_yaw == 1.5
+        assert cfg.gesture_max_yawspeed == 20.0
+        assert cfg.gesture_kp_forward == 1.0
+        assert cfg.gesture_max_forward == 0.5
         assert cfg.gesture_arm_dead_zone == 0.08
 
     def test_gesture_fields_in_json_roundtrip(self, tmp_path):
