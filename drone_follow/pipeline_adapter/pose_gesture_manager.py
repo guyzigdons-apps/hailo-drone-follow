@@ -195,14 +195,19 @@ def detect_tpose(keypoints: Dict[int, Optional[Tuple[float, float]]],
     if abs(rw[1] - rs[1]) > y_tolerance:
         return False
 
-    # Wrists outside shoulders (left wrist left of left shoulder, right wrist right of right shoulder)
-    if lw[0] > ls[0]:  # left wrist should be to the LEFT (smaller x)
+    # Wrists must extend beyond the shoulder span (direction-agnostic,
+    # works whether person faces toward or away from camera).
+    shoulder_left_x = min(ls[0], rs[0])
+    shoulder_right_x = max(ls[0], rs[0])
+    wrist_left_x = min(lw[0], rw[0])
+    wrist_right_x = max(lw[0], rw[0])
+    if wrist_left_x > shoulder_left_x:
         return False
-    if rw[0] < rs[0]:  # right wrist should be to the RIGHT (larger x)
+    if wrist_right_x < shoulder_right_x:
         return False
 
     # Sufficient horizontal spread
-    arm_spread = abs(rw[0] - lw[0])
+    arm_spread = wrist_right_x - wrist_left_x
     if arm_spread < min_arm_spread:
         return False
 
