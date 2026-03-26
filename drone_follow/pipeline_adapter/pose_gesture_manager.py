@@ -445,7 +445,6 @@ def create_pose_gesture_app(shared_state, gesture_state, target_state=None, eos_
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
             self._record_lock = threading.Lock()
             self._ffmpeg_proc = None
-            self.app_callback = app_callback
 
             # GStreamerApp takes (args, user_data) — args is the parsed namespace
             super().__init__(parser, user_data)
@@ -453,6 +452,9 @@ def create_pose_gesture_app(shared_state, gesture_state, target_state=None, eos_
             # Override HEF path using hailo-apps resolver
             self.hef_path = resolve_hef_path(
                 self.hef_path, app_name=POSE_ESTIMATION_PIPELINE, arch=self.arch)
+
+            # Set app_callback AFTER super().__init__() — parent sets it to None
+            self.app_callback = app_callback
 
             # Postprocess SO
             self.post_process_so = get_resource_path(
