@@ -490,3 +490,49 @@ class TestOrbitMode:
         assert cmd.yawspeed_deg_s > 0.0  # target right of center
         assert cmd.forward_m_s > 0.0     # small bbox -> approach
         assert cmd.right_m_s == 1.0      # lateral orbit velocity
+
+
+class TestDirectionHoldFilter:
+    """Tests for temporal hysteresis on forward/backward direction changes."""
+
+    def test_same_direction_passes_through(self):
+        from drone_follow.follow_api.controller import _DirectionHoldFilter
+        filt = _DirectionHoldFilter()
+        # First call sets direction and passes through immediately
+        assert filt.filter(0.5, 0.0) == 0.5
+        # Subsequent same-direction calls pass through
+        assert filt.filter(0.5, 0.1) == 0.5
+        assert filt.filter(0.3, 0.2) == 0.3
+
+    def test_direction_change_held_back(self):
+        from drone_follow.follow_api.controller import _DirectionHoldFilter
+        filt = _DirectionHoldFilter()
+        filt._last_sign = 1  # was going forward
+        # Switch to backward — should be held
+        assert filt.filter(-0.5, 1.0) == 0.0  # held
+        assert filt.filter(-0.5, 1.3) == 0.0  # still held (0.3s < 0.8s)
+
+    def test_direction_change_allowed_after_hold(self):
+        from drone_follow.follow_api.controller import _DirectionHoldFilter
+        filt = _DirectionHoldFilter()
+        filt._last_sign = 1  # was going forward
+        filt.filter(-0.5, 1.0)   # start hold
+        filt.filter(-0.5, 1.3)   # still holding
+        result = filt.filter(-0.5, 1.9)  # 0.9s > 0.8s hold time
+        assert result == -0.5  # now allowed
+
+    def test_interrupted_direction_change_resets(self):
+        from drone_follow.follow_api.controller import _DirectionHoldFilter
+        filt = _DirectionHoldFilter()
+        filt._last_sign = 1
+        filt.filter(-0.5, 1.0)   # start backward hold
+        filt.filter(-0.5, 1.3)   # 0.3s into hold
+        filt.filter(0.5, 1.5)    # back to forward — interrupts
+        # Forward should pass through (same as last_sign)
+        assert filt.filter(0.5, 1.6) == 0.5
+
+    def test_zero_passes_through(self):
+        from drone_follow.follow_api.controller import _DirectionHoldFilter
+        filt = _DirectionHoldFilter()
+        filt._last_sign = 1
+        assert filt.filter(0.0, 1.0) == 0.0

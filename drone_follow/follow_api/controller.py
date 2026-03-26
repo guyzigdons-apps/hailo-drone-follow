@@ -60,13 +60,73 @@ class _ForwardDeadZone:
         self._in_dead_zone = True
 
 
-# Module-level dead zone state (reset when smoother is reset)
+class _DirectionHoldFilter:
+    """Temporal hysteresis for forward/backward direction changes.
+
+    Prevents oscillation by requiring a direction change to be sustained
+    for a minimum hold time before the new direction is applied. While
+    waiting, outputs zero (hover).
+
+    Configurable hold time (default: 0.8s). Set to 0 to disable.
+    """
+    HOLD_TIME_S = 0.8  # seconds a new direction must be sustained before acting
+
+    def __init__(self):
+        self._last_sign: int = 0      # -1, 0, +1
+        self._pending_sign: int = 0   # direction waiting to be confirmed
+        self._pending_since: float = 0.0
+
+    def filter(self, raw_speed: float, now: float) -> float:
+        """Filter forward speed. Returns 0 during direction-change hold period."""
+        if self.HOLD_TIME_S <= 0:
+            return raw_speed
+
+        if raw_speed == 0.0:
+            self._pending_sign = 0
+            return 0.0
+
+        new_sign = 1 if raw_speed > 0 else -1
+
+        if self._last_sign == 0:
+            # First command — accept immediately, no hold needed
+            self._last_sign = new_sign
+            return raw_speed
+
+        if new_sign == self._last_sign:
+            # Same direction — pass through
+            self._pending_sign = 0
+            return raw_speed
+
+        # Direction changed — start or continue hold
+        if new_sign != self._pending_sign:
+            # New pending direction
+            self._pending_sign = new_sign
+            self._pending_since = now
+            return 0.0  # hover while waiting
+
+        # Same pending direction — check if hold time elapsed
+        if (now - self._pending_since) >= self.HOLD_TIME_S:
+            self._last_sign = new_sign
+            self._pending_sign = 0
+            return raw_speed  # confirmed, allow through
+
+        return 0.0  # still waiting
+
+    def reset(self):
+        self._last_sign = 0
+        self._pending_sign = 0
+        self._pending_since = 0.0
+
+
+# Module-level state (reset when smoother is reset)
 _fwd_dead_zone = _ForwardDeadZone()
+_direction_hold = _DirectionHoldFilter()
 
 
 def reset_forward_dead_zone():
-    """Reset the forward dead zone hysteresis state. Call between flights or in tests."""
+    """Reset the forward dead zone and direction hold state. Call between flights or in tests."""
     _fwd_dead_zone.reset()
+    _direction_hold.reset()
 
 
 def _calculate_forward_speed(
@@ -111,7 +171,9 @@ def _calculate_forward_speed(
     else:
         forward = -ramp * config.kp_backward * math.sqrt(abs_delta)
 
-    return forward
+    # Temporal hysteresis: require direction changes to be sustained before acting.
+    # Prevents forward/backward oscillation when bbox height fluctuates around target.
+    return _direction_hold.filter(forward, time.monotonic())
 
 
 class ForwardSmoother:
