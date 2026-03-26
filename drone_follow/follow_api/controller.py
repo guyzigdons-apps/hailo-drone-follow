@@ -40,6 +40,13 @@ def _calculate_forward_speed(
     if detection.bbox_height > config.max_bbox_height_safety:
         return -config.max_backward
 
+    # Bottom-of-frame safety: if the bbox bottom edge is too low in the frame,
+    # the person is directly beneath the drone — command backward to retreat.
+    bbox_bottom = detection.center_y + detection.bbox_height / 2.0
+    if bbox_bottom > config.bottom_y_threshold:
+        overshoot = bbox_bottom - config.bottom_y_threshold
+        return -config.kp_backward * math.sqrt(overshoot)
+
     height_delta = target_bh - detection.bbox_height
     dead_zone_height = (config.dead_zone_height_percent / 100.0) * target_bh
 
@@ -49,13 +56,6 @@ def _calculate_forward_speed(
         forward = config.kp_forward * math.sqrt(height_delta)
     else:
         forward = -config.kp_backward * math.sqrt(-height_delta)
-
-    # Bottom-of-frame backward: bbox bottom edge past threshold means drone is above and too close
-    max_y = detection.center_y + detection.bbox_height / 2
-    if max_y > config.bottom_y_threshold:
-        y_excess = max_y - config.bottom_y_threshold
-        bottom_backward = config.kp_backward * math.sqrt(y_excess)
-        forward = min(forward, -bottom_backward)
 
     return forward
 
@@ -164,7 +164,8 @@ def compute_velocity_command(
 
     forward = _calculate_forward_speed(detection, config, target_bh)
 
-    return VelocityCommand(forward, 0.0, down, yawspeed)
+    right = config.orbit_speed_m_s * config.orbit_direction if config.follow_mode == "orbit" else 0.0
+    return VelocityCommand(forward, right, down, yawspeed)
 
 
 def _effective_target_bbox_height(

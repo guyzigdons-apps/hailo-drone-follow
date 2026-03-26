@@ -282,3 +282,26 @@ body {
 .control-row.disabled {
   opacity: 0.4;
 }
+
+/* Mobile: stack video on top, controls below */
+@media (max-width: 800px) {
+  .main-layout {
+    flex-direction: column-reverse;
+  }
+
+  .side-panel {
+    width: 100%;
+  }
+
+  .status-bar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .velocity-text {
+    order: 1;
+    flex-basis: 100%;
+    margin: 0;
+    text-align: left;
+  }
+}

@@ -1,7 +1,8 @@
 """Controller configuration — pure dataclass, no third-party dependencies."""
 
 import argparse
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, fields, asdict
 from typing import Optional
 
 
@@ -9,6 +10,8 @@ from typing import Optional
 class ControllerConfig:
     hfov: float = 66.0
     vfov: float = 41.0
+    # kp = proportional gain (P term of a PID controller).
+    # Higher kp → faster response but more overshoot.
     kp_yaw: float = 5
     dead_zone_deg: float = 2.0
     max_yawspeed: float = 90.0
@@ -26,9 +29,9 @@ class ControllerConfig:
     search_enter_delay_s: float = 2.0
     search_timeout_s: float = 60.0
     control_loop_hz: float = 10.0
-    fixed_altitude: bool = False
+    fixed_altitude: bool = True
     max_bbox_height_safety: float = 0.8  # Safety limit: if bbox height > 0.8, we are too close
-    yaw_only: bool = False
+    yaw_only: bool = True
     reference_altitude_m: float = 3.0  # target_bbox_height is defined at this altitude; scales by (ref_alt/current_alt)
     # Bottom-of-frame backward: bbox bottom edge beyond this triggers backward
     bottom_y_threshold: float = 0.7
@@ -44,7 +47,12 @@ class ControllerConfig:
     forward_alpha: float = 0.1          # EMA smoothing factor (0=ignore new, 1=no smoothing)
     kd_forward: float = 2.0            # derivative gain: anticipate person movement
 
-    takeoff_altitude: float = 3.0
+    follow_mode: str = "follow"       # "follow" or "orbit"
+    orbit_speed_m_s: float = 1.0      # lateral velocity for orbit (m/s)
+    orbit_direction: int = 1          # +1 = clockwise, -1 = counter-clockwise
+    max_orbit_speed: float = 3.0      # max lateral speed limit
+
+    target_altitude: float = 3.0
     log_verbosity: str = "normal"  # quiet | normal | debug
 
     def __post_init__(self):
@@ -58,11 +66,37 @@ class ControllerConfig:
                 "with variable altitude, use target_bbox_height instead"
             )
 
+    # ── JSON serialization ──────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        """Return config as a plain dict (JSON-safe)."""
+        return asdict(self)
+
+    def save_json(self, path: str) -> None:
+        """Write current config to a JSON file."""
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def from_json(cls, path: str) -> "ControllerConfig":
+        """Load config from a JSON file.  Unknown keys are silently ignored."""
+        with open(path) as f:
+            data = json.load(f)
+        valid_names = {field.name for field in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_names}
+        return cls(**filtered)
+
     @staticmethod
     def add_args(parser: argparse.ArgumentParser) -> None:
         """Register controller-related CLI flags on *parser*."""
         defaults = ControllerConfig()
         group = parser.add_argument_group("follow-controller")
+
+        group.add_argument("--config", default=None, metavar="JSON",
+                           help="Path to a JSON config file. CLI flags override JSON values. "
+                                "Use --save-config to dump current defaults.")
+        group.add_argument("--save-config", default=None, metavar="JSON",
+                           help="Save the effective config to a JSON file and exit.")
 
         # Framing and target geometry
         group.add_argument("--hfov", type=float, default=defaults.hfov)
@@ -89,9 +123,9 @@ class ControllerConfig:
 
         # Flight mode
         group.add_argument("--fixed-altitude", action=argparse.BooleanOptionalAction, default=defaults.fixed_altitude,
-                           help="Keep altitude fixed. Default: False (vertical following). --target-distance requires this.")
-        group.add_argument("--yaw-only", action="store_true",
-                           help="Yaw only mode: no forward/backward or altitude movement")
+                           help="Keep altitude fixed (default: True). Use --no-fixed-altitude for vertical following.")
+        group.add_argument("--yaw-only", action=argparse.BooleanOptionalAction, default=defaults.yaw_only,
+                           help="Yaw only mode: no forward/backward or altitude movement (default: True). Use --no-yaw-only for full follow.")
 
         # Search/follow behavior
         group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
@@ -115,14 +149,26 @@ class ControllerConfig:
         group.add_argument("--max-bbox-height-safety", type=float, default=defaults.max_bbox_height_safety,
                            help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
 
+        # Orbit mode
+        group.add_argument("--follow-mode", choices=["follow", "orbit"], default=defaults.follow_mode,
+                           help="Follow mode: 'follow' (default) or 'orbit' (circle around target)")
+        group.add_argument("--orbit-speed", type=float, default=defaults.orbit_speed_m_s,
+                           help=f"Lateral velocity for orbit mode in m/s (default: {defaults.orbit_speed_m_s})")
+        group.add_argument("--orbit-direction", type=int, choices=[1, -1], default=defaults.orbit_direction,
+                           help="Orbit direction: 1=clockwise (default), -1=counter-clockwise")
+
         # Logging
         group.add_argument("--log-verbosity", choices=["quiet", "normal", "debug"], default=defaults.log_verbosity,
                            help="Console log verbosity (default: normal)")
 
     @classmethod
     def from_args(cls, args):
-        # Single source of defaults: dataclass values.
-        defaults = cls()
+        # If a JSON config was supplied, use it as the base defaults.
+        json_path = getattr(args, "config", None)
+        if json_path:
+            defaults = cls.from_json(json_path)
+        else:
+            defaults = cls()
 
         def _arg(*names, default):
             for name in names:
@@ -183,6 +229,10 @@ class ControllerConfig:
             smooth_forward=_arg("smooth_forward", default=defaults.smooth_forward),
             forward_alpha=_arg("forward_alpha", default=defaults.forward_alpha),
             kd_forward=_arg("kd_forward", default=defaults.kd_forward),
-            takeoff_altitude=_arg("takeoff_altitude", default=defaults.takeoff_altitude),
+            follow_mode=_arg("follow_mode", default=defaults.follow_mode),
+            orbit_speed_m_s=_arg("orbit_speed", "orbit_speed_m_s", default=defaults.orbit_speed_m_s),
+            orbit_direction=_arg("orbit_direction", default=defaults.orbit_direction),
+            max_orbit_speed=_arg("max_orbit_speed", default=defaults.max_orbit_speed),
+            target_altitude=_arg("target_altitude", default=defaults.target_altitude),
             log_verbosity=_arg("log_verbosity", default=defaults.log_verbosity),
         )

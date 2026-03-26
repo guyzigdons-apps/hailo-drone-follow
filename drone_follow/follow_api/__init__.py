@@ -4,7 +4,7 @@ No MAVSDK, Hailo, or GStreamer dependencies. Can be tested with
 only standard library + numpy/scipy.
 """
 
-from .types import Detection, VelocityCommand
+from .types import Detection, FollowMode, VelocityCommand
 from .config import ControllerConfig
 from .state import SharedDetectionState, FollowTargetState
 from .controller import (
@@ -17,6 +17,7 @@ from .controller import (
 
 __all__ = [
     "Detection",
+    "FollowMode",
     "VelocityCommand",
     "ControllerConfig",
     "SharedDetectionState",
