@@ -155,3 +155,88 @@ Both use 256x128 input and L2-normalized embeddings (cosine similarity = dot pro
 | `--sweep` | off | Sweep thresholds 0.3-0.95 offline |
 | `--run-label` | — | Label for CSV output |
 | `--output-csv` | — | Append results to CSV |
+
+---
+
+## MOT17 Ground-Truth Evaluation (`mot17_eval.py`)
+
+Standalone evaluation that uses MOT17 ground-truth bounding boxes to measure ReID embedding quality **without detection noise** (no YOLO, no GStreamer). Answers the question: "How well can our embeddings distinguish between N people?"
+
+### Concept
+
+```
+MOT17 GT boxes (frame, person_id, bbox)
+    |
+    v
+Precompute embeddings once (read frame -> crop GT box -> Hailo ReID)
+    |
+    v
+Test 1: Gallery from frame 1 only (FirstOnly strategy)
+Test 2: Gallery enriched every M frames with GT association (MultiEmbedding)
+    |
+    v
+Precision / Recall / F1 per threshold  +  plot
+```
+
+**Key design:** Only the N selected gallery persons are evaluated. The task is purely N-way identification — "which of these N people is this crop?" No distractors. As N grows, the gallery must distinguish between more similar-looking people, increasing confusion.
+
+### Metrics
+
+| Metric | Definition |
+|--------|-----------|
+| **TP** | Gallery person's crop matched to the **correct** gallery entry |
+| **FP** | Gallery person's crop matched to a **wrong** gallery entry |
+| **FN** | Gallery person visible but similarity below threshold (no match) |
+| **Precision** | TP / (TP + FP) — "of identifications made, how many correct?" |
+| **Recall** | TP / (TP + FN) — "of gallery person appearances, how many identified?" |
+
+### Quick Start
+
+```bash
+source setup_env.sh
+
+# Step 1: Save candidate crops from frame 1 (interactive preview)
+python reid_analysis/mot17_eval.py --dataset-dir /tmp/MOT17-04-SDP/
+# -> Saves gallery_candidates/*.jpg + candidates_frame1.jpg (annotated frame with boxes & IDs)
+# -> Review candidates_frame1.jpg to pick person IDs
+
+# Step 2: Run evaluation with chosen persons
+python reid_analysis/mot17_eval.py --dataset-dir /tmp/MOT17-04-SDP/ --person-ids 1,3,4,5
+
+# Scale up to see confusion increase
+python reid_analysis/mot17_eval.py --dataset-dir /tmp/MOT17-04-SDP/ --person-ids 1,3,4,5,86,92,88,60
+
+# Use OSNet instead of RepVGG
+python reid_analysis/mot17_eval.py --dataset-dir /tmp/MOT17-04-SDP/ --person-ids 1,3 --reid-model osnet
+
+# Skip frames for faster iteration
+python reid_analysis/mot17_eval.py --dataset-dir /tmp/MOT17-04-SDP/ --person-ids 1,3 --skip-frames 10
+```
+
+### Output
+
+- **Threshold sweep table** — Precision, Recall, F1, TP, FP, FN at each threshold (0.30–0.95)
+- **Precision-Recall plot** — `mot17_results/pr_plot_N{n}_{model}.png` (requires matplotlib)
+- **Summary** — Best F1 for each test + delta between Test 1 and Test 2
+
+### CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--dataset-dir` | (required) | Path to MOT17 sequence (e.g., `/tmp/MOT17-04-SDP/`) |
+| `--reid-model` | `repvgg` | ReID model: `repvgg` or `osnet` |
+| `--person-ids` | (none) | Comma-separated GT person IDs. If omitted, saves preview and exits. |
+| `--vis-thresh` | `0.3` | Minimum GT visibility to include an annotation |
+| `--update-interval` | `30` | Frames between gallery updates in Test 2 |
+| `--max-k` | `20` | Max embeddings per person in MultiEmbedding |
+| `--skip-frames` | `1` | Process every Nth frame (1 = all) |
+| `--output-dir` | `reid_analysis/mot17_results/` | Output directory for plots and crops |
+
+### Test 1 vs Test 2
+
+| Test | Gallery Strategy | Gallery Updates | Measures |
+|------|-----------------|-----------------|----------|
+| **Test 1** | `FirstOnlyStrategy` | None — frame 1 embeddings only | Baseline: how well a single embedding represents a person over time |
+| **Test 2** | `MultiEmbeddingStrategy` | Every M frames, add GT crop embedding (oracle) | Upper bound: how much gallery enrichment helps |
+
+Comparing the two shows how much re-ID accuracy improves when the gallery is updated, and at what N the single-frame approach starts to break down.
