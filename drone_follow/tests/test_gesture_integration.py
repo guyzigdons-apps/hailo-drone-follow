@@ -4,7 +4,7 @@ Verifies that:
 1. All new types are importable and constructable
 2. SharedGestureState works correctly
 3. Config round-trips with gesture fields
-4. The gesture types match what gesture_detection_manager and gesture_drone expect
+4. The gesture types match what pose_gesture_manager and gesture_drone expect
 5. The --gesture CLI flag is registered
 """
 

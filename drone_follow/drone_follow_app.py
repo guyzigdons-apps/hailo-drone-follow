@@ -64,8 +64,6 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Record raw video + detections for the entire session (requires --ui)")
     group.add_argument("--gesture", action="store_true",
                        help="Enable gesture control mode (pose-based: T-pose to lock, X-pose to disengage)")
-    group.add_argument("--hand-landmark", action="store_true",
-                       help="Use hand-landmark pipeline for gesture control instead of pose (requires --gesture)")
     group.add_argument("--dry-run", action="store_true",
                        help="Run control loop without drone connection (for testing gestures/pipeline)")
     group.add_argument("--no-overlay", action="store_true",
@@ -111,7 +109,6 @@ def main():
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--record", action="store_true")
     ui_pre.add_argument("--gesture", action="store_true")
-    ui_pre.add_argument("--hand-landmark", action="store_true")
     ui_pre.add_argument("--dry-run", action="store_true")
     ui_pre.add_argument("--no-overlay", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
@@ -135,36 +132,19 @@ def main():
 
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     gesture_state = None
-    palm_state = None
-    palm_lock = None
     gesture_lateral_state = None
     if ui_pre_args.gesture:
         from drone_follow.follow_api.state import SharedGestureState, SharedGestureLateralState
         gesture_lateral_state = SharedGestureLateralState()
         gesture_state = SharedGestureState()
 
-        if ui_pre_args.hand_landmark:
-            # Hand-landmark pipeline: cascaded palm/hand models (close range ~1-2m)
-            from drone_follow.follow_api.state import SharedPalmState, PalmLockState
-            palm_state = SharedPalmState()
-            palm_lock = PalmLockState()
-            from drone_follow.pipeline_adapter import create_gesture_app
-            app = create_gesture_app(
-                shared_state, gesture_state, target_state=target_state,
-                eos_reached=eos_reached, ui_state=ui_state,
-                ui_fps=ui_pre_args.ui_fps, parser=parser,
-                record_dir=recordings_dir, velocity_state=velocity_state,
-                palm_state=palm_state, palm_lock=palm_lock,
-                no_overlay=ui_pre_args.no_overlay)
-        else:
-            # Default: pose-based gesture (YOLOv8-Pose, works at 2-10m range)
-            from drone_follow.pipeline_adapter import create_pose_gesture_app
-            app = create_pose_gesture_app(
-                shared_state, gesture_state, target_state=target_state,
-                eos_reached=eos_reached, ui_state=ui_state,
-                ui_fps=ui_pre_args.ui_fps, parser=parser,
-                record_dir=recordings_dir, velocity_state=velocity_state,
-                no_overlay=ui_pre_args.no_overlay)
+        from drone_follow.pipeline_adapter import create_pose_gesture_app
+        app = create_pose_gesture_app(
+            shared_state, gesture_state, target_state=target_state,
+            eos_reached=eos_reached, ui_state=ui_state,
+            ui_fps=ui_pre_args.ui_fps, parser=parser,
+            record_dir=recordings_dir, velocity_state=velocity_state,
+            no_overlay=ui_pre_args.no_overlay)
     else:
         from drone_follow.pipeline_adapter import create_app
         app = create_app(shared_state, target_state=target_state,
@@ -177,7 +157,7 @@ def main():
     _resolve_serial_connection(args)
 
     # Quiet noisy loggers in pose-gesture mode so [pose-gesture] logs are visible
-    if ui_pre_args.gesture and not ui_pre_args.hand_landmark:
+    if ui_pre_args.gesture:
         logging.getLogger("drone_follow.control").setLevel(logging.WARNING)
         logging.getLogger("drone_follow.gesture").setLevel(logging.WARNING)
 
