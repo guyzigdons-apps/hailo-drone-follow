@@ -163,6 +163,118 @@ sudo systemctl set-default multi-user.target && sudo reboot
 
 ---
 
+## x86_64 Ground Station (Laptop / Desktop)
+
+An x86_64 Ubuntu machine can run the full ground station stack. No Hailo
+hardware is needed on the ground side — video is decoded in software via
+FFmpeg/libavcodec. The build system auto-detects x86_64 and configures
+everything accordingly (SSSE3 FEC, `LinuxBuild` Qt config, `__desktoplinux__`
+define).
+
+### Prerequisites
+
+- Ubuntu 22.04+ (64-bit)
+- Monitor-mode USB WiFi adapter (same model as the air unit — e.g. rtl88x2bu)
+- System packages:
+  ```bash
+  sudo apt install -y dkms iw
+  ```
+
+### 1. Clone
+
+Same as the RPi ground unit, but clone QOpenHD **with submodules**:
+```bash
+cd ~
+git clone --recurse-submodules -b feature/hailo-apps-integration \
+    https://github.com/barakbk-hailo/OpenHD.git
+git clone -b main https://github.com/barakbk-hailo/OpenHD-SysUtils.git
+git clone --recurse-submodules -b fix/rpi4-hw-decode \
+    https://github.com/barakbk-hailo/qopenHD.git
+```
+
+> If you forgot `--recurse-submodules` on qopenHD:
+> ```bash
+> cd ~/qopenHD && git submodule update --init --recursive
+> ```
+
+### 2. Automated install (recommended)
+
+A bundled script in this repo handles deps, builds, and config deployment in one step:
+```bash
+cd ~/hailo-drone-follow
+sudo ./install_ground_station.sh
+```
+
+### 3. Manual install (step-by-step)
+
+If you prefer to run each step yourself:
+
+**Install OpenHD dependencies + build:**
+```bash
+cd ~/OpenHD
+sudo ./install_build_dep.sh ubuntu-x86
+sudo ./build_native.sh build        # builds SysUtils + OpenHD, installs to /usr/local/bin/
+```
+
+> **Note:** Use `build` to compile OpenHD only. You also need the WiFi driver
+> for the monitor-mode USB adapter:
+> ```bash
+> sudo ./build_native.sh driver
+> sudo reboot
+> ```
+> Or run `sudo ./build_native.sh all` to do deps + build + driver in one step.
+
+**Install QOpenHD dependencies + build:**
+```bash
+cd ~/qopenHD
+sudo ./install_build_dep.sh ubuntu-x86
+
+# Compile Qt translation files (required before build):
+lrelease translations/*.ts
+cp translations/*.qm qml/
+
+mkdir -p build/release && cd build/release
+qmake ../.. && make -j$(nproc)
+```
+
+> **Note:** On Ubuntu 22.04 the `install_build_dep.sh` script may fail on
+> `t64`-suffixed Qt packages. The patched version in this repo auto-detects
+> the correct package names for your Ubuntu version.
+
+Binary location: `~/qopenHD/build/release/release/QOpenHD` (note the double
+`release` — qmake puts the output one level deeper on Linux).
+
+**Deploy config files:**
+```bash
+sudo mkdir -p /usr/local/share/openhd
+sudo cp ~/hailo-drone-follow/df_params.json /usr/local/share/openhd/df_params.json
+
+# Copy encryption key from air unit (must match):
+scp pi@<air-ip>:/usr/local/share/openhd/txrx.key /tmp/txrx.key
+sudo cp /tmp/txrx.key /usr/local/share/openhd/txrx.key
+```
+
+### 4. Running on x86_64
+
+```bash
+# Terminal 1 — OpenHD ground:
+sudo /usr/local/bin/openhd --ground
+
+# Terminal 2 — QOpenHD (Wayland):
+WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
+    ~/qopenHD/build/release/release/QOpenHD -platform wayland
+
+# Or under X11:
+~/qopenHD/build/release/release/QOpenHD
+```
+
+> **Differences from RPi ground:**
+> - Video decoding uses software libavcodec (FFmpeg) instead of RPi MMAL hardware decoder
+> - No EGLFS — use Wayland or X11 platform
+> - Reboot required after WiFi driver install (`build_native.sh driver`)
+
+---
+
 ## Camera Modes
 
 There are two integration modes. Both use the Hailo8 for AI detection.
