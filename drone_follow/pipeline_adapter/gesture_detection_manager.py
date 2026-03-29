@@ -848,8 +848,12 @@ def create_gesture_app(shared_state, gesture_state, target_state=None, eos_reach
 
             # --- 8. Display / UI output ---
             if not self._ui_enabled:
-                display_pipeline = DISPLAY_PIPELINE(
-                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                overlay_element = "" if self._no_overlay else "hailooverlay_community name=hailo_overlay hud-overlay=true use-custom-colors=true ! "
+                display_pipeline = (
+                    f"{overlay_element}"
+                    f"videoconvert n-threads=2 ! "
+                    f"fpsdisplaysink name=hailo_display video-sink={self.video_sink} "
+                    f"sync={self.sync} text-overlay={self.show_fps} signal-fps-measurements=true"
                 )
                 pipeline_string = (
                     f"{source_pipeline} ! "

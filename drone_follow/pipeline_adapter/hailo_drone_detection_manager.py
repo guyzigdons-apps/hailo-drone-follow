@@ -491,9 +491,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return path
 
         def get_pipeline_string(self):
-            if not self._ui_enabled:
-                return super().get_pipeline_string()
-
             # Build pipeline with tee: one branch for display, one for MJPEG appsink
             source_pipeline = SOURCE_PIPELINE(
                 video_source=self.video_source,
