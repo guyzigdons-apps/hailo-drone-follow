@@ -15,7 +15,6 @@ import os
 import numpy as np
 import cv2
 from typing import Optional
-from functools import partial
 
 from hailo_platform import HEF, VDevice, FormatType, HailoSchedulingAlgorithm
 
@@ -221,7 +220,6 @@ class RepVGG512Extractor(HailoReIDExtractor):
 
     def __init__(self, hef_path: str = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef", **kwargs):
         super().__init__(hef_path=hef_path, **kwargs)
-
 
 
 # ── Cross-matching matrix ──

@@ -20,7 +20,6 @@ Usage:
 """
 
 import argparse
-import csv
 import os
 import sys
 import time

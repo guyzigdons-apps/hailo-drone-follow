@@ -15,6 +15,7 @@ class GalleryStrategy:
 
     def __init__(self):
         self._names = []  # person names
+        self._embeddings = []  # one per person
 
     @property
     def names(self):
@@ -26,14 +27,23 @@ class GalleryStrategy:
 
     def add_person(self, name: str, embedding: np.ndarray):
         """Register a new person in the gallery."""
-        raise NotImplementedError
+        self._names.append(name)
+        self._embeddings.append(embedding.copy())
 
     def match(self, embedding: np.ndarray, threshold: float) -> Tuple[Optional[str], float]:
         """
         Match embedding against gallery.
         Returns (person_name, similarity) if match found, else (None, best_similarity).
         """
-        raise NotImplementedError
+        if not self._embeddings:
+            return None, 0.0
+        gallery_matrix = np.stack(self._embeddings)
+        similarities = gallery_matrix @ embedding
+        best_idx = int(np.argmax(similarities))
+        best_sim = float(similarities[best_idx])
+        if best_sim >= threshold:
+            return self._names[best_idx], best_sim
+        return None, best_sim
 
     def update(self, person_name: str, embedding: np.ndarray, frame_count: int):
         """Called after a successful match. Strategy decides whether to update."""
@@ -42,25 +52,7 @@ class GalleryStrategy:
 
 class FirstOnlyStrategy(GalleryStrategy):
     """Keep only the first-seen embedding per person. Never update."""
-
-    def __init__(self):
-        super().__init__()
-        self._embeddings = []  # one per person
-
-    def add_person(self, name: str, embedding: np.ndarray):
-        self._names.append(name)
-        self._embeddings.append(embedding.copy())
-
-    def match(self, embedding: np.ndarray, threshold: float) -> Tuple[Optional[str], float]:
-        if not self._embeddings:
-            return None, 0.0
-        gallery_matrix = np.stack(self._embeddings)
-        similarities = gallery_matrix @ embedding
-        best_idx = int(np.argmax(similarities))
-        best_sim = float(similarities[best_idx])
-        if best_sim >= threshold:
-            return self._names[best_idx], best_sim
-        return None, best_sim
+    pass
 
 
 class RunningAverageStrategy(GalleryStrategy):
@@ -68,24 +60,11 @@ class RunningAverageStrategy(GalleryStrategy):
 
     def __init__(self):
         super().__init__()
-        self._embeddings = []  # current average embedding per person
-        self._counts = []      # number of embeddings averaged
+        self._counts = []  # number of embeddings averaged
 
     def add_person(self, name: str, embedding: np.ndarray):
-        self._names.append(name)
-        self._embeddings.append(embedding.copy())
+        super().add_person(name, embedding)
         self._counts.append(1)
-
-    def match(self, embedding: np.ndarray, threshold: float) -> Tuple[Optional[str], float]:
-        if not self._embeddings:
-            return None, 0.0
-        gallery_matrix = np.stack(self._embeddings)
-        similarities = gallery_matrix @ embedding
-        best_idx = int(np.argmax(similarities))
-        best_sim = float(similarities[best_idx])
-        if best_sim >= threshold:
-            return self._names[best_idx], best_sim
-        return None, best_sim
 
     def update(self, person_name: str, embedding: np.ndarray, frame_count: int):
         idx = self._names.index(person_name)
@@ -105,25 +84,12 @@ class UpdateEveryNStrategy(GalleryStrategy):
 
     def __init__(self, n: int = 10):
         super().__init__()
-        self._embeddings = []
         self._match_counts = []
         self._n = n
 
     def add_person(self, name: str, embedding: np.ndarray):
-        self._names.append(name)
-        self._embeddings.append(embedding.copy())
+        super().add_person(name, embedding)
         self._match_counts.append(0)
-
-    def match(self, embedding: np.ndarray, threshold: float) -> Tuple[Optional[str], float]:
-        if not self._embeddings:
-            return None, 0.0
-        gallery_matrix = np.stack(self._embeddings)
-        similarities = gallery_matrix @ embedding
-        best_idx = int(np.argmax(similarities))
-        best_sim = float(similarities[best_idx])
-        if best_sim >= threshold:
-            return self._names[best_idx], best_sim
-        return None, best_sim
 
     def update(self, person_name: str, embedding: np.ndarray, frame_count: int):
         idx = self._names.index(person_name)

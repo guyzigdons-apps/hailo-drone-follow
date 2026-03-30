@@ -18,6 +18,7 @@ Usage:
 
 import json
 import os
+import shutil
 import threading
 from pathlib import Path
 
@@ -48,7 +49,6 @@ class ReIDUserData(app_callback_class):
         self.orig_dir = Path(output_dir) / "orig_person_images"
         self.match_dir = Path(output_dir) / "person_images"
         # Clean previous run results
-        import shutil
         if self.orig_dir.exists():
             shutil.rmtree(self.orig_dir)
         if self.match_dir.exists():
