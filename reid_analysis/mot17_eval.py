@@ -47,7 +47,7 @@ from reid_analysis.gallery_strategies import FirstOnlyStrategy, MultiEmbeddingSt
 # MOT17 GT loading
 # ---------------------------------------------------------------------------
 
-def load_mot17_gt(gt_path, vis_thresh=0.3):
+def load_mot17_gt(gt_path, visibility_threshold=0.3):
     """
     Parse MOT17 gt.txt file.
 
@@ -70,7 +70,7 @@ def load_mot17_gt(gt_path, vis_thresh=0.3):
             vis = float(parts[8])
 
             # Filter: pedestrians only, visible enough
-            if cls != 1 or vis < vis_thresh:
+            if cls != 1 or vis < visibility_threshold:
                 continue
 
             ann = {"id": pid, "x": int(x), "y": int(y), "w": int(w), "h": int(h), "vis": vis}
@@ -213,7 +213,7 @@ def precompute_embeddings(extractor, dataset_dir, frame_annotations, person_ids,
 # ---------------------------------------------------------------------------
 
 def evaluate_cached(embedding_cache, frame_annotations, gallery_person_ids,
-                    strategy_factory, threshold, update_interval=None, skip_frames=1):
+                    strategy_factory, match_threshold, update_interval=None, skip_frames=1):
     """
     Evaluate ReID matching using precomputed embeddings.
     Only evaluates crops of gallery persons — pure N-way identification.
@@ -246,7 +246,7 @@ def evaluate_cached(embedding_cache, frame_annotations, gallery_person_ids,
                 continue
 
             emb = embedding_cache[key]
-            matched_name, sim = gallery.match(emb, threshold)
+            matched_name, sim = gallery.match(emb, match_threshold)
 
             true_name = str(pid)
             if matched_name is not None:
@@ -283,7 +283,7 @@ def sweep_thresholds(embedding_cache, frame_annotations, gallery_person_ids,
     for t in thresholds:
         metrics = evaluate_cached(
             embedding_cache, frame_annotations, gallery_person_ids,
-            strategy_factory, threshold=t,
+            strategy_factory, match_threshold=t,
             update_interval=update_interval, skip_frames=skip_frames,
         )
         metrics["threshold"] = t
@@ -404,7 +404,7 @@ def main():
     parser.add_argument("--person-ids", type=str, default=None,
                         help="Comma-separated person IDs for gallery (e.g., 1,3,5,86). "
                              "If omitted, saves candidate crops for review.")
-    parser.add_argument("--vis-thresh", type=float, default=0.3,
+    parser.add_argument("--visibility-threshold", type=float, default=0.3,
                         help="Minimum visibility for GT annotations (default: 0.3)")
     parser.add_argument("--update-interval", type=int, default=30,
                         help="Frames between gallery updates for Test 2 (default: 30)")
@@ -425,8 +425,8 @@ def main():
     output_dir = args.output_dir or str(Path(__file__).resolve().parent / "mot17_results")
 
     # Load GT
-    print(f"Loading GT from {gt_path} (vis >= {args.vis_thresh})...")
-    frame_annotations, person_frame_counts = load_mot17_gt(gt_path, args.vis_thresh)
+    print(f"Loading GT from {gt_path} (vis >= {args.visibility_threshold})...")
+    frame_annotations, person_frame_counts = load_mot17_gt(gt_path, args.visibility_threshold)
     total_anns = sum(len(v) for v in frame_annotations.values())
     print(f"  {len(frame_annotations)} frames, {total_anns} annotations, "
           f"{len(person_frame_counts)} unique persons")
