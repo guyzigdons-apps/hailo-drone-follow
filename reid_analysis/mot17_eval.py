@@ -334,6 +334,12 @@ def plot_precision_recall(sweep_t1, sweep_t2, person_ids, output_path, model_nam
             "o-", color="tab:blue", label="Test 1: FirstOnly", markersize=4)
     ax.plot([p[0] for p in pairs_t2], [p[1] for p in pairs_t2],
             "s-", color="tab:orange", label="Test 2: MultiEmbedding", markersize=4)
+    for recall, precision, thresh in pairs_t1:
+        ax.annotate(f"{thresh:.2f}", (recall, precision), textcoords="offset points",
+                    xytext=(4, 4), fontsize=6, color="tab:blue", alpha=0.8)
+    for recall, precision, thresh in pairs_t2:
+        ax.annotate(f"{thresh:.2f}", (recall, precision), textcoords="offset points",
+                    xytext=(4, -8), fontsize=6, color="tab:orange", alpha=0.8)
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
     ax.set_title(f"Precision-Recall Curve (N={n}, {model_name})")
