@@ -34,10 +34,54 @@ reid_sweep.py  (automated parameter grid search)
 |------|---------|
 | `reid_analysis_app.py` | Main pipeline: detect, embed, match, log |
 | `reid_eval.py` | Compute metrics and sweep thresholds offline |
+| `reid_embedding_extractor.py` | Hailo ReID embedding extraction (RepVGG / OSNet) |
 | `gallery_strategies.py` | Pluggable gallery update strategies |
 | `reid_sweep.py` | Parameter sweep runner (model x threshold x strategy) |
+| `mot17_eval.py` | MOT17 ground-truth evaluation (no detection noise) |
 | `ground_truth.json` | Manual mapping: predicted ID -> true person label |
 | `match_log.jsonl` | Auto-generated log of every match decision |
+
+## Module Dependencies
+
+```
+┌─────────────────────────────┐
+│   reid_embedding_extractor  │  Hailo ReID inference
+│   (RepVGG / OSNet)          │  (no internal deps)
+└──────────┬──────────────────┘
+           │ imports                    imports
+           ├───────────────────────────────┐
+           │                               │
+           v                               v
+┌─────────────────────┐         ┌─────────────────────┐
+│ gallery_strategies   │         │ gallery_strategies   │
+│ (create_strategy,    │         │ (FirstOnly,          │
+│  STRATEGIES)         │         │  MultiEmbedding)     │
+└──────────┬───────────┘         └──────────┬───────────┘
+           │ imports                         │ imports
+           v                                v
+┌─────────────────────┐         ┌─────────────────────┐
+│ reid_analysis_app    │         │ mot17_eval           │
+│                      │         │                      │
+│ Runs Hailo pipeline, │         │ Uses MOT17 GT boxes  │
+│ produces             │         │ to evaluate ReID     │
+│ match_log.jsonl      │         │ embedding quality    │
+└──────────┬───────────┘         └─────────────────────┘
+           │ launches as subprocess
+           │
+           v                        imports
+┌─────────────────────┐  ◄──────────────────────────────┐
+│ reid_eval            │  load_match_log, load_ground_   │
+│                      │  truth, evaluate, append_csv    │
+│ Reads match_log.jsonl│                                 │
+│ + ground_truth.json  │         ┌─────────────────────┐ │
+│ to compute metrics   │         │ reid_sweep           ├─┘
+└──────────────────────┘         │                      │
+                                 │ Grid search: runs    │
+                                 │ reid_analysis_app    │
+                                 │ with different params│
+                                 │ then evaluates each  │
+                                 └──────────────────────┘
+```
 
 ## Quick Start
 
@@ -48,7 +92,7 @@ source setup_env.sh
 python reid_analysis/reid_analysis_app.py \
     --input 12354541-hd_1280_720_25fps.mp4 \
     --tiles-x 2 --tiles-y 3 \
-    --reid-model repvgg --threshold 0.7 \
+    --reid-model repvgg --reid-match-threshold 0.7 \
     --gallery-strategy first_only \
     --video-sink fakesink --disable-sync
 ```
@@ -127,7 +171,7 @@ Default sweep: 2 models x 5 thresholds x 3 strategies = 30 runs.
 | RepVGG A0 | 512 | ~5200 FPS | `repvgg_a0_person_reid_512.hef` |
 | OSNet x1_0 | 512 | ~180 FPS | `osnet_x1_0.hef` |
 
-Both use 256x128 input and L2-normalized embeddings (cosine similarity = dot product).
+Both produce L2-normalized embeddings (cosine similarity = dot product). Input size is read from the HEF file at runtime (currently 256x128 for both models).
 
 ## Key CLI Arguments
 
@@ -138,7 +182,7 @@ Both use 256x128 input and L2-normalized embeddings (cosine similarity = dot pro
 | `--input` | — | Input video file or stream |
 | `--tiles-x` / `--tiles-y` | 2 / 3 | Tiling grid for detection |
 | `--reid-model` | `repvgg` | ReID model: `repvgg` or `osnet` |
-| `--threshold` | `0.7` | Cosine similarity threshold |
+| `--reid-match-threshold` | `0.7` | Cosine similarity threshold for ReID matching |
 | `--gallery-strategy` | `first_only` | Gallery update strategy |
 | `--gallery-update-interval` | `10` | Frames between updates (for `update_every_n`) |
 | `--gallery-max-size` | `10` | Max embeddings per person (for `multi_embedding`) |
@@ -216,7 +260,7 @@ python reid_analysis/mot17_eval.py --dataset-dir /tmp/MOT17-04-SDP/ --person-ids
 ### Output
 
 - **Threshold sweep table** — Precision, Recall, F1, TP, FP, FN at each threshold (0.30–0.95)
-- **Precision-Recall plot** — `mot17_results/pr_plot_N{n}_{model}.png` (requires matplotlib)
+- **Precision-Recall plot** — `mot17_results/pr_plot_N{n}_{model}.png`
 - **Summary** — Best F1 for each test + delta between Test 1 and Test 2
 
 ### CLI Arguments
@@ -226,7 +270,7 @@ python reid_analysis/mot17_eval.py --dataset-dir /tmp/MOT17-04-SDP/ --person-ids
 | `--dataset-dir` | (required) | Path to MOT17 sequence (e.g., `/tmp/MOT17-04-SDP/`) |
 | `--reid-model` | `repvgg` | ReID model: `repvgg` or `osnet` |
 | `--person-ids` | (none) | Comma-separated GT person IDs. If omitted, saves preview and exits. |
-| `--vis-thresh` | `0.3` | Minimum GT visibility to include an annotation |
+| `--vis-threshold` | `0.3` | Minimum GT visibility to include an annotation |
 | `--update-interval` | `30` | Frames between gallery updates in Test 2 |
 | `--max-k` | `20` | Max embeddings per person in MultiEmbedding |
 | `--skip-frames` | `1` | Process every Nth frame (1 = all) |
