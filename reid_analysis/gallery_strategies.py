@@ -30,7 +30,7 @@ class GalleryStrategy:
         self._names.append(name)
         self._embeddings.append(embedding.copy())
 
-    def match(self, embedding: np.ndarray, threshold: float) -> Tuple[Optional[str], float]:
+    def match(self, embedding: np.ndarray, reid_match_threshold: float) -> Tuple[Optional[str], float]:
         """
         Match embedding against gallery.
         Returns (person_name, similarity) if match found, else (None, best_similarity).
@@ -41,7 +41,7 @@ class GalleryStrategy:
         similarities = gallery_matrix @ embedding
         best_idx = int(np.argmax(similarities))
         best_sim = float(similarities[best_idx])
-        if best_sim >= threshold:
+        if best_sim >= reid_match_threshold:
             return self._names[best_idx], best_sim
         return None, best_sim
 
@@ -113,7 +113,7 @@ class MultiEmbeddingStrategy(GalleryStrategy):
         self._names.append(name)
         self._person_embeddings[name] = [embedding.copy()]
 
-    def match(self, embedding: np.ndarray, threshold: float) -> Tuple[Optional[str], float]:
+    def match(self, embedding: np.ndarray, reid_match_threshold: float) -> Tuple[Optional[str], float]:
         if not self._names:
             return None, 0.0
         best_name = None
@@ -125,7 +125,7 @@ class MultiEmbeddingStrategy(GalleryStrategy):
             if max_sim > best_sim:
                 best_sim = max_sim
                 best_name = name
-        if best_sim >= threshold:
+        if best_sim >= reid_match_threshold:
             return best_name, best_sim
         return None, best_sim
 

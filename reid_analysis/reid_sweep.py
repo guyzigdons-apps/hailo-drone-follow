@@ -33,12 +33,12 @@ from reid_eval import load_match_log, load_ground_truth, evaluate, append_csv
 
 DEFAULT_SWEEP = {
     "reid_model": ["repvgg", "osnet"],
-    "threshold": [0.5, 0.6, 0.7, 0.8, 0.9],
+    "reid_match_threshold": [0.5, 0.6, 0.7, 0.8, 0.9],
     "gallery_strategy": ["first_only", "running_average", "multi_embedding"],
 }
 
 
-def run_pipeline(input_video, output_dir, reid_model, threshold, gallery_strategy,
+def run_pipeline(input_video, output_dir, reid_model, reid_match_threshold, gallery_strategy,
                  extra_args=None):
     """Run reid_analysis_app.py with given parameters. Returns match_log path."""
     script_dir = Path(__file__).parent
@@ -49,7 +49,7 @@ def run_pipeline(input_video, output_dir, reid_model, threshold, gallery_strateg
         "--input", input_video,
         "--output-dir", str(output_dir),
         "--reid-model", reid_model,
-        "--threshold", str(threshold),
+        "--reid-match-threshold", str(reid_match_threshold),
         "--gallery-strategy", gallery_strategy,
         "--disable-sync",
         "--video-sink", "fakesink",
@@ -58,7 +58,7 @@ def run_pipeline(input_video, output_dir, reid_model, threshold, gallery_strateg
         cmd.extend(extra_args)
 
     print(f"\n{'='*60}")
-    print(f"Running: model={reid_model} threshold={threshold} strategy={gallery_strategy}")
+    print(f"Running: model={reid_model} reid_match_threshold={reid_match_threshold} strategy={gallery_strategy}")
     print(f"Output: {output_dir}")
     print(f"{'='*60}")
 
@@ -119,7 +119,7 @@ def main():
     results = []
     for combo in combinations:
         params = dict(zip(param_names, combo))
-        label = f"{params.get('reid_model', 'repvgg')}_t{params.get('threshold', 0.7)}_{params.get('gallery_strategy', 'first_only')}"
+        label = f"{params.get('reid_model', 'repvgg')}_t{params.get('reid_match_threshold', 0.7)}_{params.get('gallery_strategy', 'first_only')}"
 
         run_dir = output_base / label
         # Clean previous run
@@ -131,7 +131,7 @@ def main():
             input_video=args.input,
             output_dir=run_dir,
             reid_model=params.get("reid_model", "repvgg"),
-            threshold=params.get("threshold", 0.7),
+            reid_match_threshold=params.get("reid_match_threshold", 0.7),
             gallery_strategy=params.get("gallery_strategy", "first_only"),
             extra_args=extra_args,
         )

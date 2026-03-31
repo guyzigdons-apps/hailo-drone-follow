@@ -55,12 +55,12 @@ def load_ground_truth(path):
     return mapping
 
 
-def evaluate(entries, id_mapping, threshold=None):
+def evaluate(entries, id_mapping, reid_match_threshold=None):
     """
     Compute evaluation metrics.
 
-    If threshold is given, re-threshold: entries with similarity < threshold and is_new=False
-    are treated as if they were new persons (unmatched).
+    If reid_match_threshold is given, re-threshold: entries with similarity < reid_match_threshold
+    and is_new=False are treated as if they were new persons (unmatched).
 
     Returns dict of metrics.
     """
@@ -84,7 +84,7 @@ def evaluate(entries, id_mapping, threshold=None):
         frame = entry["frame"]
 
         # Re-threshold if requested
-        if threshold is not None and not is_new and similarity < threshold:
+        if reid_match_threshold is not None and not is_new and similarity < reid_match_threshold:
             # Would not have matched at this threshold — skip (treated as unmatched)
             continue
 
@@ -142,7 +142,7 @@ def evaluate(entries, id_mapping, threshold=None):
         prev_true_to_pred.update(current)
 
     return {
-        "threshold": threshold,
+        "reid_match_threshold": reid_match_threshold,
         "total_assignments": total_assignments,
         "correct": correct,
         "false_positives": false_positives,
@@ -160,8 +160,8 @@ def print_metrics(metrics):
     print("\n" + "=" * 50)
     print("EVALUATION RESULTS")
     print("=" * 50)
-    if metrics["threshold"] is not None:
-        print(f"  Threshold:            {metrics['threshold']}")
+    if metrics["reid_match_threshold"] is not None:
+        print(f"  ReID match threshold: {metrics['reid_match_threshold']}")
     print(f"  Total assignments:    {metrics['total_assignments']}")
     print(f"  Correct:              {metrics['correct']}")
     print(f"  False positives:      {metrics['false_positives']}")
@@ -172,22 +172,22 @@ def print_metrics(metrics):
     print("=" * 50)
 
 
-def sweep_thresholds(entries, id_mapping, thresholds=None):
-    """Sweep thresholds offline and print precision/recall table."""
-    if thresholds is None:
-        thresholds = [0.3, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
+def sweep_reid_match_thresholds(entries, id_mapping, reid_match_thresholds=None):
+    """Sweep ReID match thresholds offline and print precision/recall table."""
+    if reid_match_thresholds is None:
+        reid_match_thresholds = [0.3, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
 
     print("\n" + "=" * 80)
-    print("THRESHOLD SWEEP (offline re-threshold of logged similarities)")
+    print("REID MATCH THRESHOLD SWEEP (offline re-threshold of logged similarities)")
     print("=" * 80)
-    print(f"{'Threshold':>10} {'Assignments':>12} {'Correct':>8} {'Precision':>10} {'FP':>5} {'New IDs':>8} {'Frag':>6} {'Switches':>9}")
+    print(f"{'ReID Match Threshold':>22} {'Assignments':>12} {'Correct':>8} {'Precision':>10} {'FP':>5} {'New IDs':>8} {'Frag':>6} {'Switches':>9}")
     print("-" * 80)
 
     results = []
-    for t in thresholds:
-        m = evaluate(entries, id_mapping, threshold=t)
+    for t in reid_match_thresholds:
+        m = evaluate(entries, id_mapping, reid_match_threshold=t)
         results.append(m)
-        print(f"{t:>10.2f} {m['total_assignments']:>12} {m['correct']:>8} {m['precision']:>10.4f} "
+        print(f"{t:>22.2f} {m['total_assignments']:>12} {m['correct']:>8} {m['precision']:>10.4f} "
               f"{m['false_positives']:>5} {m['new_persons_created']:>8} {m['fragmentation']:>6.2f} {m['id_switches']:>9}")
     print("=" * 80)
     return results
@@ -222,7 +222,7 @@ def main():
     print(f"Ground truth: {len(id_mapping)} predicted IDs mapped")
 
     if args.sweep:
-        sweep_thresholds(entries, id_mapping)
+        sweep_reid_match_thresholds(entries, id_mapping)
     else:
         metrics = evaluate(entries, id_mapping)
         print_metrics(metrics)

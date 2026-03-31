@@ -47,7 +47,7 @@ from reid_analysis.gallery_strategies import FirstOnlyStrategy, MultiEmbeddingSt
 # MOT17 GT loading
 # ---------------------------------------------------------------------------
 
-def load_mot17_gt(gt_path, visibility_threshold=0.3):
+def load_mot17_gt(gt_path, vis_threshold=0.3):
     """
     Parse MOT17 gt.txt file.
 
@@ -70,7 +70,7 @@ def load_mot17_gt(gt_path, visibility_threshold=0.3):
             vis = float(parts[8])
 
             # Filter: pedestrians only, visible enough
-            if cls != 1 or vis < visibility_threshold:
+            if cls != 1 or vis < vis_threshold:
                 continue
 
             ann = {"id": pid, "x": int(x), "y": int(y), "w": int(w), "h": int(h), "vis": vis}
@@ -213,7 +213,7 @@ def precompute_embeddings(extractor, dataset_dir, frame_annotations, person_ids,
 # ---------------------------------------------------------------------------
 
 def evaluate_cached(embedding_cache, frame_annotations, gallery_person_ids,
-                    strategy_factory, match_threshold, update_interval=None, skip_frames=1):
+                    strategy_factory, reid_match_threshold, update_interval=None, skip_frames=1):
     """
     Evaluate ReID matching using precomputed embeddings.
     Only evaluates crops of gallery persons — pure N-way identification.
@@ -246,7 +246,7 @@ def evaluate_cached(embedding_cache, frame_annotations, gallery_person_ids,
                 continue
 
             emb = embedding_cache[key]
-            matched_name, sim = gallery.match(emb, match_threshold)
+            matched_name, sim = gallery.match(emb, reid_match_threshold)
 
             true_name = str(pid)
             if matched_name is not None:
@@ -275,18 +275,18 @@ def evaluate_cached(embedding_cache, frame_annotations, gallery_person_ids,
 # Threshold sweep
 # ---------------------------------------------------------------------------
 
-def sweep_thresholds(embedding_cache, frame_annotations, gallery_person_ids,
-                     strategy_factory, update_interval=None, skip_frames=1):
-    """Sweep thresholds and return results for each."""
-    thresholds = [round(t, 2) for t in np.arange(0.30, 0.96, 0.05)]
+def sweep_reid_match_thresholds(embedding_cache, frame_annotations, gallery_person_ids,
+                                strategy_factory, update_interval=None, skip_frames=1):
+    """Sweep ReID match thresholds and return results for each."""
+    reid_match_thresholds = [round(t, 2) for t in np.arange(0.30, 0.96, 0.05)]
     results = []
-    for t in thresholds:
+    for t in reid_match_thresholds:
         metrics = evaluate_cached(
             embedding_cache, frame_annotations, gallery_person_ids,
-            strategy_factory, match_threshold=t,
+            strategy_factory, reid_match_threshold=t,
             update_interval=update_interval, skip_frames=skip_frames,
         )
-        metrics["threshold"] = t
+        metrics["reid_match_threshold"] = t
         results.append(metrics)
     return results
 
@@ -301,12 +301,12 @@ def find_best_f1(sweep_results):
 # ---------------------------------------------------------------------------
 
 def print_sweep_table(title, sweep_results):
-    """Print a formatted threshold sweep table."""
+    """Print a formatted ReID match threshold sweep table."""
     print(f"\n{title}")
-    print(f"{'Threshold':>10} {'Precision':>10} {'Recall':>10} {'F1':>10} {'TP':>8} {'FP':>8} {'FN':>8}")
-    print("-" * 76)
+    print(f"{'ReID Match Threshold':>22} {'Precision':>10} {'Recall':>10} {'F1':>10} {'TP':>8} {'FP':>8} {'FN':>8}")
+    print("-" * 88)
     for r in sweep_results:
-        print(f"{r['threshold']:>10.2f} {r['precision']:>10.4f} {r['recall']:>10.4f} "
+        print(f"{r['reid_match_threshold']:>22.2f} {r['precision']:>10.4f} {r['recall']:>10.4f} "
               f"{r['f1']:>10.4f} {r['tp']:>8} {r['fp']:>8} {r['fn']:>8}")
 
 
@@ -319,7 +319,7 @@ def plot_precision_recall(sweep_t1, sweep_t2, person_ids, output_path, model_nam
 
     # Extract P/R pairs (sorted by recall ascending for a proper PR curve)
     def pr_pairs(sweep):
-        pairs = [(r["recall"], r["precision"], r["threshold"]) for r in sweep]
+        pairs = [(r["recall"], r["precision"], r["reid_match_threshold"]) for r in sweep]
         pairs.sort(key=lambda x: x[0])
         return pairs
 
@@ -334,11 +334,11 @@ def plot_precision_recall(sweep_t1, sweep_t2, person_ids, output_path, model_nam
             "o-", color="tab:blue", label="Test 1: FirstOnly", markersize=4)
     ax.plot([p[0] for p in pairs_t2], [p[1] for p in pairs_t2],
             "s-", color="tab:orange", label="Test 2: MultiEmbedding", markersize=4)
-    for recall, precision, thresh in pairs_t1:
-        ax.annotate(f"{thresh:.2f}", (recall, precision), textcoords="offset points",
+    for recall, precision, reid_thresh in pairs_t1:
+        ax.annotate(f"{reid_thresh:.2f}", (recall, precision), textcoords="offset points",
                     xytext=(4, 4), fontsize=6, color="tab:blue", alpha=0.8)
-    for recall, precision, thresh in pairs_t2:
-        ax.annotate(f"{thresh:.2f}", (recall, precision), textcoords="offset points",
+    for recall, precision, reid_thresh in pairs_t2:
+        ax.annotate(f"{reid_thresh:.2f}", (recall, precision), textcoords="offset points",
                     xytext=(4, -8), fontsize=6, color="tab:orange", alpha=0.8)
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
@@ -348,27 +348,27 @@ def plot_precision_recall(sweep_t1, sweep_t2, person_ids, output_path, model_nam
     ax.legend(loc="lower left")
     ax.grid(True, alpha=0.3)
 
-    # --- Right: P, R, F1 vs Threshold ---
+    # --- Right: P, R, F1 vs ReID Match Threshold ---
     ax = axes[1]
-    thresholds = [r["threshold"] for r in sweep_t1]
+    reid_match_thresholds = [r["reid_match_threshold"] for r in sweep_t1]
 
-    ax.plot(thresholds, [r["precision"] for r in sweep_t1],
+    ax.plot(reid_match_thresholds, [r["precision"] for r in sweep_t1],
             "o--", color="tab:blue", label="T1 Precision", markersize=3, alpha=0.7)
-    ax.plot(thresholds, [r["recall"] for r in sweep_t1],
+    ax.plot(reid_match_thresholds, [r["recall"] for r in sweep_t1],
             "^--", color="tab:blue", label="T1 Recall", markersize=3, alpha=0.7)
-    ax.plot(thresholds, [r["f1"] for r in sweep_t1],
+    ax.plot(reid_match_thresholds, [r["f1"] for r in sweep_t1],
             "s-", color="tab:blue", label="T1 F1", markersize=4)
 
-    ax.plot(thresholds, [r["precision"] for r in sweep_t2],
+    ax.plot(reid_match_thresholds, [r["precision"] for r in sweep_t2],
             "o--", color="tab:orange", label="T2 Precision", markersize=3, alpha=0.7)
-    ax.plot(thresholds, [r["recall"] for r in sweep_t2],
+    ax.plot(reid_match_thresholds, [r["recall"] for r in sweep_t2],
             "^--", color="tab:orange", label="T2 Recall", markersize=3, alpha=0.7)
-    ax.plot(thresholds, [r["f1"] for r in sweep_t2],
+    ax.plot(reid_match_thresholds, [r["f1"] for r in sweep_t2],
             "s-", color="tab:orange", label="T2 F1", markersize=4)
 
-    ax.set_xlabel("Threshold")
+    ax.set_xlabel("ReID Match Threshold")
     ax.set_ylabel("Score")
-    ax.set_title(f"Metrics vs Threshold (N={n}, {model_name})")
+    ax.set_title(f"Metrics vs ReID Match Threshold (N={n}, {model_name})")
     ax.set_xlim(0.25, 1.0)
     ax.set_ylim(0, 1.05)
     ax.legend(loc="center left", fontsize=7, ncol=2)
@@ -385,9 +385,9 @@ def print_summary(person_ids, best_t1, best_t2):
     n = len(person_ids)
     print(f"\n  N={n:>2}  persons={person_ids}")
     print(f"    Test 1 (FirstOnly):       P={best_t1['precision']:.4f}  R={best_t1['recall']:.4f}  "
-          f"F1={best_t1['f1']:.4f}  (threshold={best_t1['threshold']:.2f})")
+          f"F1={best_t1['f1']:.4f}  (reid_match_threshold={best_t1['reid_match_threshold']:.2f})")
     print(f"    Test 2 (MultiEmbedding):  P={best_t2['precision']:.4f}  R={best_t2['recall']:.4f}  "
-          f"F1={best_t2['f1']:.4f}  (threshold={best_t2['threshold']:.2f})")
+          f"F1={best_t2['f1']:.4f}  (reid_match_threshold={best_t2['reid_match_threshold']:.2f})")
     dp = best_t2["precision"] - best_t1["precision"]
     dr = best_t2["recall"] - best_t1["recall"]
     df = best_t2["f1"] - best_t1["f1"]
@@ -410,7 +410,7 @@ def main():
     parser.add_argument("--person-ids", type=str, default=None,
                         help="Comma-separated person IDs for gallery (e.g., 1,3,5,86). "
                              "If omitted, saves candidate crops for review.")
-    parser.add_argument("--visibility-threshold", type=float, default=0.3,
+    parser.add_argument("--vis-threshold", type=float, default=0.3,
                         help="Minimum visibility for GT annotations (default: 0.3)")
     parser.add_argument("--update-interval", type=int, default=30,
                         help="Frames between gallery updates for Test 2 (default: 30)")
@@ -431,8 +431,8 @@ def main():
     output_dir = args.output_dir or str(Path(__file__).resolve().parent / "mot17_results")
 
     # Load GT
-    print(f"Loading GT from {gt_path} (vis >= {args.visibility_threshold})...")
-    frame_annotations, person_frame_counts = load_mot17_gt(gt_path, args.visibility_threshold)
+    print(f"Loading GT from {gt_path} (vis >= {args.vis_threshold})...")
+    frame_annotations, person_frame_counts = load_mot17_gt(gt_path, args.vis_threshold)
     total_anns = sum(len(v) for v in frame_annotations.values())
     print(f"  {len(frame_annotations)} frames, {total_anns} annotations, "
           f"{len(person_frame_counts)} unique persons")
@@ -474,12 +474,12 @@ def main():
     print("\n" + "=" * 76)
     print("Test 1: Single-frame gallery (FirstOnly)")
     print("=" * 76)
-    sweep_t1 = sweep_thresholds(
+    sweep_t1 = sweep_reid_match_thresholds(
         embedding_cache, frame_annotations, person_ids,
         strategy_factory=FirstOnlyStrategy,
         skip_frames=args.skip_frames,
     )
-    print_sweep_table("Test 1 — Threshold Sweep", sweep_t1)
+    print_sweep_table("Test 1 — ReID Match Threshold Sweep", sweep_t1)
     best_t1 = find_best_f1(sweep_t1)
 
     # --- Test 2: Enriched gallery (MultiEmbedding) ---
@@ -487,13 +487,13 @@ def main():
     print(f"Test 2: Enriched gallery (MultiEmbedding max_k={args.max_k}, "
           f"update every {args.update_interval} frames)")
     print("=" * 76)
-    sweep_t2 = sweep_thresholds(
+    sweep_t2 = sweep_reid_match_thresholds(
         embedding_cache, frame_annotations, person_ids,
         strategy_factory=lambda: MultiEmbeddingStrategy(max_k=args.max_k),
         update_interval=args.update_interval,
         skip_frames=args.skip_frames,
     )
-    print_sweep_table("Test 2 — Threshold Sweep", sweep_t2)
+    print_sweep_table("Test 2 — ReID Match Threshold Sweep", sweep_t2)
     best_t2 = find_best_f1(sweep_t2)
 
     # --- Plot ---

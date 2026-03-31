@@ -12,7 +12,7 @@ Usage:
     python reid_analysis/reid_analysis_app.py \
         --input 12354541-hd_1280_720_25fps.mp4 \
         --tiles-x 2 --tiles-y 3 \
-        --reid-model repvgg --threshold 0.7 \
+        --reid-model repvgg --reid-match-threshold 0.7 \
         --gallery-strategy first_only
 """
 
@@ -40,11 +40,11 @@ from gallery_strategies import create_strategy, STRATEGIES
 # ---------------------------------------------------------------------------
 
 class ReIDUserData(app_callback_class):
-    def __init__(self, reid_extractor, gallery, output_dir, threshold, match_log_path):
+    def __init__(self, reid_extractor, gallery, output_dir, reid_match_threshold, match_log_path):
         super().__init__()
         self.reid_extractor = reid_extractor
         self.gallery = gallery
-        self.threshold = threshold
+        self.reid_match_threshold = reid_match_threshold
 
         self.orig_dir = Path(output_dir) / "orig_person_images"
         self.match_dir = Path(output_dir) / "person_images"
@@ -133,7 +133,7 @@ def app_callback(element, buffer, user_data):
                 })
                 print(f"Frame {frame_count}: new {name} (first detection)")
             else:
-                matched_name, best_sim = gallery.match(emb, user_data.threshold)
+                matched_name, best_sim = gallery.match(emb, user_data.reid_match_threshold)
 
                 if matched_name is not None:
                     # Matched existing person
@@ -155,7 +155,7 @@ def app_callback(element, buffer, user_data):
                         "predicted_id": name, "similarity": round(best_sim, 4),
                         "is_new": True,
                     })
-                    print(f"Frame {frame_count}: new {name} (best match {best_sim:.3f} < {user_data.threshold})")
+                    print(f"Frame {frame_count}: new {name} (best match {best_sim:.3f} < {user_data.reid_match_threshold})")
 
     if frame_count % 100 == 0:
         print(f"  Frame {frame_count} processed, {user_data.total_crops} total crops")
@@ -177,8 +177,8 @@ def main():
     parser = get_pipeline_parser()
     parser.add_argument("--reid-model", type=str, choices=["repvgg", "osnet"], default="repvgg",
                         help="ReID model to use")
-    parser.add_argument("--threshold", type=float, default=0.7,
-                        help="Cosine similarity threshold for matching")
+    parser.add_argument("--reid-match-threshold", type=float, default=0.7,
+                        help="Cosine similarity threshold for ReID matching")
     parser.add_argument("--output-dir", type=str,
                         default=os.path.dirname(os.path.abspath(__file__)),
                         help="Base output directory")
@@ -217,7 +217,7 @@ def main():
         reid_extractor=reid_extractor,
         gallery=gallery,
         output_dir=args.output_dir,
-        threshold=args.threshold,
+        reid_match_threshold=args.reid_match_threshold,
         match_log_path=str(match_log_path),
     )
 
