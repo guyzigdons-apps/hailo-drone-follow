@@ -28,16 +28,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-try:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-
-# Add parent dir to path so we can import sibling modules
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from reid_analysis.reid_embedding_extractor import RepVGG512Extractor, OSNetExtractor
 from reid_analysis.gallery_strategies import FirstOnlyStrategy, MultiEmbeddingStrategy
@@ -117,6 +110,8 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
         print("Failed to load frame 1!")
         return
 
+    total_frames = len(frame_annotations)
+
     # Sort by annotation count (most visible persons first)
     frame1_person_ids = {ann["id"] for ann in frame1_anns}
     ranked = sorted(frame1_person_ids, key=lambda pid: person_frame_counts.get(pid, 0), reverse=True)
@@ -130,7 +125,7 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
         if crop is not None and crop.shape[0] > 10 and crop.shape[1] > 10:
             cv2.imwrite(str(candidates_dir / f"person_{pid}.jpg"), crop)
             count = person_frame_counts.get(pid, 0)
-            print(f"  person_{pid}: {crop.shape[1]}x{crop.shape[0]}px, visible in {count}/1050 frames")
+            print(f"  person_{pid}: {crop.shape[1]}x{crop.shape[0]}px, visible in {count}/{total_frames} frames")
             saved += 1
 
             # Draw bbox and label on annotated frame
@@ -312,9 +307,6 @@ def print_sweep_table(title, sweep_results):
 
 def plot_precision_recall(sweep_t1, sweep_t2, person_ids, output_path, model_name="repvgg"):
     """Save a Precision-Recall plot comparing Test 1 vs Test 2."""
-    if not HAS_MATPLOTLIB:
-        print("\nmatplotlib not installed — skipping plot. Install with: pip install matplotlib")
-        return
     n = len(person_ids)
 
     # Extract P/R pairs (sorted by recall ascending for a proper PR curve)

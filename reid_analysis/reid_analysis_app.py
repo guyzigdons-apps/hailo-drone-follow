@@ -16,6 +16,7 @@ Usage:
         --gallery-strategy first_only
 """
 
+import atexit
 import json
 import os
 import shutil
@@ -31,8 +32,8 @@ from hailo_apps.python.core.common.core import get_pipeline_parser
 from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import GStreamerTilingApp
 
-from reid_embedding_extractor import RepVGG512Extractor, OSNetExtractor
-from gallery_strategies import create_strategy, STRATEGIES
+from reid_analysis.reid_embedding_extractor import RepVGG512Extractor, OSNetExtractor
+from reid_analysis.gallery_strategies import create_strategy, STRATEGIES
 
 
 # ---------------------------------------------------------------------------
@@ -61,12 +62,14 @@ class ReIDUserData(app_callback_class):
 
         # Match log — JSONL file for offline evaluation
         self._log_file = open(match_log_path, "w")
+        atexit.register(self.close_log)
 
     def log_match(self, entry: dict):
         self._log_file.write(json.dumps(entry) + "\n")
 
     def close_log(self):
-        self._log_file.close()
+        if self._log_file and not self._log_file.closed:
+            self._log_file.close()
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +238,7 @@ def main():
     reid_extractor.release()
 
     # Summary
-    print(f"\nDone!")
+    print("\nDone!")
     print(f"Total person crops saved: {user_data.total_crops}")
     print(f"Unique persons found: {gallery.size}")
     print(f"Match log: {match_log_path}")

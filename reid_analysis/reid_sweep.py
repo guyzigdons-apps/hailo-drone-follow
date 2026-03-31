@@ -28,7 +28,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from reid_eval import load_match_log, load_ground_truth, evaluate, append_csv
+from reid_analysis.reid_eval import load_match_log, load_ground_truth, evaluate, append_csv
 
 
 DEFAULT_SWEEP = {

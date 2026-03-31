@@ -16,6 +16,7 @@ class GalleryStrategy:
     def __init__(self):
         self._names = []  # person names
         self._embeddings = []  # one per person
+        self._name_to_idx = {}  # name -> index for O(1) lookup
 
     @property
     def names(self):
@@ -25,8 +26,13 @@ class GalleryStrategy:
     def size(self):
         return len(self._names)
 
+    def _index_of(self, name: str) -> int:
+        """Get index of a person by name (O(1) lookup)."""
+        return self._name_to_idx[name]
+
     def add_person(self, name: str, embedding: np.ndarray):
         """Register a new person in the gallery."""
+        self._name_to_idx[name] = len(self._names)
         self._names.append(name)
         self._embeddings.append(embedding.copy())
 
@@ -67,7 +73,7 @@ class RunningAverageStrategy(GalleryStrategy):
         self._counts.append(1)
 
     def update(self, person_name: str, embedding: np.ndarray, frame_count: int):
-        idx = self._names.index(person_name)
+        idx = self._index_of(person_name)
         n = self._counts[idx]
         # Incremental average
         avg = (self._embeddings[idx] * n + embedding) / (n + 1)
@@ -92,7 +98,7 @@ class UpdateEveryNStrategy(GalleryStrategy):
         self._match_counts.append(0)
 
     def update(self, person_name: str, embedding: np.ndarray, frame_count: int):
-        idx = self._names.index(person_name)
+        idx = self._index_of(person_name)
         self._match_counts[idx] += 1
         if self._match_counts[idx] % self._n == 0:
             self._embeddings[idx] = embedding.copy()

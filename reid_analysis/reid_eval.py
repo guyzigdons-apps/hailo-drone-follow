@@ -70,10 +70,6 @@ def evaluate(entries, id_mapping, reid_match_threshold=None):
     new_persons_created = 0
     total_assignments = 0
 
-    # Track per-true-person stats
-    true_person_frames = defaultdict(set)  # true_id -> set of frames where correctly assigned
-    true_person_all_frames = defaultdict(set)  # true_id -> set of frames where detected at all
-
     # Track ID switches: per frame, what true person got which predicted ID
     frame_assignments = defaultdict(list)  # frame -> [(true_id, predicted_id)]
 
@@ -111,8 +107,6 @@ def evaluate(entries, id_mapping, reid_match_threshold=None):
         # ground truth, we use the id_mapping which says "predicted_id X is really person Y".
         # This is correct when a predicted ID consistently maps to one true person.
         # The crop's true identity is the same as predicted_id's true mapping.
-        true_person_all_frames[true_label].add(frame)
-        true_person_frames[true_label].add(frame)
         frame_assignments[frame].append((true_label, predicted_id))
         correct += 1
 

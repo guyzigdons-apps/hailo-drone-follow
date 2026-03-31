@@ -14,7 +14,6 @@ Usage:
 import os
 import numpy as np
 import cv2
-from typing import Optional
 
 from hailo_platform import HEF, VDevice, FormatType, HailoSchedulingAlgorithm
 
@@ -53,9 +52,11 @@ class HailoReIDExtractor:
             )
 
         # Build output name -> dtype mapping
+        output_infos = self._hef.get_output_vstream_infos()
         self._output_type = {
-            info.name: output_type for info in self._hef.get_output_vstream_infos()
+            info.name: output_type for info in output_infos
         }
+        self._first_output_name = output_infos[0].name
 
         # Configure (enter context)
         self._config_ctx = self._infer_model.configure()
@@ -190,9 +191,7 @@ class HailoReIDExtractor:
 
         # Collect outputs
         for binding in bindings_list:
-            # Get output from first (only) output layer for ReID models
-            out_name = list(self._output_type.keys())[0]
-            raw = binding.output(out_name).get_buffer()
+            raw = binding.output(self._first_output_name).get_buffer()
             raw_outputs.append(raw)
 
         return raw_outputs
