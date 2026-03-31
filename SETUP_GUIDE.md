@@ -199,10 +199,12 @@ git clone --recurse-submodules -b fix/rpi4-hw-decode \
 
 ### 2. Automated install (recommended)
 
-A bundled script in this repo handles deps, builds, and config deployment in one step:
+A bundled script in this repo handles deps, builds, and config deployment in one step.
+It auto-detects the platform (x86_64 / RPi5 / RPi4), or you can override with `--platform`:
 ```bash
 cd ~/hailo-drone-follow
-sudo ./install_ground_station.sh
+sudo ./scripts/install_ground_station.sh
+# Or explicitly: sudo ./scripts/install_ground_station.sh --platform ubuntu-x86
 ```
 
 ### 3. Manual install (step-by-step)
@@ -254,8 +256,14 @@ scp pi@<air-ip>:/usr/local/share/openhd/txrx.key /tmp/txrx.key
 sudo cp /tmp/txrx.key /usr/local/share/openhd/txrx.key
 ```
 
-### 4. Running on x86_64
+### 4. Running
 
+Use the bundled start script (launches both OpenHD ground + QOpenHD):
+```bash
+./scripts/start_ground.sh
+```
+
+Or manually:
 ```bash
 # Terminal 1 — OpenHD ground:
 sudo /usr/local/bin/openhd --ground

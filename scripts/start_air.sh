@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs OpenHD air and drone-follow side by side on the drone (RPi)
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 OPENHD_BIN="/usr/local/bin/openhd"
 
@@ -17,7 +17,7 @@ sleep 3
 
 # Set up drone-follow environment and run
 cd "$REPO_DIR"
-source setup_env.sh
+source "$REPO_DIR/setup_env.sh"
 export DISPLAY=:0
 drone-follow --input rpi --openhd-stream --connection tcpout://127.0.0.1:5760 --tiles-x 1 --tiles-y 1 &
 FOLLOW_PID=$!
