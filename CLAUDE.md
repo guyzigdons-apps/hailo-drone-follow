@@ -61,7 +61,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 
 ## Virtual Environment
 
-All dependencies are in `venv/`. Always `source setup_env.sh` before running.
+All dependencies live in hailo-apps' venv (`hailo-apps/venv_hailo_apps/`). Always `source setup_env.sh` before running — it activates the hailo-apps venv and sets up paths.
 
 ## Development Machine Setup (x86_64)
 
