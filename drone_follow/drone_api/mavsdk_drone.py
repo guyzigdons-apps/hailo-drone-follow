@@ -297,8 +297,8 @@ async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asynci
             if shutdown.is_set():
                 return
             altitude_cache["m"] = position.relative_altitude_m
-    except Exception:
-        pass
+    except Exception as e:
+        LOGGER.warning("[drone] Altitude telemetry task failed: %s", e)
 
 
 async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None, ui_state=None, target_state=None):

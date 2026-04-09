@@ -34,8 +34,9 @@ import time
 
 LOGGER = logging.getLogger("drone_follow.openhd_bridge")
 
-# Mapping: python_field -> (mavlink_id, python_type)
-# Values are sent as native float or int (no scaling).
+# Mapping: wire_name -> (mavlink_id, python_type)
+# wire_name matches both the JSON "param" field from OpenHD and the
+# ControllerConfig attribute name.  Values are native float or int (no scaling).
 _CONFIG_PARAMS = {
     "kp_yaw":                   ("DF_KP_YAW",    float),
     "kp_forward":               ("DF_KP_FWD",     float),
@@ -46,7 +47,7 @@ _CONFIG_PARAMS = {
     "dead_zone_height_percent": ("DF_DZ_H_PCT",   float),
     "yaw_alpha":                ("DF_YAW_ALPHA",  float),
     "forward_alpha":            ("DF_FWD_ALPHA",  float),
-    "takeoff_altitude":         ("DF_TAKEOFF_M",  float),
+    "target_altitude":          ("DF_TGT_ALT",   float),
     "yaw_only":                 ("DF_YAW_ONLY",   bool),
     "fixed_altitude":           ("DF_FIX_ALT",    bool),
     "smooth_yaw":               ("DF_SMTH_YAW",   bool),
@@ -208,12 +209,12 @@ class OpenHDBridge:
         self._current_bitrate_kbps = kbps
         LOGGER.info("[openhd_bridge] x264enc bitrate set to %d kbps", kbps)
 
-    def _apply_config_param(self, python_name, value):
+    def _apply_config_param(self, param_name, value):
         """Apply a single parameter change from OpenHD to ControllerConfig."""
-        _, py_type = _CONFIG_PARAMS[python_name]
+        _, py_type = _CONFIG_PARAMS[param_name]
 
         # Convert to Python type
-        if python_name in _NULLABLE_FIELDS and value == 0:
+        if param_name in _NULLABLE_FIELDS and value == 0:
             py_value = None
         elif py_type is bool:
             py_value = bool(int(value))
@@ -223,15 +224,15 @@ class OpenHDBridge:
             py_value = value
 
         # Save old value for rollback on validation failure
-        old_value = getattr(self._config, python_name, None)
+        old_value = getattr(self._config, param_name, None)
         try:
-            setattr(self._config, python_name, py_value)
+            setattr(self._config, param_name, py_value)
             self._config.validate()
-            LOGGER.info("[openhd_bridge] %s = %s", python_name, py_value)
+            LOGGER.info("[openhd_bridge] %s = %s", param_name, py_value)
         except ValueError as e:
-            setattr(self._config, python_name, old_value)
+            setattr(self._config, param_name, old_value)
             LOGGER.warning("[openhd_bridge] Rejected %s=%s: %s",
-                           python_name, py_value, e)
+                           param_name, py_value, e)
 
     # -- Reporter: Python -> OpenHD ------------------------------------------
 
@@ -260,16 +261,16 @@ class OpenHDBridge:
     def _send_report(self, sock):
         """Send all current parameter values to OpenHD."""
         params = {}
-        for python_name, (_, py_type) in _CONFIG_PARAMS.items():
-            py_value = getattr(self._config, python_name, None)
-            if python_name in _NULLABLE_FIELDS and py_value is None:
-                params[python_name] = 0.0
+        for param_name, (_, py_type) in _CONFIG_PARAMS.items():
+            py_value = getattr(self._config, param_name, None)
+            if param_name in _NULLABLE_FIELDS and py_value is None:
+                params[param_name] = 0.0
             elif py_type is bool:
-                params[python_name] = int(py_value) if py_value is not None else 0
+                params[param_name] = int(py_value) if py_value is not None else 0
             elif py_type is float:
-                params[python_name] = float(py_value) if py_value is not None else 0.0
+                params[param_name] = float(py_value) if py_value is not None else 0.0
             else:
-                params[python_name] = py_value if py_value is not None else 0
+                params[param_name] = py_value if py_value is not None else 0
 
         # Sync follow_id/active_id into params for OpenHD's HailoFollowBridge
         # parameter cache (these are also in the binary v3 payload, but the

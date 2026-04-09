@@ -169,8 +169,8 @@
       "read_only": false
     },
     {
-      "id": "takeoff_altitude",
-      "mavlink_id": "DF_TAKEOFF_M",
+      "id": "target_altitude",
+      "mavlink_id": "DF_TGT_ALT",
       "type": "float",
       "default": 3.0,
       "min": 1.0,
@@ -178,8 +178,8 @@
       "step": 0.5,
       "group": "flight",
       "order": 1,
-      "label": "Takeoff altitude (m)",
-      "description": "Altitude used for automated takeoff",
+      "label": "Target altitude (m)",
+      "description": "Target altitude for flight and automated takeoff",
       "read_only": false
     },
     {
