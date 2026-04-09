@@ -136,6 +136,12 @@ def app_callback(element, buffer, user_data):
     available_ids, person_by_id, person_to_id = _run_tracker(
         user_data.byte_tracker, persons)
 
+    # Attach tracking IDs to Hailo detection objects so hailooverlay renders them
+    for person in persons:
+        track_id = person_to_id.get(id(person))
+        if track_id is not None:
+            person.add_object(hailo.HailoUniqueID(track_id, hailo.TRACKING_ID))
+
     # --- Target selection ---
     target_id = target_state.get_target() if target_state is not None else None
 
@@ -305,7 +311,8 @@ def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, na
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
-               parser: Optional[argparse.ArgumentParser] = None, record_dir=None):
+               parser: Optional[argparse.ArgumentParser] = None,
+               record_enabled=False, record_dir=None):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -348,9 +355,11 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
         def __init__(self, app_callback, user_data, parser=None, eos_reached=None,
-                     ui_enabled=False, ui_state=None, ui_fps=30, record_dir=None):
+                     ui_enabled=False, ui_state=None, ui_fps=30,
+                     record_enabled=False, record_dir=None):
             self._eos_reached = eos_reached
             self._ui_enabled = ui_enabled
+            self._record_enabled = record_enabled
             self._ui_state = ui_state
             self._ui_fps = ui_fps
             self._recording = False
@@ -568,7 +577,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         def _generate_record_path(self):
             os.makedirs(self._record_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            return os.path.join(self._record_dir, f"rec_{ts}.mkv")
+            return os.path.join(self._record_dir, f"rec_{ts}.mp4")
 
         def start_recording(self, path=None):
             """Start GStreamer-native recording. Returns the output file path."""
@@ -578,8 +587,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 if self._recording:
                     LOGGER.warning("[record] Already recording")
                     return None
-                if not self._ui_enabled:
-                    LOGGER.error("[record] Recording requires UI pipeline (--ui)")
+                if not self._record_enabled:
+                    LOGGER.error("[record] Recording requires --record flag")
                     return None
 
                 valve = self.pipeline.get_by_name("record_valve")
@@ -640,20 +649,25 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 LOGGER.info("[record] Stopped recording: %s", path)
                 return path
 
+        def cleanup_recording_branch(self):
+            """Force recording branch elements to NULL so they don't block pipeline shutdown."""
+            if not self._record_enabled:
+                return
+            Gst = _get_gst()
+            with self._record_lock:
+                for name in ("record_enc", "record_mux", "record_sink"):
+                    el = self.pipeline.get_by_name(name)
+                    if el is not None:
+                        el.set_state(Gst.State.NULL)
+
         def get_pipeline_string(self):
             openhd_stream = getattr(self.options_menu, 'openhd_stream', False)
             no_display = getattr(self.options_menu, 'no_display', False)
             is_shm = str(self.video_source).startswith('shm://')
 
             # If no custom output needed, delegate to parent
-            if not self._ui_enabled and not openhd_stream and not is_shm and not no_display:
+            if not self._ui_enabled and not self._record_enabled and not openhd_stream and not is_shm and not no_display:
                 return super().get_pipeline_string()
-
-            # Build pipeline with custom output (OpenHD stream and/or MJPEG UI)
-            from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
-                SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-                TILE_CROPPER_PIPELINE, QUEUE,
-            )
 
             if is_shm:
                 source_pipeline = _shm_source_pipeline(
@@ -732,8 +746,10 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
                 )
 
+            # Build extra branches beyond primary
+            extra_branches = []
+
             if self._ui_enabled:
-                # MJPEG branch (raw video, no overlay — React draws bboxes)
                 mjpeg_branch = (
                     f"videoconvert n-threads=2 ! "
                     f"videorate max-rate={self._ui_fps} ! "
@@ -741,23 +757,27 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     f"jpegenc quality=70 ! "
                     f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
                 )
+                extra_branches.append(
+                    f"t. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch}"
+                )
 
-                # Recording branch (valve drops by default; toggled at runtime)
+            if self._record_enabled:
                 record_branch = (
                     f"valve name=record_valve drop=true ! "
                     f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
                     f"videoconvert n-threads=2 ! "
                     f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
-                    f"matroskamux name=record_mux ! filesink name=record_sink async=false location=/dev/null"
+                    f"mp4mux name=record_mux faststart=true ! filesink name=record_sink async=false location=/dev/null"
+                )
+                extra_branches.append(
+                    f"t. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
                 )
 
-                # Tee splits into primary + MJPEG + recording
-                # All branches use leaky queues so a slow branch never stalls the others
+            if extra_branches:
                 output_pipeline = (
-                    f"tee name=ui_tee "
-                    f"ui_tee. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_branch} "
-                    f"ui_tee. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
-                    f"ui_tee. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
+                    f"tee name=t "
+                    f"t. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_branch} "
+                    + " ".join(extra_branches)
                 )
             else:
                 output_pipeline = primary_branch
@@ -782,6 +802,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
-        record_dir=record_dir,
+        record_enabled=record_enabled, record_dir=record_dir,
     )
     return app

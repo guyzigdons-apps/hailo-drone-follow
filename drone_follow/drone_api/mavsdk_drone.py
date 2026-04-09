@@ -6,6 +6,7 @@ VelocityBodyYawspeed internally. No other module needs to import mavsdk.
 
 import asyncio
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -301,13 +302,73 @@ async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asynci
         LOGGER.warning("[drone] Altitude telemetry task failed: %s", e)
 
 
-async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None, ui_state=None, target_state=None):
+async def _telemetry_velocity_task(drone, telemetry_cache: dict, shutdown: asyncio.Event) -> None:
+    """Background task: stream velocity NED and store in telemetry_cache."""
+    try:
+        async for vel in drone.telemetry.velocity_ned():
+            if shutdown.is_set():
+                return
+            telemetry_cache["vel_north"] = vel.north_m_s
+            telemetry_cache["vel_east"] = vel.east_m_s
+            telemetry_cache["vel_down"] = vel.down_m_s
+    except Exception:
+        pass
+
+
+async def _telemetry_position_task(drone, telemetry_cache: dict, shutdown: asyncio.Event) -> None:
+    """Background task: stream position and store lat/lon/abs alt in telemetry_cache."""
+    try:
+        async for pos in drone.telemetry.position():
+            if shutdown.is_set():
+                return
+            telemetry_cache["lat"] = pos.latitude_deg
+            telemetry_cache["lon"] = pos.longitude_deg
+            telemetry_cache["abs_alt"] = pos.absolute_altitude_m
+            telemetry_cache["rel_alt"] = pos.relative_altitude_m
+    except Exception:
+        pass
+
+
+async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict,
+                               shutdown: asyncio.Event, ui_state=None) -> None:
+    """Background task: log drone telemetry at 1 Hz for flight debugging."""
+    telem_logger = logging.getLogger("drone_follow.telemetry")
+    interval = 1.0
+    while not shutdown.is_set():
+        await asyncio.sleep(interval)
+        alt = altitude_cache.get("m")
+        rel_alt = telemetry_cache.get("rel_alt")
+        vn = telemetry_cache.get("vel_north")
+        ve = telemetry_cache.get("vel_east")
+        vd = telemetry_cache.get("vel_down")
+        if alt is None and vn is None:
+            continue
+        parts = []
+        if rel_alt is not None:
+            parts.append(f"alt={rel_alt:.2f}m")
+        if vn is not None:
+            horiz_speed = math.sqrt(vn**2 + ve**2)
+            parts.append(f"Vn={vn:+.2f} Ve={ve:+.2f} Vd={vd:+.2f} hSpd={horiz_speed:.2f}m/s")
+        lat = telemetry_cache.get("lat")
+        lon = telemetry_cache.get("lon")
+        if lat is not None:
+            parts.append(f"pos=({lat:.6f},{lon:.6f})")
+        msg = "[TELEM] " + " | ".join(parts)
+        telem_logger.info(msg)
+        if ui_state is not None:
+            ui_state.push_log(msg)
+
+
+async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None,
+                            ui_state=None, target_state=None, telemetry_cache: Optional[dict] = None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
     When config.reference_altitude_m is set and altitude_cache is provided, target bbox height is scaled by altitude.
     If ui_state is provided, logs are also pushed to the web UI.
     """
+    if telemetry_cache is None:
+        telemetry_cache = {}
     vel_api = VelocityCommandAPI(drone, config)
 
     def _log(msg: str, level: int = logging.INFO):
@@ -410,7 +471,18 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
             # Periodic status log to UI
             if now - _last_log_time >= _LOG_INTERVAL:
                 _last_log_time = now
-                alt_str = f" alt={altitude_cache['m']:.1f}m" if altitude_cache and altitude_cache.get("m") is not None else ""
+                # Build altitude + actual velocity string for all modes
+                alt_val = altitude_cache.get("m") if altitude_cache else None
+                alt_str = f" alt={alt_val:.2f}m" if alt_val is not None else ""
+                if alt_val is not None and config.fixed_altitude:
+                    alt_err = config.target_altitude - alt_val
+                    alt_str += f"(err={alt_err:+.2f})"
+                actual_vd = telemetry_cache.get("vel_down")
+                if actual_vd is not None:
+                    vn = telemetry_cache.get("vel_north", 0)
+                    ve = telemetry_cache.get("vel_east", 0)
+                    hspd = math.sqrt(vn**2 + ve**2)
+                    alt_str += f" actual_Vd={actual_vd:+.2f} hSpd={hspd:.2f}"
                 if detection is not None:
                     _log(f"[TRACK] Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+5.2f} Down:{cmd.down_m_s:+5.2f}"
                          f" pos=({detection.center_x:.2f},{detection.center_y:.2f}) bbox_h={detection.bbox_height:.2f}"
@@ -574,7 +646,17 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
         alt_task = None
         control_task = None
         watch_task = None
+        telemetry_cache: dict = {}
+        telem_tasks: list = []
         try:
+            # Start telemetry streaming tasks for logging
+            telem_tasks.append(asyncio.create_task(
+                _telemetry_velocity_task(drone, telemetry_cache, shutdown)))
+            telem_tasks.append(asyncio.create_task(
+                _telemetry_position_task(drone, telemetry_cache, shutdown)))
+            telem_tasks.append(asyncio.create_task(
+                _telemetry_log_task(drone, {}, telemetry_cache, shutdown, ui_state=ui_state)))
+
             if manage_takeoff_landing:
                 await drone.action.set_takeoff_altitude(args.target_altitude)
                 # Retry arm() — PX4 may need time to pass pre-arm checks
@@ -606,8 +688,13 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
 
                 altitude_cache: dict = {}
                 alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
+                # Update telem log task to use altitude_cache
+                await _cancel_task(telem_tasks[-1])
+                telem_tasks[-1] = asyncio.create_task(
+                    _telemetry_log_task(drone, altitude_cache, telemetry_cache, shutdown, ui_state=ui_state))
                 control_task = asyncio.create_task(
-                    live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state, target_state=target_state))
+                    live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
+                                      ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))
 
                 done, pending = await asyncio.wait(
                     [
@@ -627,6 +714,10 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                 # switch itself — only the pilot decides when to hand over.
                 altitude_cache: dict = {}
                 alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
+                # Update telem log task to use altitude_cache
+                await _cancel_task(telem_tasks[-1])
+                telem_tasks[-1] = asyncio.create_task(
+                    _telemetry_log_task(drone, altitude_cache, telemetry_cache, shutdown, ui_state=ui_state))
 
                 while not shutdown.is_set():
                     await _wait_for_offboard_mode(drone, shutdown)
@@ -636,7 +727,8 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     offboard_lost = asyncio.Event()
                     vel_api.reset_filter()
                     control_task = asyncio.create_task(
-                        live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state, target_state=target_state))
+                        live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
+                                          ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 
@@ -676,6 +768,8 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
         except asyncio.CancelledError:
             LOGGER.warning("[drone] Shutdown requested...")
         finally:
+            for t in telem_tasks:
+                await _cancel_task(t)
             if alt_task is not None:
                 await _cancel_task(alt_task)
             if watch_task is not None:
