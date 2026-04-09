@@ -71,8 +71,11 @@ if ! $SKIP_HAILO_APPS; then
     echo -e "  Using hailo-apps at: ${CYAN}$HAILO_APPS_DIR${NC}"
 
     # ─── Run hailo_installer.sh (installs Hailo software stack) ──────
+    # Skip on RPi (aarch64) — Hailo packages are pre-installed by the OS
     HAILO_INSTALLER="$HAILO_APPS_DIR/scripts/hailo_installer.sh"
-    if [ -f "$HAILO_INSTALLER" ]; then
+    if [[ "$(uname -m)" == "aarch64" ]]; then
+        echo -e "${YELLOW}  Skipping hailo_installer.sh on RPi (aarch64) — Hailo packages are pre-installed.${NC}"
+    elif [ -f "$HAILO_INSTALLER" ]; then
         # Detect Hailo device type
         HAILO_DEVICE=""
         if hailortcli fw-control identify 2>/dev/null | grep -qi "hailo-8l\|hailo8l"; then
