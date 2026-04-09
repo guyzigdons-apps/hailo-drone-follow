@@ -61,7 +61,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 
 ## Virtual Environment
 
-All dependencies are in `venv/`. Always `source setup_env.sh` before running.
+All dependencies live in hailo-apps' venv (`hailo-apps/venv_hailo_apps/`). Always `source setup_env.sh` before running — it activates the hailo-apps venv and sets up paths.
 
 ## Development Machine Setup (x86_64)
 
@@ -76,11 +76,16 @@ This repo can also run on an x86_64 development machine instead of the RPi targe
 
 Prerequisites:
 - Ubuntu 22.04 with Python 3.10+
-- `hailort` and `hailo-tappas-core` deb packages installed (match your Hailo device)
+- HailoRT driver deb installed and device detected (`hailortcli fw-control identify`)
 - Node.js / npm (optional, for the web UI)
 
 ```bash
-# Run the installer (clones hailo-apps, creates venv, installs everything, builds UI)
+# 1. Install HailoRT driver first (download from Hailo Developer Zone):
+sudo dpkg -i hailort_<version>_<arch>.deb
+sudo reboot
+hailortcli fw-control identify  # verify device detected
+
+# 2. Run the installer (clones hailo-apps, runs hailo_installer.sh, creates venv, builds UI)
 ./install.sh
 
 # Options:
@@ -89,6 +94,8 @@ Prerequisites:
 #   --skip-ui              Skip UI npm install and build
 #   --skip-python          Skip Python dependency installation
 ```
+
+The installer auto-detects the Hailo device type (hailo8/hailo8l/hailo10h) and runs `hailo-apps/scripts/hailo_installer.sh` with the correct argument.
 
 Verify: `source setup_env.sh && drone-follow --help`
 
