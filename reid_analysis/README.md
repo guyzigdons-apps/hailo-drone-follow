@@ -177,6 +177,24 @@ Default sweep: 2 models x 5 thresholds x 3 strategies = 30 runs.
 
 Both produce L2-normalized embeddings (cosine similarity = dot product). Input size is read from the HEF file at runtime (currently 256x128 for both models).
 
+### Downloading HEF files
+
+The pre-compiled HEF files are available from the Hailo Model Zoo:
+https://github.com/hailo-ai/hailo_model_zoo/blob/master/docs/public_models/HAILO8/HAILO8_person_re_id.rst
+
+Download the HEFs and place them in:
+
+```
+/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef
+/usr/local/hailo/resources/models/hailo8/osnet_x1_0.hef
+```
+
+This is the default search path. To use a different location, set the `HAILO_MODELS_DIR` environment variable:
+
+```bash
+export HAILO_MODELS_DIR=/path/to/your/models
+```
+
 ## Key CLI Arguments
 
 ### reid_analysis_app.py
