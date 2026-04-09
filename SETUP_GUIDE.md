@@ -281,6 +281,21 @@ WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
 > - No EGLFS — use Wayland or X11 platform
 > - Reboot required after WiFi driver install (`build_native.sh driver`)
 
+### NetworkManager and OpenHD
+
+OpenHD uses the USB WiFi adapter in monitor mode. When OpenHD exits,
+NetworkManager detects the adapter is available and tries to reconfigure it,
+triggering a credentials popup. To prevent this, tell NetworkManager to
+ignore USB WiFi adapters (`wlx*` — only matches USB devices, not built-in WiFi):
+
+```bash
+sudo tee /etc/NetworkManager/conf.d/openhd-unmanaged.conf <<'EOF'
+[keyfile]
+unmanaged-devices=interface-name:wlx*
+EOF
+sudo systemctl restart NetworkManager
+```
+
 ---
 
 ## Camera Modes
@@ -470,3 +485,4 @@ python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ --all
 | OpenHD (C++) | `cd ~/OpenHD/OpenHD && sudo cmake --build build_release -j$(nproc) && sudo cp build_release/openhd /usr/local/bin/openhd` |
 | QOpenHD (C++/QML) | `cd ~/qopenHD/build/release && make -j$(nproc)` |
 | drone-follow (Python) | No build — just restart the process |
+| df_params.json | `sudo cp ~/hailo-drone-follow/df_params.json /usr/local/share/openhd/df_params.json` — redeploy on **both** air and ground units after any parameter changes |
