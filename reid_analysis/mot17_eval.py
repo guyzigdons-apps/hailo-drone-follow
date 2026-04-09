@@ -32,7 +32,7 @@ import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from hailo_apps.python.core.common.hailo_logger import get_logger
+from hailo_apps.python.core.common.hailo_logger import get_logger, init_logging
 
 from reid_analysis.gallery_strategies import FirstOnlyStrategy, MultiEmbeddingStrategy
 from reid_analysis.reid_embedding_extractor import OSNetExtractor, RepVGG512Extractor
@@ -115,6 +115,7 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
         return
 
     total_frames = len(frame_annotations)
+    logger.info("Output directory: %s", output_dir)
 
     # Sort by annotation count (most visible persons first)
     frame1_person_ids = {ann["id"] for ann in frame1_anns}
@@ -127,11 +128,12 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
         ann = next(a for a in frame1_anns if a["id"] == pid)
         crop = extract_crop(frame1, ann)
         if crop is not None and crop.shape[0] > 10 and crop.shape[1] > 10:
-            cv2.imwrite(str(candidates_dir / f"person_{pid}.jpg"), crop)
+            crop_path = candidates_dir / f"person_{pid}.jpg"
+            cv2.imwrite(str(crop_path), crop)
             count = person_frame_counts.get(pid, 0)
             logger.info(
-                "  person_%d: %dx%dpx, visible in %d/%d frames",
-                pid, crop.shape[1], crop.shape[0], count, total_frames,
+                "  Created %s (%dx%dpx, visible in %d/%d frames)",
+                crop_path, crop.shape[1], crop.shape[0], count, total_frames,
             )
             saved += 1
 
@@ -150,9 +152,9 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
     # Save annotated frame
     annotated_path = Path(output_dir) / "candidates_frame1.jpg"
     cv2.imwrite(str(annotated_path), annotated)
+    logger.info("Created %s", annotated_path)
 
     logger.info("Saved %d candidate crops to %s/", saved, candidates_dir)
-    logger.info("Annotated frame with boxes: %s", annotated_path)
     logger.info("Review and re-run with --person-ids, e.g.:")
     logger.info(
         "  python %s --dataset-dir %s --person-ids %s",
@@ -401,6 +403,8 @@ def print_summary(person_ids, best_t1, best_t2):
 # ---------------------------------------------------------------------------
 
 def main():
+    init_logging()
+
     parser = argparse.ArgumentParser(
         description="MOT17 ReID Gallery & Similarity Evaluation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -450,6 +454,7 @@ def main():
     # --- Evaluation mode ---
     person_ids = [int(x.strip()) for x in args.person_ids.split(",")]
     logger.info("Evaluating %d persons: %s", len(person_ids), person_ids)
+    logger.info("Output directory: %s", output_dir)
 
     # Validate person IDs exist in frame 1
     frame1_ids = {a["id"] for a in frame_annotations.get(1, [])}
@@ -502,7 +507,9 @@ def main():
 
     # --- Plot ---
     plot_path = Path(output_dir) / f"pr_plot_N{len(person_ids)}_{args.reid_model}.png"
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     plot_precision_recall(sweep_t1, sweep_t2, person_ids, plot_path, model_name=args.reid_model)
+    logger.info("Created %s", plot_path)
 
     # --- Summary ---
     print("\n" + "=" * 76)
