@@ -70,8 +70,40 @@ if ! $SKIP_HAILO_APPS; then
 
     echo -e "  Using hailo-apps at: ${CYAN}$HAILO_APPS_DIR${NC}"
 
-    # Run hailo-apps' own installer (handles system deps, venv, python
-    # bindings, resources, and post-install — requires sudo)
+    # ─── Run hailo_installer.sh (installs Hailo software stack) ──────
+    HAILO_INSTALLER="$HAILO_APPS_DIR/scripts/hailo_installer.sh"
+    if [ -f "$HAILO_INSTALLER" ]; then
+        # Detect Hailo device type
+        HAILO_DEVICE=""
+        if hailortcli fw-control identify 2>/dev/null | grep -qi "hailo-8l\|hailo8l"; then
+            HAILO_DEVICE="hailo8l"
+        elif hailortcli fw-control identify 2>/dev/null | grep -qi "hailo-8\|hailo8"; then
+            HAILO_DEVICE="hailo8"
+        elif hailortcli fw-control identify 2>/dev/null | grep -qi "hailo-10\|hailo10"; then
+            HAILO_DEVICE="hailo10h"
+        fi
+
+        if [ -z "$HAILO_DEVICE" ]; then
+            echo -e "${YELLOW}  Could not auto-detect Hailo device type.${NC}"
+            echo -e "  Please specify your device (hailo8 / hailo8l / hailo10h):"
+            read -r HAILO_DEVICE
+        fi
+
+        if [[ "$HAILO_DEVICE" =~ ^(hailo8|hailo8l|hailo10h)$ ]]; then
+            echo -e "  Running hailo_installer.sh for ${CYAN}$HAILO_DEVICE${NC}..."
+            sudo bash "$HAILO_INSTALLER" "$HAILO_DEVICE"
+        else
+            echo -e "${RED}  Invalid device type '$HAILO_DEVICE'. Skipping hailo_installer.sh.${NC}"
+            echo -e "  Run manually: sudo $HAILO_INSTALLER <hailo8|hailo8l|hailo10h>"
+        fi
+    else
+        echo -e "${YELLOW}  hailo_installer.sh not found at $HAILO_INSTALLER${NC}"
+        echo -e "  Make sure hailo-apps is cloned. You can run it manually later:"
+        echo -e "    sudo $HAILO_INSTALLER <hailo8|hailo8l|hailo10h>"
+    fi
+
+    # Run hailo-apps' own installer (handles venv, python bindings,
+    # resources, and post-install — requires sudo)
     echo -e "  Running hailo-apps install.sh..."
     sudo "$HAILO_APPS_DIR/install.sh"
 else

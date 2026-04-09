@@ -4,24 +4,52 @@
 
 ### Prerequisites
 
-- **Hailo application infrastructure** (hailort, hailo-tappas-core, Python bindings).
-- **Python 3.9+** with the project virtual environment activated (`source setup_env.sh`).
-- **MAVSDK** for drone connection and offboard control (installed via pip in the project venv).
+- **Ubuntu 22.04+** with Python 3.9+
+- **Hailo device** (Hailo-8, Hailo-8L, or Hailo-10H) — PCIe card or M.2 module
+- **HailoRT driver** — must be installed before running the installer (see below)
+- **Node.js / npm** (optional, for the web UI)
 - For **simulation**: Gazebo Garden (`gz-garden`), `python3-gz-transport13`, `python3-gz-msgs10`. The bundled PX4 SITL is set up automatically via `sim/setup_sim.sh`.
 - For **real drone**: PX4 (or compatible) firmware and a connection (e.g. USB serial or UDP).
 
-### Steps
+### Step 1: Install HailoRT Driver (manual)
 
-1. **Run the installer** (creates venv, installs hailo-apps + Python deps, builds UI):
-   ```bash
-   ./install.sh
-   ```
+The HailoRT driver must be installed before the rest of the setup. Download the `.deb` package for your platform from the [Hailo Developer Zone](https://hailo.ai/developer-zone/software-downloads/):
 
-2. **Verify** the app parses and shows help:
-   ```bash
-   source setup_env.sh
-   drone-follow --help
-   ```
+```bash
+# Install the driver deb (example filename — use the one matching your version and platform):
+sudo dpkg -i hailort_<version>_<arch>.deb
+
+# Reboot to load the kernel module:
+sudo reboot
+
+# Verify the device is detected:
+hailortcli fw-control identify
+```
+
+You should see your device identified (e.g. "Hailo-8" or "Hailo-8L"). If `hailortcli` is not found or the device is not detected, the driver is not installed correctly.
+
+### Step 2: Run the Installer
+
+The installer clones hailo-apps, runs `hailo_installer.sh` (installs firmware and Hailo software stack for your device), installs Python dependencies, and builds the UI:
+
+```bash
+./install.sh
+```
+
+The installer auto-detects your Hailo device type (hailo8 / hailo8l / hailo10h). If detection fails, it will prompt you to specify it manually.
+
+**Installer options:**
+- `--hailo-apps-dir DIR` — Use an existing hailo-apps checkout (default: `./hailo-apps`)
+- `--skip-hailo-apps` — Skip hailo-apps clone and system deps (if already set up)
+- `--skip-ui` — Skip UI npm install and build
+- `--skip-python` — Skip Python dependency installation
+
+### Step 3: Verify
+
+```bash
+source setup_env.sh
+drone-follow --help
+```
 
 ## Simulation (Bundled PX4 SITL)
 
