@@ -203,7 +203,8 @@ def main():
         try:
             loop.run_until_complete(
                 run_live_drone(args, shared_state, shutdown,
-                              config=controller_config, ui_state=ui_state))
+                              config=controller_config, ui_state=ui_state,
+                              target_state=target_state))
         except Exception:
             LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
         finally:

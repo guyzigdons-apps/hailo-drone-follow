@@ -301,7 +301,7 @@ async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asynci
         pass
 
 
-async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None, ui_state=None):
+async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None, ui_state=None, target_state=None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
@@ -515,7 +515,7 @@ async def _wait_for_connection(drone: System) -> bool:
 
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         config=None, ui_state=None):
+                         config=None, ui_state=None, target_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If config is provided, use it directly (allows live mutation from web UI).
@@ -607,7 +607,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                 altitude_cache: dict = {}
                 alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
                 control_task = asyncio.create_task(
-                    live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
+                    live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state, target_state=target_state))
 
                 done, pending = await asyncio.wait(
                     [
@@ -636,7 +636,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     offboard_lost = asyncio.Event()
                     vel_api.reset_filter()
                     control_task = asyncio.create_task(
-                        live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
+                        live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state, target_state=target_state))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 
