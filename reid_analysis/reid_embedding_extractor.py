@@ -12,10 +12,15 @@ Usage:
 """
 
 import os
-import numpy as np
-import cv2
 
-from hailo_platform import HEF, VDevice, FormatType, HailoSchedulingAlgorithm
+import cv2
+import numpy as np
+from hailo_platform import HEF, FormatType, HailoSchedulingAlgorithm, VDevice
+
+from hailo_apps.python.core.common.defines import SHARED_VDEVICE_GROUP_ID
+from hailo_apps.python.core.common.hailo_logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class HailoReIDExtractor:
@@ -37,7 +42,7 @@ class HailoReIDExtractor:
         # ── Load HEF & configure VDevice ──
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-        params.group_id = "SHARED"
+        params.group_id = SHARED_VDEVICE_GROUP_ID
         self._vdevice = VDevice(params)
 
         self._hef = HEF(os.fspath(hef_path))
@@ -199,10 +204,22 @@ class HailoReIDExtractor:
     # ── Cleanup ──
 
     def release(self):
-        """Release HailoRT resources."""
+        """Release HailoRT resources (config context first, then VDevice)."""
         if self._config_ctx:
             self._config_ctx.__exit__(None, None, None)
             self._config_ctx = None
+        if self._vdevice:
+            self._vdevice.release()
+            self._vdevice = None
+
+
+# ── Default HEF paths (overridable via constructor or env) ──
+
+_HAILO_MODELS_DIR = os.environ.get(
+    "HAILO_MODELS_DIR", "/usr/local/hailo/resources/models/hailo8"
+)
+_DEFAULT_OSNET_HEF = os.path.join(_HAILO_MODELS_DIR, "osnet_x1_0.hef")
+_DEFAULT_REPVGG_HEF = os.path.join(_HAILO_MODELS_DIR, "repvgg_a0_person_reid_512.hef")
 
 
 # ── Convenience subclasses ──
@@ -210,15 +227,15 @@ class HailoReIDExtractor:
 class OSNetExtractor(HailoReIDExtractor):
     """OSNET x1_0 extractor. 512-dim embeddings, 256x128 input, ~180 FPS."""
 
-    def __init__(self, hef_path: str = "/usr/local/hailo/resources/models/hailo8/osnet_x1_0.hef", **kwargs):
-        super().__init__(hef_path=hef_path, **kwargs)
+    def __init__(self, hef_path: str | None = None, **kwargs):
+        super().__init__(hef_path=hef_path or _DEFAULT_OSNET_HEF, **kwargs)
 
 
 class RepVGG512Extractor(HailoReIDExtractor):
     """RepVGG A0 512-dim extractor. 256x128 input, ~5200 FPS."""
 
-    def __init__(self, hef_path: str = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef", **kwargs):
-        super().__init__(hef_path=hef_path, **kwargs)
+    def __init__(self, hef_path: str | None = None, **kwargs):
+        super().__init__(hef_path=hef_path or _DEFAULT_REPVGG_HEF, **kwargs)
 
 
 # ── Cross-matching matrix ──
@@ -238,23 +255,23 @@ if __name__ == "__main__":
         if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")
     )
     if not image_paths:
-        print(f"No images found in {images_dir}")
+        logger.error("No images found in %s", images_dir)
         sys.exit(1)
 
     names = [p.stem for p in image_paths]
     crops = [cv2.imread(str(p)) for p in image_paths]
     for i, crop in enumerate(crops):
         if crop is None:
-            print(f"Failed to load {image_paths[i]}")
+            logger.error("Failed to load %s", image_paths[i])
             sys.exit(1)
 
-    print(f"Loaded {len(crops)} images: {names}\n")
+    logger.info("Loaded %d images: %s", len(crops), names)
 
     # Run both models
     extractors = [RepVGG512Extractor(), OSNetExtractor()]
 
     for extractor in extractors:
-        print(f"=== {extractor.model_name} (dim={extractor.embedding_dim}) ===")
+        logger.info("=== %s (dim=%d) ===", extractor.model_name, extractor.embedding_dim)
 
         embeddings = extractor.extract_embeddings_batch(crops)
         emb_matrix = np.stack(embeddings)  # (N, D)
@@ -262,15 +279,17 @@ if __name__ == "__main__":
         # Cosine similarity = dot product (embeddings are L2-normalized)
         sim_matrix = emb_matrix @ emb_matrix.T
 
-        # Print table
+        # Print table (user-facing output)
         col_width = max(len(n) for n in names) + 2
         header = " " * col_width + "".join(n.rjust(col_width) for n in names)
         print(header)
         for i, name in enumerate(names):
-            row = name.ljust(col_width) + "".join(f"{sim_matrix[i, j]:.3f}".rjust(col_width) for j in range(len(names)))
+            row = name.ljust(col_width) + "".join(
+                f"{sim_matrix[i, j]:.3f}".rjust(col_width) for j in range(len(names))
+            )
             print(row)
         print()
 
         extractor.release()
 
-    print("Done.")
+    logger.info("Done.")

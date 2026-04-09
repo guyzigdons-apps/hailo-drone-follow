@@ -31,6 +31,10 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
+from hailo_apps.python.core.common.hailo_logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def load_match_log(path):
     """Load JSONL match log. Each line: {frame, crop_idx, predicted_id, similarity, is_new}"""
@@ -51,7 +55,7 @@ def load_ground_truth(path):
     # Validate no TODO entries remain
     for k, v in mapping.items():
         if v == "TODO":
-            print(f"WARNING: ground_truth.json has unmapped entry: {k} = TODO")
+            logger.warning("ground_truth.json has unmapped entry: %s = TODO", k)
     return mapping
 
 
@@ -197,7 +201,7 @@ def append_csv(csv_path, run_label, metrics):
         row = {"run_label": run_label}
         row.update(metrics)
         writer.writerow(row)
-    print(f"Results appended to {csv_path}")
+    logger.info("Results appended to %s", csv_path)
 
 
 def main():
@@ -212,8 +216,8 @@ def main():
     entries = load_match_log(args.match_log)
     id_mapping = load_ground_truth(args.ground_truth)
 
-    print(f"Loaded {len(entries)} match log entries")
-    print(f"Ground truth: {len(id_mapping)} predicted IDs mapped")
+    logger.info("Loaded %d match log entries", len(entries))
+    logger.info("Ground truth: %d predicted IDs mapped", len(id_mapping))
 
     if args.sweep:
         sweep_reid_match_thresholds(entries, id_mapping)

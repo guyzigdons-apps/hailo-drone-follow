@@ -19,6 +19,7 @@ Usage:
 import atexit
 import json
 import os
+import signal
 import shutil
 import threading
 from pathlib import Path
@@ -29,11 +30,14 @@ import numpy as np
 
 from hailo_apps.python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.python.core.common.core import get_pipeline_parser
+from hailo_apps.python.core.common.hailo_logger import get_logger
 from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import GStreamerTilingApp
 
-from reid_analysis.reid_embedding_extractor import RepVGG512Extractor, OSNetExtractor
-from reid_analysis.gallery_strategies import create_strategy, STRATEGIES
+from reid_analysis.gallery_strategies import STRATEGIES, create_strategy
+from reid_analysis.reid_embedding_extractor import OSNetExtractor, RepVGG512Extractor
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +138,7 @@ def app_callback(element, buffer, user_data):
                     "frame": frame_count, "crop_idx": j,
                     "predicted_id": name, "similarity": 1.0, "is_new": True,
                 })
-                print(f"Frame {frame_count}: new {name} (first detection)")
+                logger.debug("Frame %d: new %s (first detection)", frame_count, name)
             else:
                 matched_name, best_sim = gallery.match(emb, user_data.reid_match_threshold)
 
@@ -158,10 +162,13 @@ def app_callback(element, buffer, user_data):
                         "predicted_id": name, "similarity": round(best_sim, 4),
                         "is_new": True,
                     })
-                    print(f"Frame {frame_count}: new {name} (best match {best_sim:.3f} < {user_data.reid_match_threshold})")
+                    logger.debug(
+                        "Frame %d: new %s (best match %.3f < %.2f)",
+                        frame_count, name, best_sim, user_data.reid_match_threshold,
+                    )
 
     if frame_count % 100 == 0:
-        print(f"  Frame {frame_count} processed, {user_data.total_crops} total crops")
+        logger.info("Frame %d processed, %d total crops", frame_count, user_data.total_crops)
 
 
 def _save_new_person(user_data, name, crop, frame_count):
@@ -195,12 +202,12 @@ def main():
     args, _ = parser.parse_known_args()
 
     # Init ReID extractor
-    print(f"Loading ReID model: {args.reid_model}")
+    logger.info("Loading ReID model: %s", args.reid_model)
     if args.reid_model == "repvgg":
         reid_extractor = RepVGG512Extractor()
     else:
         reid_extractor = OSNetExtractor()
-    print(f"ReID: {reid_extractor.model_name}, dim={reid_extractor.embedding_dim}")
+    logger.info("ReID: %s, dim=%d", reid_extractor.model_name, reid_extractor.embedding_dim)
 
     # Init gallery strategy
     strategy_kwargs = {}
@@ -209,7 +216,7 @@ def main():
     elif args.gallery_strategy == "multi_embedding":
         strategy_kwargs["max_k"] = args.gallery_max_size
     gallery = create_strategy(args.gallery_strategy, **strategy_kwargs)
-    print(f"Gallery strategy: {args.gallery_strategy}")
+    logger.info("Gallery strategy: %s", args.gallery_strategy)
 
     # Match log path
     output_dir = Path(args.output_dir)
@@ -229,24 +236,35 @@ def main():
         def on_eos(self):
             self.shutdown()
 
+    # Signal handling — set flag, clean up in finally
+    running = True
+
+    def _signal_handler(sig, frame):
+        nonlocal running
+        logger.info("Signal received, shutting down...")
+        running = False
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     # Create and run tiling pipeline app
     app = ReIDTilingApp(app_callback, user_data, parser=parser)
-    app.run()
-
-    # Cleanup
-    user_data.close_log()
-    reid_extractor.release()
+    try:
+        app.run()
+    finally:
+        user_data.close_log()
+        reid_extractor.release()
 
     # Summary
-    print("\nDone!")
-    print(f"Total person crops saved: {user_data.total_crops}")
-    print(f"Unique persons found: {gallery.size}")
-    print(f"Match log: {match_log_path}")
-    print(f"First-seen crops: {user_data.orig_dir}/")
+    logger.info("Done!")
+    logger.info("Total person crops saved: %d", user_data.total_crops)
+    logger.info("Unique persons found: %d", gallery.size)
+    logger.info("Match log: %s", match_log_path)
+    logger.info("First-seen crops: %s/", user_data.orig_dir)
     for name in gallery.names:
         person_dir = user_data.match_dir / name
         n_crops = len(list(person_dir.glob("*.jpg")))
-        print(f"  {name}: {n_crops} crops in {person_dir}/")
+        logger.info("  %s: %d crops in %s/", name, n_crops, person_dir)
 
 
 if __name__ == "__main__":

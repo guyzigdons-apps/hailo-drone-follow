@@ -28,7 +28,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from reid_analysis.reid_eval import load_match_log, load_ground_truth, evaluate, append_csv
+from hailo_apps.python.core.common.hailo_logger import get_logger
+
+from reid_analysis.reid_eval import append_csv, evaluate, load_ground_truth, load_match_log
+
+logger = get_logger(__name__)
 
 
 DEFAULT_SWEEP = {
@@ -57,14 +61,12 @@ def run_pipeline(input_video, output_dir, reid_model, reid_match_threshold, gall
     if extra_args:
         cmd.extend(extra_args)
 
-    print(f"\n{'='*60}")
-    print(f"Running: model={reid_model} reid_match_threshold={reid_match_threshold} strategy={gallery_strategy}")
-    print(f"Output: {output_dir}")
-    print(f"{'='*60}")
+    logger.info("Running: model=%s threshold=%s strategy=%s", reid_model, reid_match_threshold, gallery_strategy)
+    logger.info("Output: %s", output_dir)
 
     result = subprocess.run(cmd, capture_output=False)
     if result.returncode != 0:
-        print(f"WARNING: Pipeline returned code {result.returncode}")
+        logger.warning("Pipeline returned code %d", result.returncode)
 
     return output_dir / "match_log.jsonl"
 
@@ -112,9 +114,9 @@ def main():
     param_values = list(sweep.values())
     combinations = list(itertools.product(*param_values))
 
-    print(f"Sweep: {len(combinations)} combinations")
-    print(f"Parameters: {param_names}")
-    print(f"Ground truth: {len(id_mapping)} IDs mapped")
+    logger.info("Sweep: %d combinations", len(combinations))
+    logger.info("Parameters: %s", param_names)
+    logger.info("Ground truth: %d IDs mapped", len(id_mapping))
 
     results = []
     for combo in combinations:
@@ -143,10 +145,12 @@ def main():
             metrics["run_label"] = label
             results.append(metrics)
             append_csv(csv_path, label, metrics)
-            print(f"  -> Precision: {metrics['precision']:.4f}, Fragmentation: {metrics['fragmentation']:.2f}, "
-                  f"Switches: {metrics['id_switches']}")
+            logger.info(
+                "  -> Precision: %.4f, Fragmentation: %.2f, Switches: %d",
+                metrics["precision"], metrics["fragmentation"], metrics["id_switches"],
+            )
         else:
-            print(f"  -> No match log produced!")
+            logger.warning("  -> No match log produced!")
 
     # Final summary table
     print(f"\n{'='*90}")

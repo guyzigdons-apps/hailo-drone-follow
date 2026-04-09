@@ -26,14 +26,18 @@ import time
 from pathlib import Path
 
 import cv2
+import matplotlib
 import numpy as np
 
-import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from reid_analysis.reid_embedding_extractor import RepVGG512Extractor, OSNetExtractor
+from hailo_apps.python.core.common.hailo_logger import get_logger
+
 from reid_analysis.gallery_strategies import FirstOnlyStrategy, MultiEmbeddingStrategy
+from reid_analysis.reid_embedding_extractor import OSNetExtractor, RepVGG512Extractor
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -102,12 +106,12 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
 
     frame1_anns = frame_annotations.get(1, [])
     if not frame1_anns:
-        print("No persons found in frame 1!")
+        logger.error("No persons found in frame 1!")
         return
 
     frame1 = load_frame(dataset_dir, 1)
     if frame1 is None:
-        print("Failed to load frame 1!")
+        logger.error("Failed to load frame 1!")
         return
 
     total_frames = len(frame_annotations)
@@ -125,7 +129,10 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
         if crop is not None and crop.shape[0] > 10 and crop.shape[1] > 10:
             cv2.imwrite(str(candidates_dir / f"person_{pid}.jpg"), crop)
             count = person_frame_counts.get(pid, 0)
-            print(f"  person_{pid}: {crop.shape[1]}x{crop.shape[0]}px, visible in {count}/{total_frames} frames")
+            logger.info(
+                "  person_%d: %dx%dpx, visible in %d/%d frames",
+                pid, crop.shape[1], crop.shape[0], count, total_frames,
+            )
             saved += 1
 
             # Draw bbox and label on annotated frame
@@ -144,10 +151,13 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
     annotated_path = Path(output_dir) / "candidates_frame1.jpg"
     cv2.imwrite(str(annotated_path), annotated)
 
-    print(f"\nSaved {saved} candidate crops to {candidates_dir}/")
-    print(f"Annotated frame with boxes: {annotated_path}")
-    print(f"Review and re-run with --person-ids, e.g.:")
-    print(f"  python {sys.argv[0]} --dataset-dir {dataset_dir} --person-ids {','.join(str(p) for p in ranked[:4])}")
+    logger.info("Saved %d candidate crops to %s/", saved, candidates_dir)
+    logger.info("Annotated frame with boxes: %s", annotated_path)
+    logger.info("Review and re-run with --person-ids, e.g.:")
+    logger.info(
+        "  python %s --dataset-dir %s --person-ids %s",
+        sys.argv[0], dataset_dir, ",".join(str(p) for p in ranked[:4]),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +206,10 @@ def precompute_embeddings(extractor, dataset_dir, frame_annotations, person_ids,
             total_crops += 1
 
         if frame_num % 200 == 0:
-            print(f"  Frame {frame_num}/{frames[-1]}, {total_crops} crops extracted...")
+            logger.info("  Frame %d/%d, %d crops extracted...", frame_num, frames[-1], total_crops)
 
     elapsed = time.time() - t0
-    print(f"  Precomputed {total_crops} embeddings in {elapsed:.1f}s")
+    logger.info("  Precomputed %d embeddings in %.1fs", total_crops, elapsed)
     return cache
 
 
@@ -369,7 +379,7 @@ def plot_precision_recall(sweep_t1, sweep_t2, person_ids, output_path, model_nam
     plt.tight_layout()
     plt.savefig(str(output_path), dpi=150)
     plt.close()
-    print(f"\nPlot saved: {output_path}")
+    logger.info("Plot saved: %s", output_path)
 
 
 def print_summary(person_ids, best_t1, best_t2):
@@ -417,45 +427,47 @@ def main():
     dataset_dir = args.dataset_dir
     gt_path = os.path.join(dataset_dir, "gt", "gt.txt")
     if not os.path.isfile(gt_path):
-        print(f"GT file not found: {gt_path}")
+        logger.error("GT file not found: %s", gt_path)
         sys.exit(1)
 
     output_dir = args.output_dir or str(Path(__file__).resolve().parent / "mot17_results")
 
     # Load GT
-    print(f"Loading GT from {gt_path} (vis >= {args.vis_threshold})...")
+    logger.info("Loading GT from %s (vis >= %.1f)...", gt_path, args.vis_threshold)
     frame_annotations, person_frame_counts = load_mot17_gt(gt_path, args.vis_threshold)
     total_anns = sum(len(v) for v in frame_annotations.values())
-    print(f"  {len(frame_annotations)} frames, {total_anns} annotations, "
-          f"{len(person_frame_counts)} unique persons")
+    logger.info(
+        "  %d frames, %d annotations, %d unique persons",
+        len(frame_annotations), total_anns, len(person_frame_counts),
+    )
 
     # --- Interactive preview mode (no --person-ids) ---
     if args.person_ids is None:
-        print(f"\nNo --person-ids specified. Saving candidate crops from frame 1...\n")
+        logger.info("No --person-ids specified. Saving candidate crops from frame 1...")
         save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, output_dir)
         return
 
     # --- Evaluation mode ---
     person_ids = [int(x.strip()) for x in args.person_ids.split(",")]
-    print(f"\nEvaluating {len(person_ids)} persons: {person_ids}")
+    logger.info("Evaluating %d persons: %s", len(person_ids), person_ids)
 
     # Validate person IDs exist in frame 1
     frame1_ids = {a["id"] for a in frame_annotations.get(1, [])}
     missing = [pid for pid in person_ids if pid not in frame1_ids]
     if missing:
-        print(f"ERROR: Person IDs {missing} not found in frame 1. Available: {sorted(frame1_ids)}")
+        logger.error("Person IDs %s not found in frame 1. Available: %s", missing, sorted(frame1_ids))
         sys.exit(1)
 
     # Init ReID extractor
-    print(f"\nLoading ReID model: {args.reid_model}")
+    logger.info("Loading ReID model: %s", args.reid_model)
     if args.reid_model == "repvgg":
         extractor = RepVGG512Extractor()
     else:
         extractor = OSNetExtractor()
-    print(f"  Model: {extractor.model_name}, dim={extractor.embedding_dim}")
+    logger.info("  Model: %s, dim=%d", extractor.model_name, extractor.embedding_dim)
 
     # Precompute embeddings for selected persons only
-    print(f"\nPrecomputing embeddings (skip_frames={args.skip_frames})...")
+    logger.info("Precomputing embeddings (skip_frames=%d)...", args.skip_frames)
     embedding_cache = precompute_embeddings(
         extractor, dataset_dir, frame_annotations, person_ids,
         skip_frames=args.skip_frames,

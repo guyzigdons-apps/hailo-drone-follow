@@ -6,8 +6,9 @@ Each strategy manages a gallery of known persons and decides:
 - Whether/how to update gallery embeddings after a match
 """
 
+from __future__ import annotations
+
 import numpy as np
-from typing import Optional, Tuple
 
 
 class GalleryStrategy:
@@ -36,7 +37,7 @@ class GalleryStrategy:
         self._names.append(name)
         self._embeddings.append(embedding.copy())
 
-    def match(self, embedding: np.ndarray, reid_match_threshold: float) -> Tuple[Optional[str], float]:
+    def match(self, embedding: np.ndarray, reid_match_threshold: float) -> tuple[str | None, float]:
         """
         Match embedding against gallery.
         Returns (person_name, similarity) if match found, else (None, best_similarity).
@@ -119,7 +120,7 @@ class MultiEmbeddingStrategy(GalleryStrategy):
         self._names.append(name)
         self._person_embeddings[name] = [embedding.copy()]
 
-    def match(self, embedding: np.ndarray, reid_match_threshold: float) -> Tuple[Optional[str], float]:
+    def match(self, embedding: np.ndarray, reid_match_threshold: float) -> tuple[str | None, float]:
         if not self._names:
             return None, 0.0
         best_name = None
