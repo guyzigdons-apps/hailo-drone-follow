@@ -188,45 +188,29 @@ The controller compares the detected person's bounding box height (0–1, fracti
 
 A 5% dead zone (relative to target size) prevents oscillation around the setpoint.
 
-## Networking (Home vs Field AP Mode)
+## Boot Service
 
-The Pi automatically detects whether it's at home or in the field:
-
-- **Home mode:** If a known WiFi network is found within 30s of boot, the Pi connects normally. The drone app does **not** start.
-- **Field mode:** If no known WiFi is found, the Pi becomes a WiFi access point (`HailoDrone` / `hailodrone`, IP `10.0.0.1`) and auto-starts the drone-follow app. Connect your phone/laptop to the AP to SSH or use the web UI.
+The drone-follow app can auto-start at boot via a systemd service controlled by a desktop config file.
 
 ### Setup
 
 ```bash
-# One-time setup (creates AP profile, enables boot service):
-system/install.sh
+# One-time install (symlinks service, creates desktop config):
+sudo scripts/boot/install.sh
 ```
 
-### How "Known Networks" Work
+### Enable / Disable
 
-Any WiFi saved in NetworkManager counts as known. To add a new home/work network:
-```bash
-nmcli device wifi connect <SSID> password <pass>
+Edit `~/Desktop/drone-follow.conf`:
+```
+ENABLED=true    # set to false to disable auto-start
 ```
 
-### Manual Override
+### How It Works
 
-A reboot near known WiFi automatically enters Home mode. To switch from Field to Home without rebooting:
-```bash
-sudo nmcli connection down HailoDrone-AP && nmcli device wifi rescan
-```
+On boot, `drone-follow-boot.service` reads the config file. If `ENABLED=true`, it runs `scripts/start_air.sh` (which starts OpenHD air + drone-follow). If `false` or the file is missing, it exits silently.
 
-### Configuration
-
-| Setting | Value |
-|---|---|
-| AP SSID | `HailoDrone` |
-| AP Password | `hailodrone` (WPA-PSK) |
-| AP IP | `10.0.0.1/24` |
-| Client DHCP | `10.0.0.2–254` (via NM shared mode) |
-| WiFi timeout | 30s |
-
-Files: `system/drone-network-mode.sh` (boot logic), `system/drone-network-mode.service` (systemd unit), `system/install.sh` (setup).
+**Files:** `scripts/boot/drone-follow-boot.sh`, `scripts/boot/drone-follow-boot.service`, `scripts/boot/install.sh`, `scripts/boot/uninstall.sh`
 
 ## Architecture
 
