@@ -5,16 +5,17 @@ Evaluate and tune the YOLO + ReID person matching pipeline on the Hailo NPU.
 ## Architecture
 
 ```
-Video Input
-    |
-    v
-reid_analysis_app.py  (GStreamer tiling pipeline + Hailo NPU)
-    |
-    |-- Person detection (YOLO via hailotilecropper)
-    |-- Crop extraction (from normalized bboxes)
-    |-- ReID embedding (RepVGG / OSNet on Hailo)
-    |-- Gallery matching (cosine similarity)
-    |
+Video Input                                         MOT17 Dataset
+    |                                                    |
+    v                                                    v
+reid_analysis_app.py                             mot17_eval.py
+(GStreamer tiling + Hailo NPU)                   (GT boxes, no detection noise)
+    |                                                    |
+    |-- Person detection (YOLO via hailotilecropper)     |-- Precompute embeddings from GT crops
+    |-- Crop extraction (from normalized bboxes)         |-- FirstOnly vs MultiEmbedding sweep
+    |-- ReID embedding (RepVGG / OSNet on Hailo)         |-- Precision / Recall / F1 + plots
+    |-- Gallery matching (cosine similarity)              |
+    |                                               P/R plot + table
     v
 match_log.jsonl  (one entry per detected crop)
     |
@@ -26,6 +27,8 @@ Precision, Fragmentation, ID Switches
     |
     v
 reid_sweep.py  (automated parameter grid search)
+
+reid_benchmark.sh — Measure FPS & latency for ReID HEFs via hailortcli
 ```
 
 ## Files
@@ -38,8 +41,9 @@ reid_sweep.py  (automated parameter grid search)
 | `gallery_strategies.py` | Pluggable gallery update strategies |
 | `reid_sweep.py` | Parameter sweep runner (model x threshold x strategy) |
 | `mot17_eval.py` | MOT17 ground-truth evaluation (no detection noise) |
-| `ground_truth.json` | Manual mapping: predicted ID -> true person label |
-| `match_log.jsonl` | Auto-generated log of every match decision |
+| `reid_benchmark.sh` | Benchmark ReID HEF models (FPS & latency via hailortcli) |
+| `ground_truth.json` | Manual mapping: predicted ID -> true person label (user-created) |
+| `match_log.jsonl` | Auto-generated log of every match decision (pipeline output) |
 
 ## Module Dependencies
 
@@ -284,3 +288,35 @@ python reid_analysis/mot17_eval.py --dataset-dir /tmp/MOT17-04-SDP/ --person-ids
 | **Test 2** | `MultiEmbeddingStrategy` | Every M frames, add GT crop embedding (oracle) | Upper bound: how much gallery enrichment helps |
 
 Comparing the two shows how much re-ID accuracy improves when the gallery is updated, and at what N the single-frame approach starts to break down.
+
+---
+
+## HEF Benchmark (`reid_benchmark.sh`)
+
+Measures FPS (throughput) and latency for ReID HEF models using `hailortcli`. Auto-detects OSNet and RepVGG HEF files in the models directory. Outputs Confluence Wiki Markup tables.
+
+```bash
+cd reid_analysis
+bash reid_benchmark.sh
+```
+
+**Metrics measured per model per batch size (1, 2, 4, 8, 16):**
+- FPS (hw_only) — hardware-only throughput
+- FPS (streaming) — full pipeline throughput
+- HW Latency — hardware processing time per batch
+- Overall Latency — end-to-end latency
+
+Results are saved to `reid_benchmark_results_<timestamp>.txt`.
+
+---
+
+## Cross-Matching Utility
+
+`reid_embedding_extractor.py` can also be run standalone to compute a cosine similarity matrix between person images (useful for debugging gallery thresholds):
+
+```bash
+source setup_env.sh
+python -m reid_analysis.reid_embedding_extractor --images-dir path/to/person/crops/
+```
+
+Prints an N x N similarity matrix for both RepVGG and OSNet models.

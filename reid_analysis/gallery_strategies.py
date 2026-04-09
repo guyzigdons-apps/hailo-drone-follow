@@ -117,6 +117,7 @@ class MultiEmbeddingStrategy(GalleryStrategy):
         self._max_k = max_k
 
     def add_person(self, name: str, embedding: np.ndarray):
+        self._name_to_idx[name] = len(self._names)
         self._names.append(name)
         self._person_embeddings[name] = [embedding.copy()]
 

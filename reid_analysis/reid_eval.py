@@ -48,15 +48,21 @@ def load_match_log(path):
 
 
 def load_ground_truth(path):
-    """Load ground truth JSON. Returns id_mapping dict."""
+    """Load ground truth JSON. Returns id_mapping dict with normalized special labels."""
     with open(path) as f:
         data = json.load(f)
     mapping = data["id_mapping"]
-    # Validate no TODO entries remain
+    # Normalize special labels and warn about issues
+    normalized = {}
     for k, v in mapping.items():
-        if v == "TODO":
-            logger.warning("ground_truth.json has unmapped entry: %s = TODO", k)
-    return mapping
+        v_lower = v.lower().strip()
+        if v_lower == "todo":
+            logger.warning("ground_truth.json has unmapped entry: %s = %s", k, v)
+        if v_lower == "false_positive" and v != "false_positive":
+            logger.warning("Normalized %s label '%s' -> 'false_positive'", k, v)
+            v = "false_positive"
+        normalized[k] = v
+    return normalized
 
 
 def evaluate(entries, id_mapping, reid_match_threshold=None):
@@ -103,7 +109,7 @@ def evaluate(entries, id_mapping, reid_match_threshold=None):
             false_positives += 1
             continue
 
-        if true_label == "unknown" or true_label == "TODO":
+        if true_label in ("unknown", "TODO", "todo"):
             continue
 
         # To check correctness: the crop was assigned to predicted_id.
@@ -120,7 +126,7 @@ def evaluate(entries, id_mapping, reid_match_threshold=None):
     # Fragmentation: how many predicted IDs map to each true person
     true_to_predicted = defaultdict(set)
     for pred_id, true_label in id_mapping.items():
-        if true_label not in ("false_positive", "TODO", "unknown"):
+        if true_label.lower() not in ("false_positive", "todo", "unknown"):
             true_to_predicted[true_label].add(pred_id)
     n_true = len(true_to_predicted)
     n_predicted = sum(len(v) for v in true_to_predicted.values())

@@ -236,19 +236,22 @@ def main():
         def on_eos(self):
             self.shutdown()
 
-    # Signal handling — set flag, clean up in finally
-    running = True
+    # Create and run tiling pipeline app
+    app = ReIDTilingApp(app_callback, user_data, parser=parser)
+
+    # Signal handling — set flag only, cleanup happens in finally
+    shutdown_requested = False
 
     def _signal_handler(sig, frame):
-        nonlocal running
-        logger.info("Signal received, shutting down...")
-        running = False
+        nonlocal shutdown_requested
+        if not shutdown_requested:
+            logger.info("Signal received, shutting down...")
+            shutdown_requested = True
+            app.shutdown()
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    # Create and run tiling pipeline app
-    app = ReIDTilingApp(app_callback, user_data, parser=parser)
     try:
         app.run()
     finally:

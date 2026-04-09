@@ -121,9 +121,9 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
     frame1_person_ids = {ann["id"] for ann in frame1_anns}
     ranked = sorted(frame1_person_ids, key=lambda pid: person_frame_counts.get(pid, 0), reverse=True)
 
-    # Draw annotated frame with boxes and IDs
+    # Save crops and draw annotated frame
     annotated = frame1.copy()
-    saved = 0
+    saved_candidates = []  # (pid, w, h, frame_count)
     for pid in ranked:
         ann = next(a for a in frame1_anns if a["id"] == pid)
         crop = extract_crop(frame1, ann)
@@ -131,11 +131,7 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
             crop_path = candidates_dir / f"person_{pid}.jpg"
             cv2.imwrite(str(crop_path), crop)
             count = person_frame_counts.get(pid, 0)
-            logger.info(
-                "  Created %s (%dx%dpx, visible in %d/%d frames)",
-                crop_path, crop.shape[1], crop.shape[0], count, total_frames,
-            )
-            saved += 1
+            saved_candidates.append((pid, crop.shape[1], crop.shape[0], count))
 
             # Draw bbox and label on annotated frame
             x1, y1 = ann["x"], ann["y"]
@@ -152,9 +148,14 @@ def save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, ou
     # Save annotated frame
     annotated_path = Path(output_dir) / "candidates_frame1.jpg"
     cv2.imwrite(str(annotated_path), annotated)
-    logger.info("Created %s", annotated_path)
 
-    logger.info("Saved %d candidate crops to %s/", saved, candidates_dir)
+    # Print compact summary
+    logger.info("Saved %d candidates to %s/", len(saved_candidates), candidates_dir)
+    header = f"  {'ID':>4}  {'Size':>9}  {'Visible':>14}"
+    logger.info(header)
+    for pid, w, h, count in saved_candidates:
+        logger.info("  %4d  %4dx%-4d  %4d/%d frames", pid, w, h, count, total_frames)
+    logger.info("Annotated frame: %s", annotated_path)
     logger.info("Review and re-run with --person-ids, e.g.:")
     logger.info(
         "  python %s --dataset-dir %s --person-ids %s",

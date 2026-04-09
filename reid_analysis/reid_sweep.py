@@ -64,9 +64,10 @@ def run_pipeline(input_video, output_dir, reid_model, reid_match_threshold, gall
     logger.info("Running: model=%s threshold=%s strategy=%s", reid_model, reid_match_threshold, gallery_strategy)
     logger.info("Output: %s", output_dir)
 
-    result = subprocess.run(cmd, capture_output=False)
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        logger.warning("Pipeline returned code %d", result.returncode)
+        logger.error("Pipeline failed (exit code %d): %s", result.returncode,
+                      result.stderr.strip()[-500:] if result.stderr else "no stderr")
 
     return output_dir / "match_log.jsonl"
 
