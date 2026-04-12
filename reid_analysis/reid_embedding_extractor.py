@@ -169,35 +169,40 @@ class HailoReIDExtractor:
         """
         Run async inference on a batch of preprocessed frames.
         Uses the same pattern as hailo_apps HailoInfer.
+        Chunks into batch_size to avoid overflowing HailoRT's internal queue.
 
         Returns:
             List of raw output arrays, one per input frame.
         """
         raw_outputs = []
+        chunk_size = max(1, self.batch_size)
 
-        # Create bindings for each frame
-        bindings_list = []
-        for frame in preprocessed_batch:
-            output_buffers = {
-                name: np.empty(
-                    self._infer_model.output(name).shape,
-                    dtype=getattr(np, self._output_type[name].lower()),
-                )
-                for name in self._output_type
-            }
-            binding = self._configured_model.create_bindings(output_buffers=output_buffers)
-            binding.input().set_buffer(np.array(frame))
-            bindings_list.append(binding)
+        for i in range(0, len(preprocessed_batch), chunk_size):
+            chunk = preprocessed_batch[i : i + chunk_size]
 
-        # Run async inference
-        self._configured_model.wait_for_async_ready(timeout_ms=10000)
-        job = self._configured_model.run_async(bindings_list, lambda *args, **kwargs: None)
-        job.wait(timeout_ms=10000)
+            # Create bindings for each frame in this chunk
+            bindings_list = []
+            for frame in chunk:
+                output_buffers = {
+                    name: np.empty(
+                        self._infer_model.output(name).shape,
+                        dtype=getattr(np, self._output_type[name].lower()),
+                    )
+                    for name in self._output_type
+                }
+                binding = self._configured_model.create_bindings(output_buffers=output_buffers)
+                binding.input().set_buffer(np.array(frame))
+                bindings_list.append(binding)
 
-        # Collect outputs
-        for binding in bindings_list:
-            raw = binding.output(self._first_output_name).get_buffer()
-            raw_outputs.append(raw)
+            # Run async inference
+            self._configured_model.wait_for_async_ready(timeout_ms=10000)
+            job = self._configured_model.run_async(bindings_list, lambda *args, **kwargs: None)
+            job.wait(timeout_ms=10000)
+
+            # Collect outputs
+            for binding in bindings_list:
+                raw = binding.output(self._first_output_name).get_buffer()
+                raw_outputs.append(raw)
 
         return raw_outputs
 

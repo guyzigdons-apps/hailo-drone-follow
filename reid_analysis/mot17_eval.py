@@ -417,6 +417,9 @@ def main():
     parser.add_argument("--person-ids", type=str, default=None,
                         help="Comma-separated person IDs for gallery (e.g., 1,3,5,86). "
                              "If omitted, saves candidate crops for review.")
+    parser.add_argument("--top-n", type=int, default=None,
+                        help="Auto-select top N persons from frame 1 by frame count "
+                             "and run evaluation. Mutually exclusive with --person-ids.")
     parser.add_argument("--vis-threshold", type=float, default=0.3,
                         help="Minimum visibility for GT annotations (default: 0.3)")
     parser.add_argument("--update-interval", type=int, default=30,
@@ -446,14 +449,24 @@ def main():
         len(frame_annotations), total_anns, len(person_frame_counts),
     )
 
-    # --- Interactive preview mode (no --person-ids) ---
-    if args.person_ids is None:
-        logger.info("No --person-ids specified. Saving candidate crops from frame 1...")
+    # --- Resolve person IDs ---
+    if args.person_ids and args.top_n:
+        logger.error("--person-ids and --top-n are mutually exclusive.")
+        sys.exit(1)
+
+    if args.top_n is not None:
+        frame1_ids = {a["id"] for a in frame_annotations.get(1, [])}
+        ranked = sorted(frame1_ids, key=lambda pid: person_frame_counts.get(pid, 0), reverse=True)
+        person_ids = ranked[:args.top_n]
+        if len(person_ids) < args.top_n:
+            logger.warning("Requested top %d but only %d persons in frame 1", args.top_n, len(person_ids))
+        logger.info("Auto-selected top %d persons by frame count: %s", len(person_ids), person_ids)
+    elif args.person_ids is not None:
+        person_ids = [int(x.strip()) for x in args.person_ids.split(",")]
+    else:
+        logger.info("No --person-ids or --top-n specified. Saving candidate crops from frame 1...")
         save_candidate_crops(dataset_dir, frame_annotations, person_frame_counts, output_dir)
         return
-
-    # --- Evaluation mode ---
-    person_ids = [int(x.strip()) for x in args.person_ids.split(",")]
     logger.info("Evaluating %d persons: %s", len(person_ids), person_ids)
     logger.info("Output directory: %s", output_dir)
 
