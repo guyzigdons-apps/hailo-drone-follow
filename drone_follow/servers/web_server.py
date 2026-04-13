@@ -33,7 +33,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
-LOGGER = logging.getLogger("drone_follow.web_server")
+LOGGER = logging.getLogger(__name__)
 
 
 class SharedUIState:

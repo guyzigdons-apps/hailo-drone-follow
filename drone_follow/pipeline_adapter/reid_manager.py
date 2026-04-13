@@ -11,14 +11,17 @@ so that the detection pipeline's VDevice is always created first.
 import logging
 import os
 import threading
+from typing import Optional
 
 import cv2
 import numpy as np
 
-LOGGER = logging.getLogger("drone_follow.app")
+LOGGER = logging.getLogger(__name__)
 
 
-def _crop_person(frame_bgr, hailo_bbox, video_width, video_height):
+def _crop_person(
+    frame_bgr: np.ndarray, hailo_bbox, video_width: int, video_height: int,
+) -> Optional[np.ndarray]:
     """Crop a person from the frame using Hailo normalized bbox coordinates."""
     x1 = max(0, int(hailo_bbox.xmin() * video_width))
     y1 = max(0, int(hailo_bbox.ymin() * video_height))
@@ -40,8 +43,8 @@ class ReIDManager:
            persons against the gallery and returns the best match
     """
 
-    def __init__(self, hef_path, update_interval=30, max_gallery_size=10,
-                 reid_match_threshold=0.6):
+    def __init__(self, hef_path: str, update_interval: int = 30,
+                 max_gallery_size: int = 10, reid_match_threshold: float = 0.6):
         self._hef_path = hef_path
         self._max_gallery_size = max_gallery_size
         self._reid_match_threshold = reid_match_threshold
@@ -67,7 +70,7 @@ class ReIDManager:
     # Lazy extractor init
     # ------------------------------------------------------------------
 
-    def _ensure_extractor(self):
+    def _ensure_extractor(self) -> bool:
         """Create the Hailo ReID extractor on first use."""
         if self._extractor is not None:
             return True
@@ -89,17 +92,17 @@ class ReIDManager:
     # ------------------------------------------------------------------
 
     @property
-    def has_gallery(self):
+    def has_gallery(self) -> bool:
         """True if at least one embedding is stored."""
         with self._lock:
             return self._gallery.size > 0
 
     @property
-    def tracking_id(self):
+    def tracking_id(self) -> Optional[int]:
         return self._tracking_id
 
     @property
-    def original_id(self):
+    def original_id(self) -> Optional[int]:
         """The ID the target had when the operator first selected it."""
         return self._original_id
 
@@ -107,7 +110,7 @@ class ReIDManager:
     # Target lifecycle
     # ------------------------------------------------------------------
 
-    def on_target_selected(self, track_id):
+    def on_target_selected(self, track_id: int) -> None:
         """Called when operator selects a (possibly new) target. Resets gallery
         if the target changed."""
         if track_id == self._tracking_id:
@@ -119,13 +122,14 @@ class ReIDManager:
             self._frame_counter = 0
         LOGGER.info("[REID] New target ID %d — gallery reset", track_id)
 
-    def should_update(self):
+    def should_update(self) -> bool:
         """Increment frame counter and return True when it's time to sample."""
         self._frame_counter += 1
         # Always capture the first frame, then every update_interval frames
         return self._frame_counter == 1 or self._frame_counter % self._update_interval == 0
 
-    def update_gallery(self, frame_bgr, hailo_bbox, video_width, video_height):
+    def update_gallery(self, frame_bgr: np.ndarray, hailo_bbox,
+                       video_width: int, video_height: int) -> None:
         """Extract embedding from the followed person's crop and store it."""
         if not self._ensure_extractor():
             return
@@ -156,7 +160,8 @@ class ReIDManager:
     # Re-identification
     # ------------------------------------------------------------------
 
-    def try_reidentify(self, frame_bgr, person_by_id, video_width, video_height):
+    def try_reidentify(self, frame_bgr: np.ndarray, person_by_id: dict,
+                       video_width: int, video_height: int) -> Optional[int]:
         """Try to find the lost target among visible persons.
 
         Args:
@@ -222,7 +227,7 @@ class ReIDManager:
                         self._reid_match_threshold)
         return best_tid
 
-    def on_reidentified(self, new_track_id):
+    def on_reidentified(self, new_track_id: int) -> None:
         """Update internal tracking ID after successful re-identification."""
         self._tracking_id = new_track_id
         # Reset frame counter so we immediately capture a fresh embedding
@@ -233,7 +238,7 @@ class ReIDManager:
     # Cleanup
     # ------------------------------------------------------------------
 
-    def clear(self):
+    def clear(self) -> None:
         """Clear gallery and tracking state."""
         with self._lock:
             self._gallery = self._MultiEmbeddingStrategy(max_k=self._max_gallery_size)
@@ -241,7 +246,7 @@ class ReIDManager:
             self._original_id = None
             self._frame_counter = 0
 
-    def release(self):
+    def release(self) -> None:
         """Release Hailo NPU resources."""
         if self._extractor is None:
             return

@@ -32,7 +32,7 @@ import socket
 import threading
 import time
 
-LOGGER = logging.getLogger("drone_follow.openhd_bridge")
+LOGGER = logging.getLogger(__name__)
 
 # Mapping: wire_name -> (mavlink_id, python_type)
 # wire_name matches both the JSON "param" field from OpenHD and the

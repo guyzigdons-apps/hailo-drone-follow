@@ -31,7 +31,9 @@ from drone_follow.drone_api.mavsdk_drone import add_drone_args
 from drone_follow.sim import WorldLoader
 from drone_follow.servers import FollowServer, OpenHDBridge
 
-LOGGER = logging.getLogger("drone_follow.app")
+LOGGER = logging.getLogger(__name__)
+
+_DEFAULT_REID_HEF = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef"
 
 
 def _configure_logging(verbosity: str) -> None:
@@ -71,10 +73,9 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Disable display window (headless mode)")
 
     # ReID re-identification
-    _default_reid = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef"
-    group.add_argument("--reid-model", type=str, default=_default_reid,
+    group.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF,
                        help="Path to ReID HEF model for appearance-based re-identification "
-                            f"(default: {_default_reid}). Use --no-reid to disable.")
+                            f"(default: {_DEFAULT_REID_HEF}). Use --no-reid to disable.")
     group.add_argument("--no-reid", action="store_true",
                        help="Disable ReID re-identification")
     group.add_argument("--update-interval", type=int, default=30,
@@ -152,9 +153,8 @@ def main():
     parser = _build_parser()
 
     # Pre-parse ReID args to initialize the manager before create_app
-    _default_reid = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef"
     reid_pre = argparse.ArgumentParser(add_help=False)
-    reid_pre.add_argument("--reid-model", type=str, default=_default_reid)
+    reid_pre.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF)
     reid_pre.add_argument("--no-reid", action="store_true")
     reid_pre.add_argument("--update-interval", type=int, default=30)
     reid_pre_args, _ = reid_pre.parse_known_args()
@@ -218,7 +218,7 @@ def main():
             else:
                 app.cleanup_recording_branch()
             app.loop.quit()
-        except Exception:
+        except (AttributeError, RuntimeError):
             pass
 
     def _eos_to_shutdown():

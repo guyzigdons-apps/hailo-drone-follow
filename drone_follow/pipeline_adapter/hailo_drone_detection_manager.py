@@ -20,7 +20,7 @@ from drone_follow.follow_api.types import Detection
 
 from .byte_tracker import ByteTracker
 
-LOGGER = logging.getLogger("drone_follow.app")
+LOGGER = logging.getLogger(__name__)
 
 _EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
 
@@ -93,7 +93,7 @@ class _PerfTracker:
                 self._cpu_percent = 100.0 * (1.0 - d_idle / d_total)
             self._last_cpu_total = total
             self._last_cpu_idle = idle
-        except Exception:
+        except (OSError, ValueError, IndexError):
             pass
 
     def _sample_memory(self):
@@ -103,7 +103,7 @@ class _PerfTracker:
                     if line.startswith("VmRSS:"):
                         self._memory_mb = int(line.split()[1]) / 1024.0
                         return
-        except Exception:
+        except (OSError, ValueError, IndexError):
             pass
 
     def _sample_hailo_temp(self):
@@ -112,14 +112,14 @@ class _PerfTracker:
             try:
                 from hailo_platform import Device
                 self._hailo_device = Device()
-            except Exception:
+            except (ImportError, OSError):
                 pass
         if self._hailo_device is None:
             return
         try:
             temp = self._hailo_device.control.get_chip_temperature()
             self._hailo_temp = temp.ts0_temperature
-        except Exception:
+        except (OSError, AttributeError):
             pass
 
 _gst_module = None
@@ -731,10 +731,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
                 LOGGER.info("SHM rebuild: pipeline rebuilt and playing")
                 self.watchdog_paused = False
-            except Exception as e:
-                LOGGER.error("SHM rebuild: exception: %s", e)
-                import traceback
-                traceback.print_exc()
+            except Exception:
+                LOGGER.error("SHM rebuild: exception", exc_info=True)
                 self.loop.quit()
             return False
 

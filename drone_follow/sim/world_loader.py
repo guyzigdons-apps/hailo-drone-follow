@@ -24,7 +24,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-LOGGER = logging.getLogger("drone_follow.world_loader")
+LOGGER = logging.getLogger(__name__)
 
 _SDF_EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "sdf_examples"
 _PX4_WORLD_REL = Path("Tools/simulation/gz/worlds/default.sdf")

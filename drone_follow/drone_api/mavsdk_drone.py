@@ -24,10 +24,9 @@ from drone_follow.follow_api.config import ControllerConfig
 from drone_follow.follow_api.controller import (
     compute_velocity_command,
     ForwardSmoother,
-    _effective_target_bbox_height,
 )
 
-LOGGER = logging.getLogger("drone_follow.control")
+LOGGER = logging.getLogger(__name__)
 
 
 def add_drone_args(parser) -> None:

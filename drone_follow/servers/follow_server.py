@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from drone_follow.follow_api.state import FollowTargetState
 
-LOGGER = logging.getLogger("drone_follow.follow_server")
+LOGGER = logging.getLogger(__name__)
 
 
 class FollowServerHandler(BaseHTTPRequestHandler):
