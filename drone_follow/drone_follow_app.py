@@ -71,9 +71,12 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Disable display window (headless mode)")
 
     # ReID re-identification
-    group.add_argument("--reid-model", type=str, default=None,
-                       help="Path to ReID HEF model. Enables appearance-based re-identification "
-                            "when the tracker loses the followed person.")
+    _default_reid = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef"
+    group.add_argument("--reid-model", type=str, default=_default_reid,
+                       help="Path to ReID HEF model for appearance-based re-identification "
+                            f"(default: {_default_reid}). Use --no-reid to disable.")
+    group.add_argument("--no-reid", action="store_true",
+                       help="Disable ReID re-identification")
     group.add_argument("--update-interval", type=int, default=30,
                        help="Frames between ReID gallery embedding updates while following (default: 30)")
 
@@ -149,13 +152,15 @@ def main():
     parser = _build_parser()
 
     # Pre-parse ReID args to initialize the manager before create_app
+    _default_reid = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef"
     reid_pre = argparse.ArgumentParser(add_help=False)
-    reid_pre.add_argument("--reid-model", type=str, default=None)
+    reid_pre.add_argument("--reid-model", type=str, default=_default_reid)
+    reid_pre.add_argument("--no-reid", action="store_true")
     reid_pre.add_argument("--update-interval", type=int, default=30)
     reid_pre_args, _ = reid_pre.parse_known_args()
 
     reid_manager = None
-    if reid_pre_args.reid_model:
+    if not reid_pre_args.no_reid and reid_pre_args.reid_model:
         from drone_follow.pipeline_adapter.reid_manager import ReIDManager
         reid_manager = ReIDManager(
             hef_path=reid_pre_args.reid_model,
