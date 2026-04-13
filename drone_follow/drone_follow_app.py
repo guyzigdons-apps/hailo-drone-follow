@@ -28,7 +28,6 @@ from drone_follow.follow_api import ControllerConfig, SharedDetectionState
 from drone_follow.follow_api.state import FollowTargetState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
-from drone_follow.sim import WorldLoader
 from drone_follow.servers import FollowServer, OpenHDBridge
 
 LOGGER = logging.getLogger(__name__)

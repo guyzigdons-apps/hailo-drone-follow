@@ -13,7 +13,6 @@ import os
 import threading
 from typing import Optional
 
-import cv2
 import numpy as np
 
 LOGGER = logging.getLogger(__name__)
