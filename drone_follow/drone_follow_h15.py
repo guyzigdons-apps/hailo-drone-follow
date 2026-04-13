@@ -16,6 +16,21 @@ import os
 import signal
 import threading
 import time
+import types
+
+# Workaround: mavsdk's generated protobuf code expects runtime_version (protobuf 5.x).
+# The Yocto image ships python3-protobuf 3.x which lacks it. Inject a stub so import succeeds.
+def _ensure_protobuf_runtime_version():
+    import google.protobuf
+    if not hasattr(google.protobuf, 'runtime_version'):
+        rv = types.ModuleType('runtime_version')
+        rv.__version__ = (5, 0, 0)
+        rv.check = lambda *a, **k: None
+        rv.ValidateProtobufRuntimeVersion = lambda *a, **k: None
+        rv.Domain = type('Domain', (), {'PUBLIC': 1})()
+        google.protobuf.runtime_version = rv
+
+_ensure_protobuf_runtime_version()
 
 from drone_follow.follow_api import ControllerConfig, SharedDetectionState
 from drone_follow.follow_api.state import FollowTargetState
