@@ -169,7 +169,10 @@ class TestForwardSmootherEMA:
 
     def test_first_call_with_no_detection_returns_smoothed_raw(self):
         s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=0.5, kd_forward=0.0)
+        # max_forward pinned above the test's raw input so the smoother
+        # doesn't clamp before EMA (default max_forward was lowered to 1.0
+        # by the oscillation-fix tuning).
+        cfg = ControllerConfig(forward_alpha=0.5, kd_forward=0.0, max_forward=5.0)
         result = s.update(None, 2.0, cfg)
         # No prior state, no detection: target = raw + 0 = 2.0
         # smoothed = 0.5 * 2.0 + 0.5 * 0.0 = 1.0
@@ -177,7 +180,7 @@ class TestForwardSmootherEMA:
 
     def test_ema_converges_to_constant_input(self):
         s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=0.3, kd_forward=0.0)
+        cfg = ControllerConfig(forward_alpha=0.3, kd_forward=0.0, max_forward=5.0)
         for _ in range(100):
             result = s.update(None, 1.5, cfg)
         assert result == pytest.approx(1.5, abs=0.01)
