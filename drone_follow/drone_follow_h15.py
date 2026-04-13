@@ -73,9 +73,6 @@ def _build_parser() -> argparse.ArgumentParser:
     group = parser.add_argument_group("app")
     group.add_argument("--follow-server-port", type=int, default=8080,
                        help="HTTP server port for target selection")
-    group.add_argument("--log-verbosity", choices=["quiet", "normal", "debug"],
-                       default="normal", help="Log verbosity level")
-
     # Config file support
     group.add_argument("--config", type=str, default=None,
                        help="JSON config file for controller settings")
