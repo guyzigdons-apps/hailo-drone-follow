@@ -319,7 +319,7 @@ class Hailo15PipelineApp:
         if not success:
             return
         try:
-            frame_data = np.array(map_info.data, dtype=np.uint8, copy=True)
+            frame_data = np.frombuffer(map_info.data, dtype=np.uint8).copy()
         finally:
             gst_buf.unmap(map_info)
 
