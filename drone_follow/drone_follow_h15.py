@@ -69,15 +69,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # Drone args
     add_drone_args(parser)
 
-    # App args
+    # App args — only add if not already registered by ControllerConfig/drone args
+    existing = {s for a in parser._actions for s in a.option_strings}
     group = parser.add_argument_group("app")
-    group.add_argument("--follow-server-port", type=int, default=8080,
-                       help="HTTP server port for target selection")
-    # Config file support
-    group.add_argument("--config", type=str, default=None,
-                       help="JSON config file for controller settings")
-    group.add_argument("--save-config", type=str, default=None,
-                       help="Save effective config to JSON and exit")
+    if "--follow-server-port" not in existing:
+        group.add_argument("--follow-server-port", type=int, default=8080,
+                           help="HTTP server port for target selection")
 
     return parser
 
