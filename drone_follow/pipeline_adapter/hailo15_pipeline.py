@@ -345,30 +345,33 @@ class Hailo15PipelineApp:
         frame_w = struct.get_int("width")[1]
         frame_h = struct.get_int("height")[1]
 
-        # For NV12: total bytes = w * h * 1.5
-        # Extract Y plane (grayscale) and resize to model input
-        import cv2
-        y_plane = frame_data[:frame_w * frame_h].reshape(frame_h, frame_w)
+        # The model expects shape [192, 640, 3] (H, W, C) — NV12 input from camera
+        # is frame_h * frame_w * 1.5 bytes. We need to convert NV12 → RGB and resize.
+        #
+        # NV12 layout: Y plane (frame_h x frame_w) + UV plane (frame_h/2 x frame_w)
+        # Use PIL for resize/convert if available, otherwise nearest-neighbor with numpy.
+        target_h, target_w = input_shape[0], input_shape[1]
+        channels = input_shape[2] if len(input_shape) == 3 else 1
 
-        # Model input shape determines target size
-        if len(input_shape) == 3:
-            # (H, W, C) — model expects RGB/BGR
-            target_h, target_w, channels = input_shape
-            y_resized = cv2.resize(y_plane, (target_w, target_h))
+        try:
+            from PIL import Image
+            # Extract Y plane and resize
+            y_plane = frame_data[:frame_w * frame_h].reshape(frame_h, frame_w)
+            img = Image.fromarray(y_plane, mode='L').resize((target_w, target_h), Image.BILINEAR)
             if channels == 3:
-                # Convert grayscale Y to 3-channel
-                frame = cv2.cvtColor(y_resized, cv2.COLOR_GRAY2BGR)
+                img = img.convert('RGB')
+            frame = np.ascontiguousarray(np.array(img, dtype=np.uint8))
+        except ImportError:
+            # Fallback: nearest-neighbor resize with numpy
+            y_plane = frame_data[:frame_w * frame_h].reshape(frame_h, frame_w)
+            row_idx = (np.arange(target_h) * frame_h // target_h).astype(int)
+            col_idx = (np.arange(target_w) * frame_w // target_w).astype(int)
+            y_resized = y_plane[row_idx][:, col_idx]
+            if channels == 3:
+                frame = np.stack([y_resized, y_resized, y_resized], axis=-1)
             else:
                 frame = y_resized
-        elif len(input_shape) == 2:
-            # (H, W) — model expects single channel
-            target_h, target_w = input_shape
-            frame = cv2.resize(y_plane, (target_w, target_h))
-        else:
-            # Try direct reshape as fallback
-            frame = frame_data[:np.prod(input_shape)].reshape(input_shape)
-
-        frame = np.ascontiguousarray(frame)
+            frame = np.ascontiguousarray(frame)
 
         # Create bindings and run
         bindings = self._configured_model.create_bindings()
