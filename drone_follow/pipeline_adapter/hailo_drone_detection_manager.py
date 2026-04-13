@@ -338,7 +338,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
         QUEUE, DISPLAY_PIPELINE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-        TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
+        TILE_CROPPER_PIPELINE, SOURCE_PIPELINE, OVERLAY_PIPELINE,
     )
 
     if parser is None:
@@ -616,7 +616,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
                 record_path = path or self._generate_record_path()
                 width, height = self.video_width, self.video_height
-                fps = self.frame_rate
+                # --frame-rate has no parser default in hailo-apps, so
+                # self.frame_rate can be None when the user doesn't pass -f.
+                # ffmpeg requires an integer for -r, so fall back to the
+                # documented 30 FPS default.
+                fps = self.frame_rate or 30
+                LOGGER.info("[record] Spawning ffmpeg: %sx%s @ %s fps → %s",
+                            width, height, fps, record_path)
 
                 self._ffmpeg_proc = subprocess.Popen([
                     "ffmpeg", "-y", "-nostdin",
@@ -698,7 +704,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     video_height=self.video_height,
                     frame_rate=self.frame_rate,
                     sync=self.sync,
-                    mirror_image=False,
                 )
 
             detection_pipeline = INFERENCE_PIPELINE(
