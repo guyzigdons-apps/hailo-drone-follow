@@ -17,10 +17,12 @@ Pipeline options (--input, --input-codec, etc.) are passed through to the tiling
 import faulthandler
 faulthandler.enable()
 
+import os
+os.environ.setdefault("HAILO_MONITOR", "1")
+
 import argparse
 import asyncio
 import logging
-import os
 import signal
 import threading
 import time

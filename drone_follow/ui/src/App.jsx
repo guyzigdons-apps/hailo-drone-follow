@@ -309,7 +309,8 @@ export default function App() {
             {perf.fps} FPS | {perf.latency_ms} ms
             | CPU {perf.cpu_percent}%
             | Mem {perf.memory_mb} MB
-            {perf.hailo_temp_c > 0 ? ` | Hailo ${perf.hailo_temp_c}\u00b0C` : ""}
+            {perf.hailo_util_percent > 0 ? ` | NN ${perf.hailo_util_percent}%` : ""}
+            {perf.hailo_temp_c > 0 ? ` | ${perf.hailo_temp_c}\u00b0C` : ""}
           </span>
         )}
         <button
