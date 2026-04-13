@@ -175,10 +175,10 @@ class OpenHDBridge:
             self._target_state.set_explicit_lock(False)
             LOGGER.info("[openhd_bridge] IDLE mode (drone holding position)")
         elif value == 0:
-            self._target_state.set_paused(False)
+            self._target_state.set_paused(True)
             self._target_state.set_target(None)
             self._target_state.set_explicit_lock(False)
-            LOGGER.info("[openhd_bridge] AUTO mode (following largest)")
+            LOGGER.info("[openhd_bridge] IDLE mode (cleared target, holding position)")
         else:
             self._target_state.set_paused(False)
             self._target_state.set_target(value)

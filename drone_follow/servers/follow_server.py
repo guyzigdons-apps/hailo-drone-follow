@@ -59,13 +59,15 @@ class FollowServerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path in ("/follow/clear", "/follow/"):
+            self.target_state.set_paused(True)
             self.target_state.set_target(None)
+            self.target_state.set_explicit_lock(False)
             self._send_json({
                 "status": "success",
                 "following_id": None,
-                "message": "Cleared target, now following largest person",
+                "message": "Cleared target, entering idle",
             })
-            LOGGER.info("Cleared target, now following largest person")
+            LOGGER.info("Cleared target, entering idle")
         elif self.path.startswith("/follow/"):
             try:
                 detection_id = int(self.path.split("/follow/")[1])
@@ -84,7 +86,9 @@ class FollowServerHandler(BaseHTTPRequestHandler):
                     LOGGER.info("Detection ID %d not found. Available: %s", detection_id, available_ids)
                     return
 
+            self.target_state.set_paused(False)
             self.target_state.set_target(detection_id)
+            self.target_state.set_explicit_lock(True)
             self._send_json({"status": "success", "following_id": detection_id})
             LOGGER.info("Now following detection ID: %d", detection_id)
         else:

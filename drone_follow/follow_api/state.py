@@ -40,7 +40,7 @@ class FollowTargetState:
         self._lock = threading.Lock()
         self._target_id: Optional[int] = None
         self._last_seen: Optional[float] = None
-        self._paused: bool = False
+        self._paused: bool = True
         self._explicit_lock: bool = False
 
     def set_paused(self, paused: bool):

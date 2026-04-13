@@ -556,14 +556,14 @@ export default function App() {
                 <g
                   key={det.id ?? `${det.bbox.x}-${det.bbox.y}`}
                   onClick={hasId ? () => handleFollow(det.id) : undefined}
-                  style={{ cursor: hasId ? "pointer" : "default" }}
+                  style={{ cursor: hasId ? "pointer" : "default", pointerEvents: "auto" }}
                 >
                   <rect
                     x={x}
                     y={y}
                     width={w}
                     height={h}
-                    fill="none"
+                    fill="transparent"
                     stroke={isFollowing ? "#00ff00" : "#ffffff"}
                     strokeWidth={isFollowing ? 3 : 2}
                     strokeOpacity={0.9}

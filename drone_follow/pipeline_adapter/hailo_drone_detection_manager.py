@@ -104,7 +104,7 @@ def _run_tracker(byte_tracker, persons):
 # ---------------------------------------------------------------------------
 
 def app_callback(element, buffer, user_data):
-    """Tiling pipeline callback: pick largest person (or specific tracked person), update shared state.
+    """Tiling pipeline callback: follow operator-selected person, update shared state.
 
     ByteTracker runs synchronously in the callback:
     1. Convert detections to Nx5 array, run tracker.update() synchronously
@@ -172,20 +172,12 @@ def app_callback(element, buffer, user_data):
             _update_ui(ui_state, persons, person_to_id, None)
             return
     else:
-        # IDLE mode: hold position, do not select any target
-        if target_state is not None and target_state.is_paused():
-            user_data.shared_state.update(None, available_ids=available_ids)
-            _update_ui(ui_state, persons, person_to_id, None)
-            return
-        best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
-        best_tid = person_to_id.get(id(best))
-        if best_tid is not None and target_state is not None:
-            target_state.set_target(best_tid)
-            follow_mode = f"locked ID {best_tid}"
-        elif best_tid is not None:
-            follow_mode = f"largest (ID {best_tid})"
-        else:
-            follow_mode = "largest (no tracking)"
+        # No target — idle: hold position until operator picks a followee
+        user_data.shared_state.update(None, available_ids=available_ids)
+        _update_ui(ui_state, persons, person_to_id, None)
+        LOGGER.debug("[IDLE] No target set. Available: %s",
+                    sorted(available_ids) if available_ids else "none")
+        return
 
     bbox = best.get_bbox()
     cx = bbox.xmin() + bbox.width() / 2
@@ -774,8 +766,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 )
 
             if extra_branches:
+                # For file sources, the leaky queues after the tee prevent
+                # sink sync=true from applying backpressure, so filesrc
+                # decodes at full speed.  Insert identity sync=true before
+                # the tee to pace data at real-time rate.
+                sync_element = "identity sync=true ! " if self.source_type == "file" else ""
                 output_pipeline = (
-                    f"tee name=t "
+                    f"{sync_element}tee name=t "
                     f"t. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_branch} "
                     + " ".join(extra_branches)
                 )
