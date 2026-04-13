@@ -251,7 +251,6 @@ class _WebHandler(BaseHTTPRequestHandler):
         "max_forward": float,
         "max_backward": float,
         "yaw_only": bool,
-        "fixed_altitude": bool,
         "target_distance_m": float,
         "target_bbox_height": float,
         "dead_zone_height_percent": float,

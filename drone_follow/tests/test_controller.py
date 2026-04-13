@@ -93,39 +93,19 @@ class TestYaw:
         assert abs(ratio - (2.0 ** 0.5)) < 0.01
 
 
-# ---- Altitude (vertical centering) ----
-# Default config has fixed_altitude=True; tests below explicitly set False where needed.
+# ---- Altitude ----
+# compute_velocity_command always returns down_m_s=0; the alt-hold P loop
+# in live_control_loop is the only producer of down commands.
 
-class TestAltitude:
-    def test_centered_within_dead_zone(self, config):
-        cmd = compute_velocity_command(_det(cy=0.51), config)
-        assert cmd.down_m_s == 0.0
-
-    def test_target_below_positive_down(self):
-        """Target below center -> fly down (positive down_m_s)."""
-        config = ControllerConfig(fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        cmd = compute_velocity_command(_det(cy=0.75), config)
-        assert cmd.down_m_s > 0.0
-
-    def test_target_above_negative_down(self):
-        """Target above center -> fly up (negative down_m_s)."""
-        config = ControllerConfig(fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        cmd = compute_velocity_command(_det(cy=0.25), config)
-        assert cmd.down_m_s < 0.0
-
-    def test_altitude_saturation(self):
-        config = ControllerConfig(fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        cmd = compute_velocity_command(_det(cy=1.0), config)
-        assert abs(cmd.down_m_s) <= config.max_down_speed + 0.01
-
-    def test_vfov_scaling(self):
-        """Wider vertical FOV -> larger altitude command for same pixel offset."""
-        narrow = ControllerConfig(vfov=30.0, fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        wide = ControllerConfig(vfov=90.0, fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        det = _det(cy=0.7)
-        cmd_narrow = compute_velocity_command(det, narrow)
-        cmd_wide = compute_velocity_command(det, wide)
-        assert abs(cmd_wide.down_m_s) > abs(cmd_narrow.down_m_s)
+class TestAltitudeAlwaysZero:
+    def test_downstream_layer_owns_altitude(self):
+        """Regardless of the target's vertical position, down_m_s is always 0."""
+        cfg = ControllerConfig(yaw_only=False)
+        for cy in (0.1, 0.5, 0.9):
+            cmd = compute_velocity_command(_det(cy=cy), cfg)
+            assert cmd.down_m_s == 0.0, (
+                f"compute_velocity_command must not drive altitude (cy={cy})"
+            )
 
 
 # ---- Forward/backward (distance via bbox height) ----
@@ -190,31 +170,31 @@ class TestCombined:
         assert cmd.down_m_s == 0.0
         assert cmd.yawspeed_deg_s == 0.0
 
-    def test_all_axes_active(self):
-        """Target off-center in all axes simultaneously."""
+    def test_yaw_and_forward_active_together(self):
+        """Target off-center and at wrong distance -> both yaw and forward move."""
         config = ControllerConfig(dead_zone_deg=0.0, dead_zone_height_percent=0.0,
-                                  fixed_altitude=False, target_distance_m=None, yaw_only=False)
+                                  target_distance_m=None, yaw_only=False)
         cmd = compute_velocity_command(
-            _det(cx=0.7, cy=0.3, bh=0.15), config
+            _det(cx=0.7, cy=0.5, bh=0.15), config
         )
         assert cmd.yawspeed_deg_s > 0.0    # right -> positive yaw
-        assert cmd.down_m_s < 0.0           # above center -> fly up
-        assert cmd.forward_m_s > 0.0        # small bbox -> approach
+        assert cmd.forward_m_s > 0.0       # small bbox -> approach
+        assert cmd.down_m_s == 0.0         # altitude owned by alt-hold loop
 
     def test_custom_gains(self):
         """Custom gain values should scale the output proportionally."""
         cfg_low = ControllerConfig(
-            kp_yaw=1.0, kp_down=0.04, kp_forward=1.5,
+            kp_yaw=1.0, kp_forward=1.5,
             dead_zone_deg=0.0, dead_zone_height_percent=0.0,
-            fixed_altitude=False, target_distance_m=None, yaw_only=False,
-            max_yawspeed=9999.0, max_down_speed=9999.0,
+            target_distance_m=None, yaw_only=False,
+            max_yawspeed=9999.0,
             max_forward=9999.0, max_backward=9999.0,
         )
         cfg_high = ControllerConfig(
-            kp_yaw=2.0, kp_down=0.08, kp_forward=3.0,
+            kp_yaw=2.0, kp_forward=3.0,
             dead_zone_deg=0.0, dead_zone_height_percent=0.0,
-            fixed_altitude=False, target_distance_m=None, yaw_only=False,
-            max_yawspeed=9999.0, max_down_speed=9999.0,
+            target_distance_m=None, yaw_only=False,
+            max_yawspeed=9999.0,
             max_forward=9999.0, max_backward=9999.0,
         )
         # Keep bbox away from bottom-of-frame safety path so kp_forward scaling is isolated.
@@ -223,7 +203,6 @@ class TestCombined:
         cmd_high = compute_velocity_command(det, cfg_high)
 
         assert abs(cmd_high.yawspeed_deg_s / cmd_low.yawspeed_deg_s - 2.0) < 0.01
-        assert abs(cmd_high.down_m_s / cmd_low.down_m_s - 2.0) < 0.01
         assert abs(cmd_high.forward_m_s / cmd_low.forward_m_s - 2.0) < 0.01
 
 
@@ -274,9 +253,10 @@ class TestSafetyAndFollowing:
         cmd = compute_velocity_command(_det(cy=0.8, bh=0.3), cfg)
         assert cmd.forward_m_s == 0.0
 
-    def test_yaw_only_keeps_yaw_and_disables_altitude_and_forward(self):
-        """Yaw-only mode still tracks yaw but zeroes forward/down commands."""
-        cfg = ControllerConfig(yaw_only=True, fixed_altitude=False, target_distance_m=None, dead_zone_deg=0.0)
+    def test_yaw_only_keeps_yaw_and_disables_forward(self):
+        """Yaw-only mode still tracks yaw but zeroes forward commands.
+        down_m_s is always 0 (altitude is owned by the alt-hold P loop)."""
+        cfg = ControllerConfig(yaw_only=True, target_distance_m=None, dead_zone_deg=0.0)
         cmd = compute_velocity_command(_det(cx=0.8, cy=0.2, bh=0.1), cfg)
         assert cmd.yawspeed_deg_s > 0.0
         assert cmd.forward_m_s == 0.0
@@ -317,39 +297,25 @@ class TestConfigArgs:
         assert cfg.log_verbosity == "debug"
 
 
-# ---- Validation: target_distance_m vs fixed_altitude / target_bbox_height ----
+# ---- Validation: target_distance_m vs target_bbox_height ----
 
 class TestConfigValidation:
     def test_default_config_is_valid(self):
-        """Default config (ysing target-bbox-height + variable altitude) should pass validation."""
-        cfg = ControllerConfig()
-        cfg.validate()
+        """Default config (target_bbox_height mode) should pass validation."""
+        ControllerConfig().validate()
 
-    def test_distance_with_fixed_altitude_is_valid(self):
-        cfg = ControllerConfig(target_distance_m=10.0, fixed_altitude=True)
-        cfg.validate()
+    def test_distance_mode_is_valid(self):
+        ControllerConfig(target_distance_m=10.0).validate()
 
-    def test_bbox_height_mode_with_variable_altitude_is_valid(self):
-        cfg = ControllerConfig(target_distance_m=None, fixed_altitude=False)
-        cfg.validate()
-
-    def test_distance_without_fixed_altitude_raises(self):
-        with pytest.raises(ValueError, match="target_distance_m requires fixed_altitude"):
-            ControllerConfig(target_distance_m=8.0, fixed_altitude=False)
-
-    def test_validate_catches_invalid_after_mutation(self):
-        cfg = ControllerConfig(target_distance_m=8.0, fixed_altitude=True)
-        cfg.fixed_altitude = False
-        with pytest.raises(ValueError, match="target_distance_m requires fixed_altitude"):
-            cfg.validate()
+    def test_bbox_height_mode_is_valid(self):
+        ControllerConfig(target_distance_m=None).validate()
 
 
 class TestConfigFromArgsMutualExclusivity:
     def test_defaults_use_bbox_height_mode(self):
-        """No explicit args -> defaults to target_distance_m=None, fixed_altitude=True."""
+        """No explicit args -> defaults to target_distance_m=None."""
         cfg = ControllerConfig.from_args(SimpleNamespace())
         assert cfg.target_distance_m is None
-        assert cfg.fixed_altitude is True
 
     def test_explicit_bbox_height_disables_distance(self):
         """Passing --target-bbox-height should set target_distance_m=None."""
@@ -357,15 +323,9 @@ class TestConfigFromArgsMutualExclusivity:
         assert cfg.target_distance_m is None
         assert cfg.target_bbox_height == 0.4
 
-    def test_explicit_distance_without_fixed_altitude_raises(self):
-        """--target-distance with --no-fixed-altitude raises (invalid combination)."""
-        with pytest.raises(ValueError, match="--target-distance requires --fixed-altitude"):
-            ControllerConfig.from_args(SimpleNamespace(target_distance=12.0, fixed_altitude=False))
-
-    def test_explicit_distance_with_fixed_altitude_keeps_distance_mode(self):
-        cfg = ControllerConfig.from_args(SimpleNamespace(target_distance=12.0, fixed_altitude=True))
+    def test_explicit_distance_is_honored(self):
+        cfg = ControllerConfig.from_args(SimpleNamespace(target_distance=12.0))
         assert cfg.target_distance_m == 12.0
-        assert cfg.fixed_altitude is True
 
     def test_both_distance_and_bbox_raises(self):
         with pytest.raises(ValueError, match="mutually exclusive"):

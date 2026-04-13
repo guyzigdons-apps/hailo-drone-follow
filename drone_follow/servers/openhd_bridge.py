@@ -49,7 +49,6 @@ _CONFIG_PARAMS = {
     "forward_alpha":            ("DF_FWD_ALPHA",  float),
     "target_altitude":          ("DF_TGT_ALT",   float),
     "yaw_only":                 ("DF_YAW_ONLY",   bool),
-    "fixed_altitude":           ("DF_FIX_ALT",    bool),
     "smooth_yaw":               ("DF_SMTH_YAW",   bool),
     "smooth_forward":           ("DF_SMTH_FWD",   bool),
 }

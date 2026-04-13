@@ -17,8 +17,7 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--serial-baud RATE` — Baud rate (default: 57600)
 - `--connection URL` — MAVSDK connection string (default: `udpin://0.0.0.0:14540` for simulation)
 - `--takeoff-landing` — Enable auto arm/takeoff/land (default: off — drone must already be airborne)
-- `--fixed-altitude` / `--no-fixed-altitude` — Keep altitude fixed (default: on)
-- `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
+- `--target-altitude M` — Target altitude in metres (default: 3.0). Held by a fixed-altitude P loop; also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
 - `--horizontal-mirror` / `--vertical-mirror` — Both default to off (camera right-side up). Pass both flags for 180° rotation if camera is mounted upside-down. The pipeline also passes `mirror_image=False` to `SOURCE_PIPELINE()`.

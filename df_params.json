@@ -184,17 +184,6 @@
       "read_only": false
     },
     {
-      "id": "fixed_altitude",
-      "mavlink_id": "DF_FIX_ALT",
-      "type": "bool",
-      "default": false,
-      "group": "flight",
-      "order": 2,
-      "label": "Fixed altitude",
-      "description": "When enabled, the drone maintains takeoff altitude and does not climb/descend",
-      "read_only": false
-    },
-    {
       "id": "active_id",
       "mavlink_id": "DF_ACTIVE_ID",
       "type": "int",

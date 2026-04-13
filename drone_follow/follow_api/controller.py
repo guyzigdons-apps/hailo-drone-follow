@@ -124,7 +124,6 @@ def compute_velocity_command(
 
     # --- Tracking mode ---
     error_x_deg = (detection.center_x - 0.5) * config.hfov
-    error_y_deg = (detection.center_y - 0.5) * config.vfov
 
     # Yaw: signed square-root response
     if abs(error_x_deg) < config.dead_zone_deg:
@@ -133,11 +132,9 @@ def compute_velocity_command(
         yawspeed = math.copysign(config.kp_yaw * math.sqrt(abs(error_x_deg)), error_x_deg)
     yawspeed = max(-config.max_yawspeed, min(config.max_yawspeed, yawspeed))
 
-    # Altitude
+    # Altitude is always held fixed by live_control_loop's alt-hold P loop
+    # (there is no follow-driven pitch/altitude mode).
     down = 0.0
-    if not config.fixed_altitude and not config.yaw_only:
-        down = 0.0 if abs(error_y_deg) < config.dead_zone_deg else config.kp_down * error_y_deg
-        down = max(-config.max_down_speed, min(config.max_down_speed, down))
 
     forward = _calculate_forward_speed(detection, config, target_bh)
 

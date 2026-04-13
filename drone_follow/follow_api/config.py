@@ -15,7 +15,10 @@ class ControllerConfig:
     kp_yaw: float = 5
     dead_zone_deg: float = 2.0
     max_yawspeed: float = 90.0
-    kp_down: float = 0.08
+    # max_down_speed: belt-and-suspenders clamp in VelocityCommandAPI on the
+    # down-velocity axis.  The only producer of down is the alt-hold P loop
+    # in live_control_loop (capped at _ALT_HOLD_MAX_SPEED internally), so
+    # this clamp is a safety fallback.
     max_down_speed: float = 1.5
     target_bbox_height: float = 0.3
     target_distance_m: Optional[float] = None  # desired horizontal distance; overrides target_bbox_height when set
@@ -29,7 +32,6 @@ class ControllerConfig:
     search_enter_delay_s: float = 2.0
     search_timeout_s: float = 60.0
     control_loop_hz: float = 10.0
-    fixed_altitude: bool = True
     max_bbox_height_safety: float = 0.8  # Safety limit: if bbox height > 0.8, we are too close
     yaw_only: bool = True
     reference_altitude_m: float = 3.0  # target_bbox_height is defined at this altitude; scales by (ref_alt/current_alt)
@@ -59,12 +61,11 @@ class ControllerConfig:
         self.validate()
 
     def validate(self):
-        """Raise ValueError if the configuration is internally inconsistent."""
-        if self.target_distance_m is not None and not self.fixed_altitude:
-            raise ValueError(
-                "target_distance_m requires fixed_altitude=True; "
-                "with variable altitude, use target_bbox_height instead"
-            )
+        """Raise ValueError if the configuration is internally inconsistent.
+
+        Altitude is always held fixed at target_altitude, so there are no
+        mutually-exclusive altitude modes to validate here.
+        """
 
     # ── JSON serialization ──────────────────────────────────────────
 
@@ -105,7 +106,7 @@ class ControllerConfig:
                            help=f"Target bbox height (0-1). Mutually exclusive with --target-distance. "
                                 f"(default when no --target-distance: {defaults.target_bbox_height})")
         group.add_argument("--target-distance", type=float, default=None, metavar="M",
-                           help="Desired horizontal distance to person in metres. Requires --fixed-altitude. "
+                           help="Desired horizontal distance to person in metres. "
                                 "Mutually exclusive with --target-bbox-height. "
                                 "(default: None, use target-bbox-height)")
         group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
@@ -119,11 +120,8 @@ class ControllerConfig:
         group.add_argument("--forward-gain", dest="kp_forward", type=float, default=defaults.kp_forward)
         group.add_argument("--backward-gain", dest="kp_backward", type=float, default=defaults.kp_backward,
                            help="Gain for backward movement when too close (default: 2.5)")
-        group.add_argument("--pitch-gain", dest="kp_down", type=float, default=defaults.kp_down)
 
         # Flight mode
-        group.add_argument("--fixed-altitude", action=argparse.BooleanOptionalAction, default=defaults.fixed_altitude,
-                           help="Keep altitude fixed (default: True). Use --no-fixed-altitude for vertical following.")
         group.add_argument("--yaw-only", action=argparse.BooleanOptionalAction, default=defaults.yaw_only,
                            help="Yaw only mode: no forward/backward or altitude movement (default: True). Use --no-yaw-only for full follow.")
 
@@ -194,19 +192,10 @@ class ControllerConfig:
                 "--target-distance and --target-bbox-height are mutually exclusive"
             )
 
-        # --target-distance requires --fixed-altitude; reject invalid combination.
-        fixed_alt = _arg("fixed_altitude", default=defaults.fixed_altitude)
-        if target_distance is not None and not fixed_alt:
-            raise ValueError(
-                "--target-distance requires --fixed-altitude; "
-                "use --fixed-altitude when setting a target distance, or omit --target-distance for using target-bbox-height parameter."
-            )
-
         return cls(
             hfov=_arg("hfov", default=defaults.hfov),
             vfov=_arg("vfov", default=defaults.vfov),
             kp_yaw=_arg("kp_yaw", "yaw_gain", default=defaults.kp_yaw),
-            kp_down=_arg("kp_down", "pitch_gain", default=defaults.kp_down),
             kp_forward=float(_arg("kp_forward", "forward_gain", default=defaults.kp_forward)),
             kp_backward=_arg("kp_backward", "backward_gain", default=defaults.kp_backward),
             target_bbox_height=_arg("target_bbox_height", default=defaults.target_bbox_height),
@@ -214,7 +203,6 @@ class ControllerConfig:
             person_height_m=_arg("person_height", "person_height_m", default=defaults.person_height_m),
             dead_zone_height_percent=_arg("dead_zone_height_percent", default=defaults.dead_zone_height_percent),
             reference_altitude_m=ref_alt,
-            fixed_altitude=fixed_alt,
             yaw_only=yaw_only,
             detection_timeout_s=_arg("detection_timeout", "detection_timeout_s", default=defaults.detection_timeout_s),
             search_enter_delay_s=_arg("search_enter_delay", "search_enter_delay_s", default=defaults.search_enter_delay_s),

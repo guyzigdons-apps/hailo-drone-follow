@@ -436,8 +436,10 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
                 cmd = VelocityCommand(smoothed_fwd, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
 
-            # Fixed-altitude hold: proportional controller toward target_altitude
-            if config.fixed_altitude and altitude_cache.get("m") is not None:
+            # Altitude hold: proportional controller toward target_altitude.
+            # This is the only altitude-producing path in the system — there is
+            # no follow-driven pitch/altitude mode.
+            if altitude_cache.get("m") is not None:
                 alt_error = config.target_altitude - altitude_cache["m"]
                 if abs(alt_error) > 0.1:  # dead zone to avoid jitter
                     down_speed = max(-_ALT_HOLD_MAX_SPEED, min(_ALT_HOLD_MAX_SPEED, -_ALT_HOLD_KP * alt_error))
@@ -474,7 +476,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 # Build altitude + actual velocity string for all modes
                 alt_val = altitude_cache.get("m") if altitude_cache else None
                 alt_str = f" alt={alt_val:.2f}m" if alt_val is not None else ""
-                if alt_val is not None and config.fixed_altitude:
+                if alt_val is not None:
                     alt_err = config.target_altitude - alt_val
                     alt_str += f"(err={alt_err:+.2f})"
                 actual_vd = telemetry_cache.get("vel_down")

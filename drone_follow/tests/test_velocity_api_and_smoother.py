@@ -35,7 +35,8 @@ class TestVelocityCommandAPIClamping:
     def api(self):
         cfg = ControllerConfig(
             max_forward=2.0, max_backward=3.0,
-            max_down_speed=1.5, max_yawspeed=90.0,
+            max_down_speed=1.5,
+            max_yawspeed=90.0,
             max_orbit_speed=1.0,
             smooth_yaw=False,
         )
@@ -250,7 +251,7 @@ class TestDistanceToBboxHeight:
 class TestEffectiveTargetBboxHeight:
 
     def test_distance_mode_used_when_target_distance_set(self):
-        cfg = ControllerConfig(target_distance_m=8.0, vfov=41.0, person_height_m=1.7, fixed_altitude=True)
+        cfg = ControllerConfig(target_distance_m=8.0, vfov=41.0, person_height_m=1.7)
         result = _effective_target_bbox_height(cfg, 3.0)
         expected = _distance_to_bbox_height(3.0, 8.0, 41.0, 1.7)
         assert result == pytest.approx(expected)
@@ -294,13 +295,13 @@ class TestEffectiveTargetBboxHeight:
         assert result_neg == pytest.approx(result_min)
 
     def test_distance_mode_higher_altitude_smaller_target(self):
-        cfg = ControllerConfig(target_distance_m=8.0, vfov=41.0, fixed_altitude=True)
+        cfg = ControllerConfig(target_distance_m=8.0, vfov=41.0)
         low = _effective_target_bbox_height(cfg, 2.0)
         high = _effective_target_bbox_height(cfg, 10.0)
         assert low > high
 
     def test_distance_mode_clamped_to_max_target(self):
-        cfg = ControllerConfig(target_distance_m=0.5, vfov=41.0, person_height_m=1.7, fixed_altitude=True)
+        cfg = ControllerConfig(target_distance_m=0.5, vfov=41.0, person_height_m=1.7)
         result = _effective_target_bbox_height(cfg, 1.0, max_target=0.9)
         assert result <= 0.9
 
@@ -309,7 +310,6 @@ class TestEffectiveTargetBboxHeight:
             target_distance_m=0,
             target_bbox_height=0.3,
             reference_altitude_m=3.0,
-            fixed_altitude=True,
         )
         result = _effective_target_bbox_height(cfg, 3.0)
         # target_distance_m=0 -> condition is falsy -> altitude scaling
