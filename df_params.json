@@ -6,7 +6,8 @@
     {"id": "target", "label": "TARGET & DEAD ZONE",    "order": 3},
     {"id": "flight", "label": "FLIGHT",                "order": 4},
     {"id": "track",  "label": "TRACKING",              "order": 5},
-    {"id": "video",  "label": "VIDEO",                 "order": 6}
+    {"id": "video",  "label": "VIDEO",                 "order": 6},
+    {"id": "rec",    "label": "RECORDING",              "order": 7}
   ],
   "params": [
     {
@@ -234,6 +235,17 @@
       "order": 1,
       "label": "Bitrate (kbps)",
       "description": "x264 encoder bitrate for the drone-follow video stream. Updated by variable-bitrate automatically.",
+      "read_only": false
+    },
+    {
+      "id": "recording",
+      "mavlink_id": "DF_RECORDING",
+      "type": "bool",
+      "default": false,
+      "group": "rec",
+      "order": 1,
+      "label": "Air-side recording",
+      "description": "Toggle air-side recording (post-overlay frames → drone_follow/recordings/*.mp4 on the drone). Available whenever drone-follow runs with --openhd-stream. Air-side recordings have fewer compression artifacts than ground-side and survive RF dropouts.",
       "read_only": false
     }
   ]

@@ -61,19 +61,21 @@ _NULLABLE_FIELDS = {"target_distance_m"}
 _FOLLOW_ID_PARAM = "follow_id"
 _ACTIVE_ID_PARAM = "active_id"
 _BITRATE_PARAM = "bitrate_kbps"
+_RECORDING_PARAM = "recording"  # 1 = start, 0 = stop; routed to recording_ctl
 
 
 class OpenHDBridge:
     """UDP bridge between OpenHD MAVLink params and ControllerConfig."""
 
     def __init__(self, controller_config, target_state=None, detection_state=None,
-                 ui_state=None, gst_app=None,
+                 ui_state=None, gst_app=None, recording_ctl=None,
                  listen_port=5510, report_port=5511, report_interval=0.1):
         self._config = controller_config
         self._target_state = target_state
         self._detection_state = detection_state
         self._ui_state = ui_state
         self._gst_app = gst_app  # GstApp for dynamic encoder control
+        self._recording_ctl = recording_ctl  # GstApp with start/stop_recording + is_recording
         self._listen_port = listen_port
         self._report_port = report_port
         self._report_interval = report_interval
@@ -153,6 +155,8 @@ class OpenHDBridge:
                 pass  # read-only from Python's side; ignore any set forwarded by OpenHD
             elif param_name == _BITRATE_PARAM:
                 self._apply_bitrate(int(value))
+            elif param_name == _RECORDING_PARAM:
+                self._apply_recording(int(value))
             elif param_name in _CONFIG_PARAMS:
                 self._apply_config_param(param_name, value)
             else:
@@ -208,6 +212,41 @@ class OpenHDBridge:
         encoder.set_property("bitrate", kbps)
         self._current_bitrate_kbps = kbps
         LOGGER.info("[openhd_bridge] x264enc bitrate set to %d kbps", kbps)
+
+    def _apply_recording(self, value: int):
+        """Start or stop air-side recording from QOpenHD's Record button.
+
+        Idempotent: 1 means "ensure recording", 0 means "ensure stopped".
+        Mirrors the web UI's POST /api/record/start and /api/record/stop.
+        """
+        if self._recording_ctl is None:
+            LOGGER.warning("[openhd_bridge] recording requested but no recording_ctl wired")
+            return
+        try:
+            currently_recording = bool(self._recording_ctl.is_recording)
+        except Exception:
+            LOGGER.exception("[openhd_bridge] is_recording query failed")
+            return
+        if value and not currently_recording:
+            try:
+                path = self._recording_ctl.start_recording()
+            except Exception:
+                LOGGER.exception("[openhd_bridge] start_recording failed")
+                return
+            if path:
+                LOGGER.info("[openhd_bridge] Recording started → %s", path)
+            else:
+                LOGGER.warning("[openhd_bridge] start_recording returned None (was --record passed?)")
+        elif not value and currently_recording:
+            try:
+                path = self._recording_ctl.stop_recording()
+            except Exception:
+                LOGGER.exception("[openhd_bridge] stop_recording failed")
+                return
+            LOGGER.info("[openhd_bridge] Recording stopped → %s", path)
+        # Push state immediately so QOpenHD's button updates without
+        # waiting for the next periodic report cycle.
+        self._send_immediate_report()
 
     def _apply_config_param(self, param_name, value):
         """Apply a single parameter change from OpenHD to ControllerConfig."""
@@ -288,6 +327,14 @@ class OpenHDBridge:
 
             params[_FOLLOW_ID_PARAM] = self._explicit_follow_id
             params[_ACTIVE_ID_PARAM] = actual_target if actual_target is not None else 0
+
+        # Sync recording state so QOpenHD's button reflects reality —
+        # covers air-side --record autostart, web-UI toggles, and stop-on-EOS.
+        if self._recording_ctl is not None:
+            try:
+                params[_RECORDING_PARAM] = int(bool(self._recording_ctl.is_recording))
+            except Exception:
+                pass
 
         payload = {"params": params}
 
