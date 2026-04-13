@@ -14,6 +14,9 @@ Usage:
 Pipeline options (--input, --input-codec, etc.) are passed through to the tiling pipeline.
 """
 
+import faulthandler
+faulthandler.enable()
+
 import argparse
 import asyncio
 import logging
@@ -25,7 +28,8 @@ from drone_follow.follow_api import ControllerConfig, SharedDetectionState
 from drone_follow.follow_api.state import FollowTargetState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
-from drone_follow.servers import FollowServer
+from drone_follow.sim import WorldLoader
+from drone_follow.servers import FollowServer, OpenHDBridge
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -63,6 +67,17 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--record", action="store_true",
                        help="Record raw video + detections for the entire session")
 
+    group.add_argument("--no-display", action="store_true",
+                       help="Disable display window (headless mode)")
+
+    # OpenHD integration
+    group.add_argument("--openhd-stream", action="store_true",
+                       help="Send overlay video to OpenHD via UDP RTP instead of display sink")
+    group.add_argument("--openhd-port", type=int, default=5500,
+                       help="OpenHD UDP input port (default: 5500)")
+    group.add_argument("--openhd-bitrate", type=int, default=3917,
+                       help="H264 encoding bitrate in kbps for OpenHD stream (default: 3917)")
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the full CLI parser, assembling args from every domain.
@@ -80,6 +95,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_app_args(parser)
 
+    # Camera is mounted right-side up: no mirroring needed.
+    # The library defines --horizontal-mirror/--vertical-mirror (store_true, default=False).
+    # Pass both flags on the command line if the camera is upside-down.
     return parser
 
 
@@ -103,11 +121,14 @@ def main():
     ui_pre.add_argument("--record", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
-    ui_state = None
+    # Always create SharedUIState — the OpenHD bridge needs it for bbox
+    # messages even when the web UI is disabled.
+    from drone_follow.servers import SharedUIState
+    ui_state = SharedUIState()
+
     web_server = None
     if ui_pre_args.ui:
-        from drone_follow.servers import WebServer, SharedUIState
-        ui_state = SharedUIState()
+        from drone_follow.servers import WebServer
         # Check that the UI has been built
         _ui_build_index = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "ui", "build", "index.html")
@@ -144,8 +165,14 @@ def main():
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
     follow_server.start()
 
+    # Start OpenHD parameter bridge (allows QOpenHD to control follow params)
+    openhd_bridge = OpenHDBridge(controller_config, target_state=target_state,
+                                 detection_state=shared_state, ui_state=ui_state,
+                                 gst_app=app)
+    openhd_bridge.start()
+
     # Start web UI server
-    if ui_state is not None:
+    if ui_pre_args.ui:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
         web_server = WebServer(ui_state, target_state, shared_state,
                                controller_config=controller_config,
@@ -179,7 +206,8 @@ def main():
         try:
             loop.run_until_complete(
                 run_live_drone(args, shared_state, shutdown,
-                              config=controller_config, ui_state=ui_state))
+                              config=controller_config, ui_state=ui_state,
+                              target_state=target_state))
         except Exception:
             LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
         finally:
@@ -223,6 +251,7 @@ def main():
         drone_thread.join(timeout=5.0)
         if web_server is not None:
             web_server.stop()
+        openhd_bridge.stop()
         follow_server.stop()
 
 

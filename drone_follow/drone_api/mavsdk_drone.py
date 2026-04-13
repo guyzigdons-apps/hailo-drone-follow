@@ -298,8 +298,8 @@ async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asynci
             if shutdown.is_set():
                 return
             altitude_cache["m"] = position.relative_altitude_m
-    except Exception:
-        pass
+    except Exception as e:
+        LOGGER.warning("[drone] Altitude telemetry task failed: %s", e)
 
 
 async def _telemetry_velocity_task(drone, telemetry_cache: dict, shutdown: asyncio.Event) -> None:
@@ -360,7 +360,7 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
 
 
 async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None,
-                            ui_state=None, telemetry_cache: Optional[dict] = None):
+                            ui_state=None, target_state=None, telemetry_cache: Optional[dict] = None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
@@ -407,6 +407,11 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 else:
                     last_detection_time = now
                     last_valid_detection = detection
+
+            # IDLE mode: ignore all detections and hold position indefinitely
+            if target_state is not None and target_state.is_paused():
+                detection = None
+                last_detection_time = now  # reset so search/land timers never advance
 
             # Check search timeout
             time_since_detection = now - last_detection_time
@@ -582,7 +587,7 @@ async def _wait_for_connection(drone: System) -> bool:
 
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         config=None, ui_state=None):
+                         config=None, ui_state=None, target_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If config is provided, use it directly (allows live mutation from web UI).
@@ -689,7 +694,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     _telemetry_log_task(drone, altitude_cache, telemetry_cache, shutdown, ui_state=ui_state))
                 control_task = asyncio.create_task(
                     live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
-                                      ui_state=ui_state, telemetry_cache=telemetry_cache))
+                                      ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))
 
                 done, pending = await asyncio.wait(
                     [
@@ -723,7 +728,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     vel_api.reset_filter()
                     control_task = asyncio.create_task(
                         live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
-                                          ui_state=ui_state, telemetry_cache=telemetry_cache))
+                                          ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 

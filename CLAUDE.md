@@ -21,6 +21,8 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
+- `--horizontal-mirror` / `--vertical-mirror` — Both default to off (camera right-side up). Pass both flags for 180° rotation if camera is mounted upside-down. The pipeline also passes `mirror_image=False` to `SOURCE_PIPELINE()`.
+
 ## Drone Connection
 
 ### USB Serial (real hardware)
@@ -47,8 +49,8 @@ By default (no `--takeoff-landing`), the app streams zero setpoints and waits fo
 ## Running
 
 ```bash
-# Real drone over USB (RPi):
-./run_drone.sh
+# Real drone with OpenHD (RPi — starts OpenHD air + drone-follow):
+scripts/start_air.sh
 
 # Dev machine with USB camera + flight controller:
 source setup_env.sh
@@ -147,16 +149,15 @@ The Pi has two WiFi interfaces:
 - **wlan0 (built-in RPi WiFi)** — Connects to home/dev WiFi networks
 - **wlan1 (TP-Link USB adapter)** — Dedicated AP mode for field ops (5GHz, channel 36, better antenna/range)
 
-A udev rule (`system/71-usb-wifi.rules`) pins the TP-Link adapter to `wlan1` by MAC address. Both interfaces can operate simultaneously — e.g., SSH via home WiFi (wlan0) while phone connects to drone AP (wlan1).
-
-A boot-time systemd service (`drone-network-mode.service`) runs `system/drone-network-mode.sh`:
-
-1. Waits 30s for NM to connect to any saved WiFi on wlan0
-2. **Home mode** (WiFi found on wlan0): exits, drone app does not start
-3. **Field mode** (no WiFi on wlan0): activates `HailoDrone-AP` profile on wlan1 (SSID: `HailoDrone`, password: `hailodrone`, IP: `10.0.0.1/24`, 5GHz ch36), then starts `drone-follow.service` (user service)
-
-**Files:** `system/drone-network-mode.sh`, `system/drone-network-mode.service`, `system/install.sh`, `system/71-usb-wifi.rules`
-
-**Setup:** `system/install.sh` creates the NM AP profile on wlan1, installs the udev rule, symlinks to system paths, and enables the boot service.
+A udev rule pins the TP-Link adapter to `wlan1` by MAC address. Both interfaces can operate simultaneously — e.g., SSH via home WiFi (wlan0) while phone connects to drone AP (wlan1).
 
 **Known networks:** Any WiFi saved in NetworkManager. Add new ones with `nmcli device wifi connect <SSID> password <pass>`.
+
+## Boot Service
+
+A systemd service (`drone-follow-boot.service`) auto-starts drone-follow + OpenHD at boot, controlled by a desktop config file.
+
+- **Config:** `~/Desktop/drone-follow.conf` — set `ENABLED=true` or `ENABLED=false`
+- **Install:** `sudo scripts/boot/install.sh`
+- **Uninstall:** `sudo scripts/boot/uninstall.sh`
+- **Flow:** systemd → `drone-follow-boot.sh` → reads config → if enabled, runs `scripts/start_air.sh` as hailo user
