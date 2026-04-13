@@ -3,7 +3,10 @@
 ## Overview
 
 The drone-follow parameter control path spans three software layers across
-two Raspberry Pi units connected via wifibroadcast:
+two Raspberry Pi units connected via wifibroadcast. The same parameter set is
+also editable from the air-side web UI (`--ui`, port 5001) — Web UI sliders
+write to the same in-process `ControllerConfig` that this bridge edits, so
+both control surfaces stay in sync automatically.
 
 ```
 ┌──────────────────────── AIR UNIT (RPi5 + Hailo8) ─────────────────────────┐
@@ -143,3 +146,18 @@ A single JSON file defines every DF_ parameter. All three layers read it:
 2. Copy to `/usr/local/share/openhd/df_params.json` on both units
 3. Restart OpenHD (air) and QOpenHD (ground) — no recompilation needed
 4. (Optional) Handle in Python: `controller_config.get("my_param", 1.0)`
+
+---
+
+## Special params (not in `ControllerConfig`)
+
+A few params are wired directly in `OpenHDBridge` instead of being mirrored to `ControllerConfig`. Each one requires both ends to know about it: the C++ `hailo_follow_bridge.cpp` forwards the value to UDP 5510, and `OpenHDBridge._listen_loop` dispatches it to the correct handler.
+
+| Param (`id`) | MAVLink | Direction | Handler in `openhd_bridge.py` | Effect |
+|---|---|---|---|---|
+| `follow_id` | `DF_FOLLOW_ID` | ground → air | `_apply_follow_id` | `-1` = IDLE (hold), `0` = AUTO (largest), `>0` = lock to that detection ID. Mirrored back so the badge reflects operator intent. |
+| `active_id` | `DF_ACTIVE_ID` | air → ground (read-only) | reported in `_send_report` | Currently active tracking ID (`0` = no one in view). Used by QOpenHD to distinguish AUTO-tracking-someone from no-target. |
+| `bitrate_kbps` | `DF_BITRATE` | ground → air | `_apply_bitrate` | Sets the `openhd_stream_encoder` x264enc bitrate dynamically from QOpenHD's WFB link recommendation. No-op outside `--openhd-stream` mode. |
+| `recording` | `DF_RECORDING` | ground → air, mirrored back | `_apply_recording` | Idempotent toggle for air-side recording (`1` = start, `0` = stop). Recording branch is auto-built in `--openhd-stream` mode, so the button works without `--record` at launch. State is reported back so the QOpenHD button reflects the true `is_recording` state (covers `--record` autostart, EOS, shutdown). |
+
+When adding another special param: register the constant in `openhd_bridge.py` (`_FOO_PARAM = "foo"`), add the dispatch branch in `_listen_loop`, write the handler, optionally include it in `_send_report`, add the entry to `df_params.json`, and add the matching forwarder line in OpenHD's `hailo_follow_bridge.cpp`.

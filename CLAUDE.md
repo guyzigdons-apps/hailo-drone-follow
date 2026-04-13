@@ -22,6 +22,11 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
 - `--horizontal-mirror` / `--vertical-mirror` — Both default to off (camera right-side up). Pass both flags for 180° rotation if camera is mounted upside-down. The pipeline also passes `mirror_image=False` to `SOURCE_PIPELINE()`.
+- `--ui` / `--ui-port` / `--ui-fps` — Enable the web UI (port 5001 default, 10 FPS MJPEG default). Live video, click-to-follow, and slider-based controller tuning.
+- `--record` — Capture post-overlay frames to `drone_follow/recordings/rec_<timestamp>.mp4` via an ffmpeg subprocess (libx264, 5 Mbps). Auto-starts ~1 s after PLAYING; can also be toggled mid-flight from the web UI's Record button. Saved on the drone — fewer compression artifacts than a ground-side capture, and survives RF dropouts.
+- `--openhd-stream` — Send overlay video to OpenHD via UDP RTP instead of an X11 display sink. Uses x264 software encode (the RPi5 has no HW H.264).
+- `--openhd-port` (default: 5500) / `--openhd-bitrate` (default: 3917 kbps) — OpenHD UDP destination and x264 starting bitrate. Bitrate is updated dynamically from QOpenHD's WFB link recommendation via the OpenHD bridge.
+- `--no-display` — Headless mode (no X11 window). Pair with `--openhd-stream` or SHM input for SSH/bench sessions.
 
 ## Drone Connection
 
@@ -51,6 +56,12 @@ By default (no `--takeoff-landing`), the app streams zero setpoints and waits fo
 ```bash
 # Real drone with OpenHD (RPi — starts OpenHD air + drone-follow):
 scripts/start_air.sh
+# (script invokes: drone-follow --input rpi --openhd-stream \
+#                                --connection tcpout://127.0.0.1:5760 --tiles-x 1 --tiles-y 1)
+
+# Manual OpenHD-mode invocation (e.g. with debug UI on the air unit):
+drone-follow --input rpi --openhd-stream --ui --no-display \
+    --connection tcpout://127.0.0.1:5760 --tiles-x 1 --tiles-y 1
 
 # Dev machine with USB camera + flight controller:
 source setup_env.sh
@@ -63,7 +74,9 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 
 ## Virtual Environment
 
-All dependencies live in hailo-apps' venv (`hailo-apps/venv_hailo_apps/`). Always `source setup_env.sh` before running — it activates the hailo-apps venv and sets up paths.
+This repo owns its own venv at `./venv/` (created with `--system-site-packages` so apt-installed Hailo bindings are visible). Both `hailo-apps` and `drone-follow` are installed into it as editable packages. Always `source setup_env.sh` before running — it activates `./venv/`, exports `PYTHONPATH`, runs the RPi kernel-compatibility check, and loads `/usr/local/hailo/resources/.env`.
+
+The hailo-apps system installer (`sudo hailo-apps/install.sh`) is a separate one-time bootstrap that compiles the C++ postprocess modules and downloads HEFs — it does **not** own the Python venv.
 
 ## Development Machine Setup (x86_64)
 
@@ -87,17 +100,20 @@ sudo dpkg -i hailort_<version>_<arch>.deb
 sudo reboot
 hailortcli fw-control identify  # verify device detected
 
-# 2. Run the installer (clones hailo-apps, runs hailo_installer.sh, creates venv, builds UI)
+# 2. One-time hailo-apps system bootstrap (C++ postprocess + HEFs + /usr/local/hailo/resources):
+git clone -b dev https://github.com/hailocs/hailo-apps-internal.git hailo-apps
+sudo hailo-apps/install.sh
+
+# 3. Build the repo-owned venv and editable-install hailo-apps + drone-follow:
 ./install.sh
 
 # Options:
-#   --hailo-apps-dir DIR   Use existing hailo-apps checkout (default: ./hailo-apps)
-#   --skip-hailo-apps      Skip hailo-apps clone and system deps (if already set up)
+#   --hailo-apps-dir DIR   Use an existing hailo-apps checkout (default: ./hailo-apps)
 #   --skip-ui              Skip UI npm install and build
 #   --skip-python          Skip Python dependency installation
 ```
 
-The installer auto-detects the Hailo device type (hailo8/hailo8l/hailo10h) and runs `hailo-apps/scripts/hailo_installer.sh` with the correct argument.
+Step 2 is one-time and runs as `sudo` because it touches `/usr/local/`. Step 3 owns only `./venv/` (no sudo) and is the only step you need to re-run after pulling drone-follow updates.
 
 Verify: `source setup_env.sh && drone-follow --help`
 

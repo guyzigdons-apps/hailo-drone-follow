@@ -32,23 +32,32 @@ hailortcli fw-control identify
 
 You should see your device identified (e.g. "Hailo-8" or "Hailo-8L"). If `hailortcli` is not found or the device is not detected, the driver is not installed correctly.
 
-### Step 2: Run the Installer
+### Step 2: One-time Hailo system setup (manual)
 
-The installer clones hailo-apps, runs `hailo_installer.sh` (installs firmware and Hailo software stack for your device), installs Python dependencies, and builds the UI:
+The hailo-apps system installer compiles the C++ postprocess modules, populates `/usr/local/hailo/resources/`, and downloads HEF models. Run it **once per machine**:
+
+```bash
+# Clones hailo-apps if missing, then runs the system installer:
+git clone -b dev https://github.com/hailocs/hailo-apps-internal.git hailo-apps
+sudo hailo-apps/install.sh
+```
+
+This step is **not** repeated on subsequent updates — only `./install.sh` (Step 3) is.
+
+### Step 3: Run the drone-follow Installer
+
+The installer creates a repo-owned Python venv at `./venv/` (with `--system-site-packages` so apt-installed Hailo bindings are visible), installs `hailo-apps` and `drone-follow` as editable packages, and builds the UI:
 
 ```bash
 ./install.sh
 ```
 
-The installer auto-detects your Hailo device type (hailo8 / hailo8l / hailo10h). If detection fails, it will prompt you to specify it manually.
-
 **Installer options:**
-- `--hailo-apps-dir DIR` — Use an existing hailo-apps checkout (default: `./hailo-apps`)
-- `--skip-hailo-apps` — Skip hailo-apps clone and system deps (if already set up)
+- `--hailo-apps-dir DIR` — Path to an existing hailo-apps checkout (default: `./hailo-apps`)
 - `--skip-ui` — Skip UI npm install and build
 - `--skip-python` — Skip Python dependency installation
 
-### Step 3: Verify
+### Step 4: Verify
 
 ```bash
 source setup_env.sh
@@ -93,6 +102,18 @@ drone-follow --input rpi --serial --ui
 drone-follow --input usb --serial --ui
 ```
 
+### Real drone with OpenHD (air unit)
+
+The air unit pairs drone-follow with OpenHD wifibroadcast for long-range telemetry/video to a ground station running QOpenHD. `scripts/start_air.sh` launches both side-by-side; the typical CLI is:
+
+```bash
+drone-follow --input rpi --openhd-stream \
+    --connection tcpout://127.0.0.1:5760 \
+    --tiles-x 1 --tiles-y 1
+```
+
+`--openhd-stream` redirects the overlay video into an x264 encoder + RTP/UDP sink (default `127.0.0.1:5500`) so OpenHD picks it up as an external camera. Bitrate and port are tunable with `--openhd-bitrate` (default 3917 kbps) and `--openhd-port` (default 5500). For the full air/ground build and deployment story, see [SETUP_GUIDE.md](SETUP_GUIDE.md).
+
 ### Key options
 
 - **`--target-bbox-height <0–1>`** – Desired person size in frame (default: 0.3). Adjustable mid-flight via UI.
@@ -100,7 +121,12 @@ drone-follow --input usb --serial --ui
 - **`--takeoff-landing`** – Enable automatic arm/takeoff/land. Without this flag (default), the app waits for the pilot to switch to OFFBOARD mode via GCS or RC.
 - **`--yaw-only`** (default: on) – Only yaw to center the person; no forward/backward movement. Use `--no-yaw-only` for full follow (see Yaw-Only Mode below).
 - **`--ui`** – Enable web UI with live video and click-to-follow.
-- **Input/connection:** Pipeline input is set with `--input` (e.g. `udp://0.0.0.0:5600`, `rpi`, `usb`). MAVLink connection defaults to `udpin://0.0.0.0:14540`; override with `--connection` or use `--serial` for a serial link.
+- **`--ui-port`** (default: 5001) / **`--ui-fps`** (default: 10) – Web UI server port and MJPEG stream rate.
+- **`--record`** – Capture the post-overlay video to `drone_follow/recordings/rec_<timestamp>.mp4` (ffmpeg subprocess, libx264, 5 Mbps). Recording auto-starts ~1 s after the pipeline reaches PLAYING and can also be toggled mid-flight from the web UI's Record button. Saved on the drone — fewer compression artifacts than a ground-side capture, and survives RF dropouts.
+- **`--openhd-stream`** – Send the overlay video to OpenHD via UDP RTP on `127.0.0.1:<--openhd-port>` instead of an X11 display sink.
+- **`--openhd-port`** (default: 5500) / **`--openhd-bitrate`** (default: 3917 kbps) – OpenHD UDP destination and x264 bitrate.
+- **`--no-display`** – Headless mode (no X11 window). Use with `--openhd-stream` or SHM input on bench/SSH sessions.
+- **Input/connection:** Pipeline input is set with `--input` (e.g. `udp://0.0.0.0:5600`, `rpi`, `usb`, `shm:///tmp/openhd_raw_video`). MAVLink connection defaults to `udpin://0.0.0.0:14540`; override with `--connection` or use `--serial` for a serial link.
 
 ## HTTP Control Server
 
@@ -173,7 +199,7 @@ Note: `--forward-gain 0` also fully disables forward/backward motion (including 
 
 ## Web UI Controls
 
-The web UI (`--ui`, served on port 5001) provides live video, detection overlays, and real-time tuning of the controller. All changes take effect immediately.
+The web UI (`--ui`, served on port 5001) provides live video, detection overlays, and real-time tuning of the controller. All changes take effect immediately. The same controller parameters are also exposed to QOpenHD on the ground via the OpenHD parameter bridge — both surfaces edit one shared `ControllerConfig`, so a slider moved on the air-side UI shows the same value on the ground-side QOpenHD and vice versa. See [PARAMETERS.md](PARAMETERS.md) for the bridge protocol and [Control Surfaces](#control-surfaces) below for the full picture.
 
 ### Status Bar
 
@@ -247,7 +273,7 @@ drone_follow/
   follow_api/          Pure domain logic (no HW deps) — types, config, controller math, shared state
   drone_api/           MAVSDK flight controller adapter — offboard velocity commands, takeoff/landing
   pipeline_adapter/    Hailo/GStreamer pipeline + ByteTracker — detection, tracking, target selection
-  servers/             HTTP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001)
+  servers/             HTTP/UDP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001), OpenHD parameter bridge (UDP 5510 inbound / 5511 outbound)
   sdf_examples/        Gazebo world SDF files for simulation
   ui/                  React web dashboard (built separately with npm)
   drone_follow_app.py  Composition root and CLI entrypoint
@@ -262,6 +288,18 @@ sim/
 **Data flow:** Camera → GStreamer → Hailo-8L inference → ByteTracker (in callback) → `SharedDetectionState` → Control loop (10 Hz) → MAVSDK offboard velocity command.
 
 The `follow_api` package has zero external dependencies, making the controller logic easy to test without hardware.
+
+## Control Surfaces
+
+drone-follow exposes the same control surface through three independent channels — they all read and write the **same** in-process `ControllerConfig`, `FollowTargetState`, and `SharedUIState`, so any of them can be used interchangeably:
+
+| Channel | Started by | Edits config | Selects target | Toggles recording | Reads detections |
+|---|---|---|---|---|---|
+| Web UI (HTTP/MJPEG, port 5001) | `--ui` | `POST /api/config` | UI click → `FollowServer POST /follow/<id>` | `POST /api/record/start` & `/stop` | MJPEG + SSE |
+| FollowServer (HTTP, port 8080) | always | — | `POST /follow/<id>` / `/follow/clear` | — | `GET /status` |
+| OpenHD bridge (UDP 5510/5511) | always | UDP JSON `{"param": ..., "value": ...}` from QOpenHD | `param=follow_id` (-1 idle / 0 auto / N lock) | `param=recording` (1=start, 0=stop) — branch is auto-built in `--openhd-stream` mode | bbox payload to OpenHD for ground display |
+
+`--ui` and `--openhd-stream` are independent flags — you can run either, both, or neither (e.g. headless follow with no ground link). The OpenHD bridge always starts so that QOpenHD remains in sync regardless of the `--openhd-stream` setting.
 
 ## JSON Config Files
 
