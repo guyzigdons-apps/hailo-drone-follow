@@ -4,7 +4,6 @@ Only depends on standard library + the types/config from this package.
 """
 
 import math
-import time
 from typing import Optional
 
 from .types import Detection, VelocityCommand
@@ -13,7 +12,6 @@ from .config import ControllerConfig
 __all__ = [
     "compute_velocity_command",
     "ForwardSmoother",
-    "reset_forward_dead_zone",
 ]
 
 
@@ -34,202 +32,64 @@ def _distance_to_bbox_height(
     return angular_height / vfov_rad
 
 
-class _ForwardDeadZone:
-    """Hysteresis dead zone for forward/backward control.
-
-    Uses two thresholds: a wider one to *exit* the dead zone (start moving)
-    and a narrower one to *re-enter* the dead zone (stop moving).  This prevents
-    the controller from flickering in and out of the dead zone when bbox height
-    hovers near the boundary.
-    """
-    _in_dead_zone: bool = True
-
-    def update(self, abs_delta: float, exit_threshold: float, reenter_threshold: float) -> bool:
-        """Return True if the error is inside the dead zone."""
-        if self._in_dead_zone:
-            # Need a larger error to break out
-            if abs_delta >= exit_threshold:
-                self._in_dead_zone = False
-        else:
-            # Need error to drop below the tighter threshold to re-enter
-            if abs_delta < reenter_threshold:
-                self._in_dead_zone = True
-        return self._in_dead_zone
-
-    def reset(self):
-        self._in_dead_zone = True
-
-
-class _DirectionHoldFilter:
-    """Temporal hysteresis for forward/backward direction changes.
-
-    Prevents oscillation by requiring a direction change to be sustained
-    for a minimum hold time before the new direction is applied. While
-    waiting, outputs zero (hover).
-
-    Configurable hold time (default: 0.8s). Set to 0 to disable.
-    """
-    HOLD_TIME_S = 0.8  # seconds a new direction must be sustained before acting
-
-    def __init__(self):
-        self._last_sign: int = 0      # -1, 0, +1
-        self._pending_sign: int = 0   # direction waiting to be confirmed
-        self._pending_since: float = 0.0
-
-    def filter(self, raw_speed: float, now: float) -> float:
-        """Filter forward speed. Returns 0 during direction-change hold period."""
-        if self.HOLD_TIME_S <= 0:
-            return raw_speed
-
-        if raw_speed == 0.0:
-            self._pending_sign = 0
-            return 0.0
-
-        new_sign = 1 if raw_speed > 0 else -1
-
-        if self._last_sign == 0:
-            # First command — accept immediately, no hold needed
-            self._last_sign = new_sign
-            return raw_speed
-
-        if new_sign == self._last_sign:
-            # Same direction — pass through
-            self._pending_sign = 0
-            return raw_speed
-
-        # Direction changed — start or continue hold
-        if new_sign != self._pending_sign:
-            # New pending direction
-            self._pending_sign = new_sign
-            self._pending_since = now
-            return 0.0  # hover while waiting
-
-        # Same pending direction — check if hold time elapsed
-        if (now - self._pending_since) >= self.HOLD_TIME_S:
-            self._last_sign = new_sign
-            self._pending_sign = 0
-            return raw_speed  # confirmed, allow through
-
-        return 0.0  # still waiting
-
-    def reset(self):
-        self._last_sign = 0
-        self._pending_sign = 0
-        self._pending_since = 0.0
-
-
-# Module-level state (reset when smoother is reset)
-_fwd_dead_zone = _ForwardDeadZone()
-_direction_hold = _DirectionHoldFilter()
-
-
-def reset_forward_dead_zone():
-    """Reset the forward dead zone and direction hold state. Call between flights or in tests."""
-    _fwd_dead_zone.reset()
-    _direction_hold.reset()
-
-
 def _calculate_forward_speed(
     detection: Detection,
     config: ControllerConfig,
     target_bh: float,
 ) -> float:
-    """Calculate forward/backward speed based on bbox height and bottom-of-frame position."""
+    """Plain P controller on bbox-height error, with a dead zone and safety bypasses.
+
+    Pitch-induced oscillation (rigid camera → body pitch tilts image → false
+    error signal ~1-2 Hz) is suppressed downstream by the low-pass EMA in
+    ForwardSmoother, not here.  Keep this function stateless.
+    """
     if config.yaw_only or config.kp_forward == 0:
         return 0.0
 
+    # Safety bypass 1: bbox too large → full reverse.
     if detection.bbox_height > config.max_bbox_height_safety:
         return -config.max_backward
 
-    # Bottom-of-frame safety: if the bbox bottom edge is too low in the frame,
-    # the person is directly beneath the drone — command backward to retreat.
+    # Safety bypass 2: person directly under the drone → retreat.
     bbox_bottom = detection.center_y + detection.bbox_height / 2.0
     if bbox_bottom > config.bottom_y_threshold:
         overshoot = bbox_bottom - config.bottom_y_threshold
         return -config.kp_backward * math.sqrt(overshoot)
 
+    # Plain P with a single dead-zone threshold.
     height_delta = target_bh - detection.bbox_height
-    exit_threshold = (config.dead_zone_height_percent / 100.0) * target_bh
-    reenter_threshold = (config.dead_zone_reenter_percent / 100.0) * target_bh
-
-    if _fwd_dead_zone.update(abs(height_delta), exit_threshold, reenter_threshold):
+    dead_zone = (config.dead_zone_height_percent / 100.0) * target_bh
+    if abs(height_delta) < dead_zone:
         return 0.0
 
-    # Smooth ramp: linear blend from 0 to full sqrt response over the range
-    # [reenter_threshold, 2*exit_threshold].  Avoids the discontinuous jump
-    # at the dead zone edge.  With hysteresis we may be active at abs_delta
-    # below exit_threshold, so ramp from the reenter boundary instead.
-    abs_delta = abs(height_delta)
-    ramp_end = 2.0 * exit_threshold
-    if abs_delta < ramp_end:
-        ramp = max(0.0, (abs_delta - reenter_threshold) / (ramp_end - reenter_threshold))
-    else:
-        ramp = 1.0
-
-    if height_delta > 0:
-        forward = ramp * config.kp_forward * math.sqrt(abs_delta)
-    else:
-        forward = -ramp * config.kp_backward * math.sqrt(abs_delta)
-
-    # Temporal hysteresis: require direction changes to be sustained before acting.
-    # Prevents forward/backward oscillation when bbox height fluctuates around target.
-    return _direction_hold.filter(forward, time.monotonic())
+    gain = config.kp_forward if height_delta > 0 else config.kp_backward
+    raw = gain * height_delta  # sign preserved: +ve delta = approach, -ve = retreat
+    return max(-config.max_backward, min(config.max_forward, raw))
 
 
 class ForwardSmoother:
-    """Estimates person approach/recede velocity and smooths forward commands.
+    """First-order low-pass (EMA) on the forward command.
 
-    Tracks bbox_height over time to compute d(bbox_height)/dt, then uses that
-    as a derivative feed-forward term. Also applies EMA to the final forward
-    velocity to avoid big jumps.
+    The pitch-induced oscillation sits at roughly 1-2 Hz.  With a 10 Hz loop
+    and alpha ~0.07, the cutoff is ~0.11 Hz, which attenuates the oscillation
+    by ~25 dB while leaving the sub-0.1 Hz tracking bandwidth intact.
     """
 
     def __init__(self):
         self._smoothed_forward: float = 0.0
-        self._prev_bbox_h: Optional[float] = None
-        self._prev_time: Optional[float] = None
-        self._bbox_h_rate: float = 0.0  # EMA of d(bbox_height)/dt
-        self._rate_alpha: float = 0.3   # smoothing for rate estimation
 
     def update(self, detection: Optional[Detection], raw_forward: float,
                config: ControllerConfig) -> float:
-        """Return smoothed forward velocity."""
-        now = time.monotonic()
-
-        # Update bbox height rate estimate
-        if detection is not None and self._prev_bbox_h is not None and self._prev_time is not None:
-            dt = now - self._prev_time
-            if dt > 0.01:
-                instant_rate = (detection.bbox_height - self._prev_bbox_h) / dt
-                self._bbox_h_rate = (self._rate_alpha * instant_rate
-                                     + (1.0 - self._rate_alpha) * self._bbox_h_rate)
-        if detection is not None:
-            self._prev_bbox_h = detection.bbox_height
-            self._prev_time = now
-        else:
-            self._bbox_h_rate *= 0.9
-
-        # Derivative feed-forward: positive rate means person is getting closer (bbox growing)
-        # -> we should move backward (negative forward). Negative rate -> move forward.
-        derivative_term = -config.kd_forward * self._bbox_h_rate
-
-        target_forward = raw_forward + derivative_term
-
-        # Clamp before smoothing
-        target_forward = max(-config.max_backward, min(config.max_forward, target_forward))
-
-        # EMA smoothing
+        """Return smoothed forward velocity (EMA).  `detection` is accepted for
+        API compatibility with the previous rate-aware smoother but is unused."""
+        del detection  # no longer used; kept for signature stability
+        target = max(-config.max_backward, min(config.max_forward, raw_forward))
         alpha = config.forward_alpha
-        self._smoothed_forward = alpha * target_forward + (1.0 - alpha) * self._smoothed_forward
-
+        self._smoothed_forward = alpha * target + (1.0 - alpha) * self._smoothed_forward
         return self._smoothed_forward
 
     def reset(self):
         self._smoothed_forward = 0.0
-        self._prev_bbox_h = None
-        self._prev_time = None
-        self._bbox_h_rate = 0.0
-        _fwd_dead_zone.reset()
 
 
 def compute_velocity_command(

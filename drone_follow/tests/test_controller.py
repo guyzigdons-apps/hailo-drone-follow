@@ -9,7 +9,7 @@ from drone_follow.follow_api import (
     Detection,
     ControllerConfig,
     compute_velocity_command,
-    reset_forward_dead_zone,
+    ForwardSmoother,
 )
 
 
@@ -20,14 +20,6 @@ def _det(cx=0.5, cy=0.5, bh=0.3):
         center_x=cx, center_y=cy, bbox_height=bh,
         timestamp=time.monotonic(),
     )
-
-
-@pytest.fixture(autouse=True)
-def _reset_dead_zone():
-    """Reset hysteresis dead zone state before each test."""
-    reset_forward_dead_zone()
-    yield
-    reset_forward_dead_zone()
 
 
 @pytest.fixture
@@ -382,79 +374,73 @@ class TestConfigFromArgsMutualExclusivity:
             ))
 
 
-class TestForwardHysteresis:
-    """Tests for the hysteresis dead zone on forward/backward control."""
+class TestForwardLowPass:
+    """Tests for the simplified P + single-threshold dead-zone forward controller
+    and the first-order low-pass (EMA) that attenuates pitch-induced oscillation."""
 
-    def test_stays_in_dead_zone_below_exit_threshold(self):
-        """Error below exit threshold keeps controller in dead zone."""
+    def test_dead_zone_holds_zero(self):
+        """Error smaller than dead_zone_height_percent keeps forward at 0."""
         cfg = ControllerConfig(
-            yaw_only=False, dead_zone_height_percent=15.0,
-            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
+            yaw_only=False, dead_zone_height_percent=20.0, target_bbox_height=0.3,
         )
-        # 10% error = below 15% exit threshold -> stays in dead zone
-        bh = cfg.target_bbox_height * 0.90  # 10% smaller
+        # 10% error < 20% dead zone → no motion
+        bh = cfg.target_bbox_height * 0.90
         cmd = compute_velocity_command(_det(bh=bh), cfg)
         assert cmd.forward_m_s == 0.0
 
-    def test_exits_dead_zone_above_exit_threshold(self):
-        """Error above exit threshold breaks out of dead zone."""
+    def test_breaks_out_of_dead_zone(self):
+        """Error larger than dead zone produces signed P command."""
         cfg = ControllerConfig(
-            yaw_only=False, dead_zone_height_percent=15.0,
-            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
+            yaw_only=False, dead_zone_height_percent=20.0, target_bbox_height=0.3,
         )
-        # 20% error = above 15% exit threshold -> should move
-        bh = cfg.target_bbox_height * 0.80  # 20% smaller (far away)
-        cmd = compute_velocity_command(_det(bh=bh), cfg)
-        assert cmd.forward_m_s > 0.0
+        # 30% error → approach
+        cmd_far = compute_velocity_command(_det(bh=cfg.target_bbox_height * 0.70), cfg)
+        assert cmd_far.forward_m_s > 0.0
 
-    def test_hysteresis_stays_active_between_thresholds(self):
-        """After exiting dead zone, error between reenter and exit keeps moving."""
+        # 30% oversized → retreat
+        cmd_close = compute_velocity_command(_det(bh=cfg.target_bbox_height * 1.30), cfg)
+        assert cmd_close.forward_m_s < 0.0
+
+    def test_p_command_clamped_to_max(self):
+        """Large errors saturate at max_forward / max_backward."""
         cfg = ControllerConfig(
-            yaw_only=False, dead_zone_height_percent=15.0,
-            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
+            yaw_only=False, dead_zone_height_percent=5.0, target_bbox_height=0.3,
+            kp_forward=100.0, kp_backward=100.0, max_forward=1.0, max_backward=1.5,
         )
-        # First: break out with large error
-        bh_far = cfg.target_bbox_height * 0.80  # 20% error
-        cmd1 = compute_velocity_command(_det(bh=bh_far), cfg)
-        assert cmd1.forward_m_s > 0.0
+        # cy=0.3 keeps bbox_bottom below bottom_y_threshold (0.7) for both cases,
+        # so the bottom-of-frame safety doesn't fire and we exercise the P clamp.
+        cmd_far = compute_velocity_command(_det(cy=0.3, bh=0.05), cfg)   # huge +ve error
+        assert cmd_far.forward_m_s == 1.0
+        cmd_close = compute_velocity_command(_det(cy=0.3, bh=0.6), cfg)  # huge -ve error
+        assert cmd_close.forward_m_s == -1.5
 
-        # Now: error drops to 10% (between 8% reenter and 15% exit) -> still moving
-        bh_mid = cfg.target_bbox_height * 0.90  # 10% error
-        cmd2 = compute_velocity_command(_det(bh=bh_mid), cfg)
-        assert cmd2.forward_m_s > 0.0, "Should stay active due to hysteresis"
+    def test_ema_attenuates_step_input(self):
+        """Low alpha produces slow convergence to a step input."""
+        smoother = ForwardSmoother()
+        cfg = ControllerConfig(forward_alpha=0.07, max_forward=5.0, max_backward=5.0)
+        # Step from 0 → 1.0 m/s; after one update, output should be α * step = 0.07
+        first = smoother.update(None, 1.0, cfg)
+        assert first == pytest.approx(0.07, abs=1e-6)
+        # After many updates, converges toward the target
+        for _ in range(100):
+            result = smoother.update(None, 1.0, cfg)
+        assert result == pytest.approx(1.0, abs=0.01)
 
-    def test_hysteresis_reenters_dead_zone_below_reenter_threshold(self):
-        """After exiting dead zone, error below reenter threshold stops movement."""
-        cfg = ControllerConfig(
-            yaw_only=False, dead_zone_height_percent=15.0,
-            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
-        )
-        # First: break out with large error
-        bh_far = cfg.target_bbox_height * 0.80
-        compute_velocity_command(_det(bh=bh_far), cfg)
-
-        # Now: error drops to 5% (below 8% reenter) -> back to dead zone
-        bh_close = cfg.target_bbox_height * 0.95  # 5% error
-        cmd = compute_velocity_command(_det(bh=bh_close), cfg)
-        assert cmd.forward_m_s == 0.0, "Should re-enter dead zone"
-
-    def test_ramp_produces_smooth_transition(self):
-        """Command right at exit threshold should be smaller than well beyond it."""
-        cfg = ControllerConfig(
-            yaw_only=False, dead_zone_height_percent=15.0,
-            dead_zone_reenter_percent=8.0, target_bbox_height=0.3,
-        )
-        exit_dz = (cfg.dead_zone_height_percent / 100.0) * cfg.target_bbox_height
-        # Just past exit threshold
-        bh_edge = cfg.target_bbox_height - exit_dz * 1.05
-        cmd_edge = compute_velocity_command(_det(bh=bh_edge), cfg)
-
-        # Well past ramp region
-        reset_forward_dead_zone()
-        bh_far = cfg.target_bbox_height - exit_dz * 3.0
-        cmd_far = compute_velocity_command(_det(bh=bh_far), cfg)
-
-        assert 0.0 < cmd_edge.forward_m_s < cmd_far.forward_m_s
+    def test_direction_reversal_is_smooth(self):
+        """When input flips sign, EMA transitions through zero smoothly."""
+        smoother = ForwardSmoother()
+        cfg = ControllerConfig(forward_alpha=0.2, max_forward=5.0, max_backward=5.0)
+        # Settle at +1.0
+        for _ in range(100):
+            smoother.update(None, 1.0, cfg)
+        # Abrupt flip to -1.0 — output must pass through zero, not jump
+        prev = smoother.update(None, -1.0, cfg)
+        for _ in range(10):
+            nxt = smoother.update(None, -1.0, cfg)
+            # Each step should move toward -1.0 monotonically (no overshoot)
+            assert nxt <= prev + 1e-9
+            prev = nxt
+        assert prev < 0.0  # crossed zero, now negative
 
 
 class TestOrbitMode:
@@ -492,47 +478,3 @@ class TestOrbitMode:
         assert cmd.right_m_s == 1.0      # lateral orbit velocity
 
 
-class TestDirectionHoldFilter:
-    """Tests for temporal hysteresis on forward/backward direction changes."""
-
-    def test_same_direction_passes_through(self):
-        from drone_follow.follow_api.controller import _DirectionHoldFilter
-        filt = _DirectionHoldFilter()
-        # First call sets direction and passes through immediately
-        assert filt.filter(0.5, 0.0) == 0.5
-        # Subsequent same-direction calls pass through
-        assert filt.filter(0.5, 0.1) == 0.5
-        assert filt.filter(0.3, 0.2) == 0.3
-
-    def test_direction_change_held_back(self):
-        from drone_follow.follow_api.controller import _DirectionHoldFilter
-        filt = _DirectionHoldFilter()
-        filt._last_sign = 1  # was going forward
-        # Switch to backward — should be held
-        assert filt.filter(-0.5, 1.0) == 0.0  # held
-        assert filt.filter(-0.5, 1.3) == 0.0  # still held (0.3s < 0.8s)
-
-    def test_direction_change_allowed_after_hold(self):
-        from drone_follow.follow_api.controller import _DirectionHoldFilter
-        filt = _DirectionHoldFilter()
-        filt._last_sign = 1  # was going forward
-        filt.filter(-0.5, 1.0)   # start hold
-        filt.filter(-0.5, 1.3)   # still holding
-        result = filt.filter(-0.5, 1.9)  # 0.9s > 0.8s hold time
-        assert result == -0.5  # now allowed
-
-    def test_interrupted_direction_change_resets(self):
-        from drone_follow.follow_api.controller import _DirectionHoldFilter
-        filt = _DirectionHoldFilter()
-        filt._last_sign = 1
-        filt.filter(-0.5, 1.0)   # start backward hold
-        filt.filter(-0.5, 1.3)   # 0.3s into hold
-        filt.filter(0.5, 1.5)    # back to forward — interrupts
-        # Forward should pass through (same as last_sign)
-        assert filt.filter(0.5, 1.6) == 0.5
-
-    def test_zero_passes_through(self):
-        from drone_follow.follow_api.controller import _DirectionHoldFilter
-        filt = _DirectionHoldFilter()
-        filt._last_sign = 1
-        assert filt.filter(0.0, 1.0) == 0.0

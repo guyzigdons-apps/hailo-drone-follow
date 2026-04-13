@@ -1,9 +1,7 @@
 """Tests for VelocityCommandAPI, ForwardSmoother, and _effective_target_bbox_height."""
 
 import asyncio
-import math
 import time
-from unittest.mock import patch
 
 import pytest
 
@@ -167,20 +165,18 @@ class TestVelocityCommandAPISendZero:
 class TestForwardSmootherEMA:
     """EMA smoothing of forward velocity."""
 
-    def test_first_call_with_no_detection_returns_smoothed_raw(self):
+    def test_first_call_returns_alpha_times_input(self):
         s = ForwardSmoother()
         # max_forward pinned above the test's raw input so the smoother
-        # doesn't clamp before EMA (default max_forward was lowered to 1.0
-        # by the oscillation-fix tuning).
-        cfg = ControllerConfig(forward_alpha=0.5, kd_forward=0.0, max_forward=5.0)
+        # doesn't clamp before EMA.
+        cfg = ControllerConfig(forward_alpha=0.5, max_forward=5.0)
         result = s.update(None, 2.0, cfg)
-        # No prior state, no detection: target = raw + 0 = 2.0
-        # smoothed = 0.5 * 2.0 + 0.5 * 0.0 = 1.0
+        # No prior state: smoothed = 0.5 * 2.0 + 0.5 * 0.0 = 1.0
         assert result == pytest.approx(1.0)
 
     def test_ema_converges_to_constant_input(self):
         s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=0.3, kd_forward=0.0, max_forward=5.0)
+        cfg = ControllerConfig(forward_alpha=0.3, max_forward=5.0)
         for _ in range(100):
             result = s.update(None, 1.5, cfg)
         assert result == pytest.approx(1.5, abs=0.01)
@@ -188,8 +184,8 @@ class TestForwardSmootherEMA:
     def test_high_alpha_responds_faster(self):
         s_fast = ForwardSmoother()
         s_slow = ForwardSmoother()
-        cfg_fast = ControllerConfig(forward_alpha=0.9, kd_forward=0.0)
-        cfg_slow = ControllerConfig(forward_alpha=0.1, kd_forward=0.0)
+        cfg_fast = ControllerConfig(forward_alpha=0.9)
+        cfg_slow = ControllerConfig(forward_alpha=0.1)
 
         r_fast = s_fast.update(None, 2.0, cfg_fast)
         r_slow = s_slow.update(None, 2.0, cfg_slow)
@@ -197,111 +193,27 @@ class TestForwardSmootherEMA:
 
     def test_output_clamped_to_max_forward(self):
         s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=1.0, kd_forward=0.0, max_forward=1.0)
+        cfg = ControllerConfig(forward_alpha=1.0, max_forward=1.0)
         result = s.update(None, 5.0, cfg)
         assert result <= 1.0 + 0.01
 
     def test_output_clamped_to_max_backward(self):
         s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=1.0, kd_forward=0.0, max_backward=2.0)
+        cfg = ControllerConfig(forward_alpha=1.0, max_backward=2.0)
         result = s.update(None, -10.0, cfg)
         assert result >= -2.0 - 0.01
 
 
-class TestForwardSmootherDerivative:
-    """Derivative feed-forward based on bbox height rate of change."""
+class TestForwardSmootherReset:
 
-    def _det_at(self, bh, ts):
-        return Detection(
-            label="test", confidence=0.9,
-            center_x=0.5, center_y=0.5, bbox_height=bh,
-            timestamp=ts,
-        )
-
-    def test_growing_bbox_produces_negative_derivative(self):
-        """Person approaching (bbox growing) -> derivative pushes backward."""
+    def test_reset_clears_smoothed_state(self):
         s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=1.0, kd_forward=2.0)
-
-        t0 = time.monotonic()
-        with patch("time.monotonic", return_value=t0):
-            s.update(self._det_at(0.2, t0), 0.0, cfg)
-
-        with patch("time.monotonic", return_value=t0 + 0.1):
-            result = s.update(self._det_at(0.4, t0 + 0.1), 0.0, cfg)
-
-        # bbox grew by 0.2 in 0.1s -> instant rate = 2.0
-        # derivative = -kd * rate = -2.0 * (smoothed rate)
-        # Should be negative (backward)
-        assert result < 0.0
-
-    def test_shrinking_bbox_produces_positive_derivative(self):
-        """Person receding (bbox shrinking) -> derivative pushes forward."""
-        s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=1.0, kd_forward=2.0)
-
-        t0 = time.monotonic()
-        with patch("time.monotonic", return_value=t0):
-            s.update(self._det_at(0.4, t0), 0.0, cfg)
-
-        with patch("time.monotonic", return_value=t0 + 0.1):
-            result = s.update(self._det_at(0.2, t0 + 0.1), 0.0, cfg)
-
-        assert result > 0.0
-
-    def test_zero_kd_disables_derivative(self):
-        s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=1.0, kd_forward=0.0)
-
-        t0 = time.monotonic()
-        with patch("time.monotonic", return_value=t0):
-            s.update(self._det_at(0.2, t0), 1.0, cfg)
-
-        with patch("time.monotonic", return_value=t0 + 0.1):
-            result = s.update(self._det_at(0.5, t0 + 0.1), 1.0, cfg)
-
-        # With alpha=1.0 and kd=0, output should equal raw
-        assert result == pytest.approx(1.0)
-
-
-class TestForwardSmootherDecayAndReset:
-
-    def test_lost_detection_decays_rate(self):
-        s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=1.0, kd_forward=2.0)
-
-        t0 = time.monotonic()
-        with patch("time.monotonic", return_value=t0):
-            s.update(self._det_at(0.2, t0), 0.0, cfg)
-        with patch("time.monotonic", return_value=t0 + 0.1):
-            s.update(self._det_at(0.4, t0 + 0.1), 0.0, cfg)
-
-        rate_before = s._bbox_h_rate
-        assert rate_before != 0.0
-
-        # Lose detection: rate should decay by 0.9 each call
-        with patch("time.monotonic", return_value=t0 + 0.2):
-            s.update(None, 0.0, cfg)
-        assert s._bbox_h_rate == pytest.approx(rate_before * 0.9)
-
-    def test_reset_clears_all_state(self):
-        s = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=0.5, kd_forward=2.0)
+        cfg = ControllerConfig(forward_alpha=0.5, max_forward=5.0)
         s.update(None, 5.0, cfg)
         assert s._smoothed_forward != 0.0
 
         s.reset()
         assert s._smoothed_forward == 0.0
-        assert s._prev_bbox_h is None
-        assert s._prev_time is None
-        assert s._bbox_h_rate == 0.0
-
-    def _det_at(self, bh, ts):
-        return Detection(
-            label="test", confidence=0.9,
-            center_x=0.5, center_y=0.5, bbox_height=bh,
-            timestamp=ts,
-        )
 
 
 # ---------------------------------------------------------------------------
