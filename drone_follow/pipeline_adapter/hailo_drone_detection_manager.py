@@ -7,6 +7,7 @@ No other module needs to import hailo or gi.repository.
 import argparse
 import logging
 import os
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -335,7 +336,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
     from hailo_apps.python.core.common.core import get_pipeline_parser
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
-        QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
+        QUEUE, DISPLAY_PIPELINE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
         TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
     )
@@ -367,6 +368,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
             self._record_lock = threading.Lock()
             self._shm_rebuild_pending = False
+            self._ffmpeg_proc = None
 
             # Pre-detect SHM resolution BEFORE super().__init__() so that
             # the tiling configuration (tile grid, overlap, batch size) is
@@ -404,11 +406,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 self._connect_mjpeg_sink()
 
         def _connect_mjpeg_sink(self):
-            """Connect the MJPEG appsink's new-sample signal."""
+            """Connect the MJPEG appsink and record appsink new-sample signals."""
             self._Gst = _get_gst()
             mjpeg_sink = self.pipeline.get_by_name("mjpeg_sink")
             if mjpeg_sink:
                 mjpeg_sink.connect("new-sample", self._on_mjpeg_sample)
+            record_sink = self.pipeline.get_by_name("record_appsink")
+            if record_sink:
+                record_sink.connect("new-sample", self._on_record_sample)
 
         def _on_mjpeg_sample(self, appsink):
             """appsink callback: extract pre-encoded JPEG bytes."""
@@ -420,6 +425,21 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 if success:
                     self._ui_state.update_frame(bytes(map_info.data))
                     buf.unmap(map_info)
+            return Gst.FlowReturn.OK
+
+        def _on_record_sample(self, appsink):
+            """appsink callback: pipe raw RGB frames to ffmpeg subprocess."""
+            Gst = self._Gst
+            sample = appsink.emit("pull-sample")
+            if sample and self._recording and self._ffmpeg_proc:
+                buf = sample.get_buffer()
+                ok, mapinfo = buf.map(Gst.MapFlags.READ)
+                if ok:
+                    try:
+                        self._ffmpeg_proc.stdin.write(mapinfo.data)
+                    except (BrokenPipeError, OSError):
+                        pass
+                    buf.unmap(mapinfo)
             return Gst.FlowReturn.OK
 
         def bus_call(self, bus, message, loop):
@@ -580,9 +600,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             return os.path.join(self._record_dir, f"rec_{ts}.mp4")
 
         def start_recording(self, path=None):
-            """Start GStreamer-native recording. Returns the output file path."""
-            Gst = _get_gst()
-
+            """Spawn ffmpeg subprocess and open valve. Returns the output file path."""
             with self._record_lock:
                 if self._recording:
                     LOGGER.warning("[record] Already recording")
@@ -592,24 +610,23 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     return None
 
                 valve = self.pipeline.get_by_name("record_valve")
-                encoder = self.pipeline.get_by_name("record_enc")
-                muxer = self.pipeline.get_by_name("record_mux")
-                filesink = self.pipeline.get_by_name("record_sink")
-                if valve is None or filesink is None:
-                    LOGGER.error("[record] Recording elements not found in pipeline")
+                if valve is None:
+                    LOGGER.error("[record] record_valve not found in pipeline")
                     return None
 
                 record_path = path or self._generate_record_path()
+                width, height = self.video_width, self.video_height
+                fps = self.frame_rate
 
-                # Cycle encoder, muxer, and filesink through NULL to clear
-                # any leftover EOS state from a previous recording session
-                for el in (filesink, muxer, encoder):
-                    if el is not None:
-                        el.set_state(Gst.State.NULL)
-                filesink.set_property("location", record_path)
-                for el in (encoder, muxer, filesink):
-                    if el is not None:
-                        el.sync_state_with_parent()
+                self._ffmpeg_proc = subprocess.Popen([
+                    "ffmpeg", "-y", "-nostdin",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24",
+                    "-s", f"{width}x{height}", "-r", str(fps),
+                    "-i", "pipe:0",
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-tune", "zerolatency", "-b:v", "5000k",
+                    record_path,
+                ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 valve.set_property("drop", False)
                 self._recording = True
@@ -618,33 +635,31 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return record_path
 
         def stop_recording(self):
-            """Stop recording and finalize the file."""
-            Gst = _get_gst()
-
+            """Close valve and finalize ffmpeg in background. Non-blocking."""
             with self._record_lock:
                 if not self._recording:
                     return None
 
                 valve = self.pipeline.get_by_name("record_valve")
-                encoder = self.pipeline.get_by_name("record_enc")
-                muxer = self.pipeline.get_by_name("record_mux")
-                filesink = self.pipeline.get_by_name("record_sink")
-                if valve is None:
-                    self._recording = False
-                    return None
+                if valve:
+                    valve.set_property("drop", True)
 
                 self._recording = False
-                path = getattr(self, "_current_record_path", None)
+                path = self._current_record_path
+                proc = self._ffmpeg_proc
+                self._ffmpeg_proc = None
 
-                # Close the valve first to stop new buffers entering
-                valve.set_property("drop", True)
+                def _finalize():
+                    try:
+                        if proc and proc.stdin:
+                            proc.stdin.close()
+                        if proc:
+                            proc.wait(timeout=5)
+                    except Exception:
+                        LOGGER.exception("[record] ffmpeg finalize error")
+                    LOGGER.info("[record] Finalized: %s", path)
 
-                # Transition encoder → muxer → filesink to NULL.
-                # matroskamux finalises the file (writes Cues/SeekHead/duration)
-                # during its state change — no EOS needed.
-                for el in (encoder, muxer, filesink):
-                    if el is not None:
-                        el.set_state(Gst.State.NULL)
+                threading.Thread(target=_finalize, daemon=True).start()
 
                 LOGGER.info("[record] Stopped recording: %s", path)
                 return path
@@ -655,7 +670,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return
             Gst = _get_gst()
             with self._record_lock:
-                for name in ("record_enc", "record_mux", "record_sink"):
+                for name in ("record_valve", "record_overlay", "record_appsink"):
                     el = self.pipeline.get_by_name(name)
                     if el is not None:
                         el.set_state(Gst.State.NULL)
@@ -669,6 +684,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             if not self._ui_enabled and not self._record_enabled and not openhd_stream and not is_shm and not no_display:
                 return super().get_pipeline_string()
 
+            # Build pipeline with tee: one branch for display, one for MJPEG appsink,
+            # and (if recording is enabled) one raw-RGB appsink for ffmpeg subprocess.
             if is_shm:
                 source_pipeline = _shm_source_pipeline(
                     self.video_source, self.video_width, self.video_height,
@@ -762,12 +779,17 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 )
 
             if self._record_enabled:
+                # Recording branch: pipe raw RGB frames into an appsink that
+                # forwards to an ffmpeg subprocess (see _on_record_sample /
+                # start_recording).  This avoids in-pipeline x264enc/mp4mux
+                # state manipulation and EOS signaling, which could block or
+                # produce 0-byte files.
                 record_branch = (
                     f"valve name=record_valve drop=true ! "
                     f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
-                    f"videoconvert n-threads=2 ! "
-                    f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
-                    f"mp4mux name=record_mux faststart=true ! filesink name=record_sink async=false location=/dev/null"
+                    f"videoconvert n-threads=2 ! video/x-raw,format=RGB ! "
+                    f"appsink name=record_appsink emit-signals=true drop=true "
+                    f"sync=false async=false max-buffers=1"
                 )
                 extra_branches.append(
                     f"t. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
