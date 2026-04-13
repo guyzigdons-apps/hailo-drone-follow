@@ -383,7 +383,7 @@ class Hailo15PipelineApp:
             output_buffers[name] = np.empty(out_shape, dtype=np.float32)
             bindings.output(name).set_buffer(output_buffers[name])
 
-        self._configured_model.run([bindings], timeout_ms=1000)
+        self._configured_model.run([bindings], 1000)
 
         # Extract detections from NMS output
         all_detections = []
