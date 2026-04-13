@@ -323,14 +323,52 @@ class Hailo15PipelineApp:
         finally:
             gst_buf.unmap(map_info)
 
-        # Get model input shape and resize/reshape frame
+        # Get model input shape
         input_info = self._infer_model.input()
-        input_shape = input_info.shape  # e.g. (384, 640, 3) or similar
+        input_shape = input_info.shape  # e.g. (384, 640, 3) for RGB or (576, 1024) for NV12
 
-        # The frame from appsink is NV12. The model may expect a different format.
-        # For now, resize the NV12 Y plane or convert as needed.
-        # pyhailort handles format conversion internally if input format matches.
-        frame = np.ascontiguousarray(frame_data[:np.prod(input_shape)].reshape(input_shape))
+        # Log shapes on first frame for debugging
+        if self._frame_count == 1:
+            struct = caps.get_structure(0)
+            cap_width = struct.get_int("width")[1] if struct.has_field("width") else 0
+            cap_height = struct.get_int("height")[1] if struct.has_field("height") else 0
+            cap_format = struct.get_string("format") if struct.has_field("format") else "unknown"
+            LOGGER.info("[h15] Frame: %d bytes, caps=%dx%d format=%s",
+                        len(frame_data), cap_width, cap_height, cap_format)
+            LOGGER.info("[h15] Model input: shape=%s (total=%d), format=%s",
+                        input_shape, np.prod(input_shape), input_info.format)
+
+        # The appsink frame is NV12 (H*1.5*W bytes). The model expects a specific
+        # resolution. We need to extract and resize the frame to match.
+        # Parse frame dimensions from caps
+        struct = caps.get_structure(0)
+        frame_w = struct.get_int("width")[1]
+        frame_h = struct.get_int("height")[1]
+
+        # For NV12: total bytes = w * h * 1.5
+        # Extract Y plane (grayscale) and resize to model input
+        import cv2
+        y_plane = frame_data[:frame_w * frame_h].reshape(frame_h, frame_w)
+
+        # Model input shape determines target size
+        if len(input_shape) == 3:
+            # (H, W, C) — model expects RGB/BGR
+            target_h, target_w, channels = input_shape
+            y_resized = cv2.resize(y_plane, (target_w, target_h))
+            if channels == 3:
+                # Convert grayscale Y to 3-channel
+                frame = cv2.cvtColor(y_resized, cv2.COLOR_GRAY2BGR)
+            else:
+                frame = y_resized
+        elif len(input_shape) == 2:
+            # (H, W) — model expects single channel
+            target_h, target_w = input_shape
+            frame = cv2.resize(y_plane, (target_w, target_h))
+        else:
+            # Try direct reshape as fallback
+            frame = frame_data[:np.prod(input_shape)].reshape(input_shape)
+
+        frame = np.ascontiguousarray(frame)
 
         # Create bindings and run
         bindings = self._configured_model.create_bindings()
