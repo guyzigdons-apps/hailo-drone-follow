@@ -160,4 +160,11 @@ A few params are wired directly in `OpenHDBridge` instead of being mirrored to `
 | `bitrate_kbps` | `DF_BITRATE` | ground → air | `_apply_bitrate` | Sets the `openhd_stream_encoder` x264enc bitrate dynamically from QOpenHD's WFB link recommendation. No-op outside `--openhd-stream` mode. |
 | `recording` | `DF_RECORDING` | ground → air, mirrored back | `_apply_recording` | Idempotent toggle for air-side recording (`1` = start, `0` = stop). Recording branch is auto-built in `--openhd-stream` mode, so the button works without `--record` at launch. State is reported back so the QOpenHD button reflects the true `is_recording` state (covers `--record` autostart, EOS, shutdown). |
 
-When adding another special param: register the constant in `openhd_bridge.py` (`_FOO_PARAM = "foo"`), add the dispatch branch in `_listen_loop`, write the handler, optionally include it in `_send_report`, add the entry to `df_params.json`, and add the matching forwarder line in OpenHD's `hailo_follow_bridge.cpp`.
+When adding another special param: register the constant in `openhd_bridge.py` (`_FOO_PARAM = "foo"`), add the dispatch branch in `_listen_loop`, write the handler, optionally include it in `_send_report`, and add the entry to `df_params.json`. **No OpenHD C++ change is required for QOpenHD-initiated params**: `load_param_defs_from_json` and `get_all_settings` in `hailo_follow_bridge.cpp` are fully data-driven from `df_params.json`, and `on_udp_data` generically syncs back any known key. C++ only needs a code change when OpenHD itself originates the value (e.g. `bitrate_kbps` is pushed from the WFB bitrate algorithm via `OHDVideoAir::handle_change_bitrate_request` calling `m_hailo_bridge->update_param(...)`).
+
+To activate a new param after editing `df_params.json`:
+
+```bash
+sudo cp ~/hailo-drone-follow/df_params.json /usr/local/share/openhd/df_params.json   # on BOTH units
+# Restart OpenHD on the air unit and QOpenHD on the ground unit; restart drone-follow.
+```

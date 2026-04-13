@@ -436,7 +436,7 @@ drone-follow --input rpi --openhd-stream --record \
     --tiles-x 1 --tiles-y 1
 ```
 
-> **QOpenHD remote trigger:** in `--openhd-stream` mode the recording branch is built into the pipeline automatically, so QOpenHD's Record button (param `DF_RECORDING`) can start/stop air-side capture mid-flight even without `--record` at launch. `--record` is only required when you want recording to **auto-start** as soon as the pipeline reaches PLAYING. (Requires the matching `recording` param in the OpenHD `hailo_follow_bridge.cpp` — see Stream B notes in PARAMETERS.md.)
+> **QOpenHD remote trigger:** in `--openhd-stream` mode the recording branch is built into the pipeline automatically, so QOpenHD's Record toggle (param `DF_RECORDING`) can start/stop air-side capture mid-flight even without `--record` at launch. `--record` is only required when you want recording to **auto-start** as soon as the pipeline reaches PLAYING. The OpenHD C++ side needs no recompile — `hailo_follow_bridge.cpp` is fully data-driven from `df_params.json`. Just redeploy the JSON to `/usr/local/share/openhd/` on both units and restart OpenHD (air) + QOpenHD (ground) + drone-follow.
 
 ### Ground-side recording (QOpenHD) & offline embedding
 
