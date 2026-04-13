@@ -26,7 +26,11 @@ from gi.repository import Gst, GLib
 from drone_follow.follow_api.types import Detection
 from drone_follow.follow_api.state import SharedDetectionState, FollowTargetState
 from .yolo_postprocess import extract_person_detections
-from .byte_tracker import ByteTracker
+
+try:
+    from .byte_tracker import ByteTracker
+except ImportError:
+    ByteTracker = None
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -190,10 +194,12 @@ class Hailo15PipelineApp:
         self._frame_count = 0
         self._recording = False
 
-        # ByteTracker for consistent IDs
-        self._byte_tracker = ByteTracker(
-            track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=15,
-        )
+        # ByteTracker for consistent IDs (optional — requires scipy)
+        self._byte_tracker = None
+        if ByteTracker is not None:
+            self._byte_tracker = ByteTracker(
+                track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=15,
+            )
 
         # pyhailort inference objects (initialized in _setup_inference)
         self._vdevice = None
