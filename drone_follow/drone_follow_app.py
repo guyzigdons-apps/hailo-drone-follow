@@ -70,6 +70,13 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--no-display", action="store_true",
                        help="Disable display window (headless mode)")
 
+    # ReID re-identification
+    group.add_argument("--reid-model", type=str, default=None,
+                       help="Path to ReID HEF model. Enables appearance-based re-identification "
+                            "when the tracker loses the followed person.")
+    group.add_argument("--update-interval", type=int, default=30,
+                       help="Frames between ReID gallery embedding updates while following (default: 30)")
+
     # OpenHD integration
     group.add_argument("--openhd-stream", action="store_true",
                        help="Send overlay video to OpenHD via UDP RTP instead of display sink")
@@ -141,12 +148,27 @@ def main():
     # Build the full parser from all domains, then pass to pipeline adapter
     parser = _build_parser()
 
+    # Pre-parse ReID args to initialize the manager before create_app
+    reid_pre = argparse.ArgumentParser(add_help=False)
+    reid_pre.add_argument("--reid-model", type=str, default=None)
+    reid_pre.add_argument("--update-interval", type=int, default=30)
+    reid_pre_args, _ = reid_pre.parse_known_args()
+
+    reid_manager = None
+    if reid_pre_args.reid_model:
+        from drone_follow.pipeline_adapter.reid_manager import ReIDManager
+        reid_manager = ReIDManager(
+            hef_path=reid_pre_args.reid_model,
+            update_interval=reid_pre_args.update_interval,
+        )
+
     from drone_follow.pipeline_adapter import create_app
 
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
-                     record_enabled=ui_pre_args.record, record_dir=recordings_dir)
+                     record_enabled=ui_pre_args.record, record_dir=recordings_dir,
+                     reid_manager=reid_manager)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
@@ -162,7 +184,8 @@ def main():
         raise SystemExit(0)
 
     # Start follow server (always available)
-    follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
+    follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port,
+                                 reid_manager=reid_manager)
     follow_server.start()
 
     # Start OpenHD parameter bridge (allows QOpenHD to control follow params)
@@ -249,6 +272,8 @@ def main():
             app.cleanup_recording_branch()
         # Wait for drone thread to finish cleanly
         drone_thread.join(timeout=5.0)
+        if reid_manager is not None:
+            reid_manager.release()
         if web_server is not None:
             web_server.stop()
         openhd_bridge.stop()

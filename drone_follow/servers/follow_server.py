@@ -34,6 +34,7 @@ class FollowServerHandler(BaseHTTPRequestHandler):
 
     target_state: FollowTargetState = None
     shared_state: 'SharedDetectionState' = None
+    reid_manager = None  # Optional ReIDManager
 
     def log_message(self, format, *args):
         LOGGER.debug(format, *args)
@@ -62,6 +63,8 @@ class FollowServerHandler(BaseHTTPRequestHandler):
             self.target_state.set_paused(True)
             self.target_state.set_target(None)
             self.target_state.set_explicit_lock(False)
+            if self.reid_manager is not None:
+                self.reid_manager.clear()
             self._send_json({
                 "status": "success",
                 "following_id": None,
@@ -108,11 +111,12 @@ class FollowServer:
     """HTTP server for follow target selection."""
 
     def __init__(self, target_state: FollowTargetState, shared_state: 'SharedDetectionState' = None,
-                 host: str = "0.0.0.0", port: int = 8080):
+                 host: str = "0.0.0.0", port: int = 8080, reid_manager=None):
         self.target_state = target_state
         self.shared_state = shared_state
         self.host = host
         self.port = port
+        self.reid_manager = reid_manager
         self.server = None
         self.thread = None
 
@@ -120,6 +124,7 @@ class FollowServer:
         """Start the HTTP server in a background thread."""
         FollowServerHandler.target_state = self.target_state
         FollowServerHandler.shared_state = self.shared_state
+        FollowServerHandler.reid_manager = self.reid_manager
 
         HTTPServer.allow_reuse_address = True
         self.server = HTTPServer((self.host, self.port), FollowServerHandler)

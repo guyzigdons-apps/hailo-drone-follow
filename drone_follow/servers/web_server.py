@@ -52,6 +52,7 @@ class SharedUIState:
             "mode": "IDLE",
             "ts": time.time(),
         }
+        self._perf = {}
         self._frame_event = threading.Event()
         self._logs: deque = deque(maxlen=200)
         self._log_counter: int = 0
@@ -74,6 +75,7 @@ class SharedUIState:
                 "detections": list(self._detections),
                 "following_id": self._following_id,
                 "velocity": dict(self._velocity),
+                "perf": dict(self._perf),
             }
         self._frame_event.set()
         self._frame_event.clear()
@@ -85,7 +87,13 @@ class SharedUIState:
                 "detections": list(self._detections),
                 "following_id": self._following_id,
                 "velocity": dict(self._velocity),
+                "perf": dict(self._perf),
             }
+
+    def update_perf(self, perf: dict):
+        """Called from pipeline callback with performance metrics."""
+        with self._lock:
+            self._perf = perf
 
     def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str, right_m_s: float = 0.0):
         """Called from control loop to expose current command velocity in UI."""

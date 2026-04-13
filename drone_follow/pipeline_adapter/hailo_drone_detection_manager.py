@@ -9,6 +9,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from typing import Optional
 
@@ -22,6 +23,104 @@ from .byte_tracker import ByteTracker
 LOGGER = logging.getLogger("drone_follow.app")
 
 _EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Performance tracker
+# ---------------------------------------------------------------------------
+
+class _PerfTracker:
+    """Lightweight performance tracker for the pipeline callback."""
+
+    def __init__(self):
+        self._frame_times = deque(maxlen=60)
+        self._latencies = deque(maxlen=60)
+        # CPU sampling state
+        self._last_cpu_total = 0
+        self._last_cpu_idle = 0
+        self._cpu_percent = 0.0
+        # Hailo device handle (lazy)
+        self._hailo_device = None
+        self._hailo_init_tried = False
+        # Cached values
+        self._hailo_temp = 0.0
+        self._memory_mb = 0.0
+        self._last_system_sample = 0.0
+
+    def frame_start(self):
+        return time.monotonic()
+
+    def frame_end(self, t0, ui_state):
+        now = time.monotonic()
+        self._frame_times.append(now)
+        self._latencies.append((now - t0) * 1000)
+        # Sample system metrics every ~2 seconds
+        if now - self._last_system_sample > 2.0:
+            self._last_system_sample = now
+            self._sample_cpu()
+            self._sample_memory()
+            self._sample_hailo_temp()
+        # Push to UI every frame (values are cached between system samples)
+        if ui_state is not None:
+            ui_state.update_perf(self.get_stats())
+
+    def get_stats(self):
+        ft = self._frame_times
+        if len(ft) > 1:
+            fps = (len(ft) - 1) / (ft[-1] - ft[0])
+        else:
+            fps = 0.0
+        lat = sum(self._latencies) / len(self._latencies) if self._latencies else 0.0
+        return {
+            "fps": round(fps, 1),
+            "latency_ms": round(lat, 1),
+            "cpu_percent": round(self._cpu_percent, 1),
+            "memory_mb": round(self._memory_mb, 0),
+            "hailo_temp_c": round(self._hailo_temp, 1),
+        }
+
+    # -- System sampling helpers --
+
+    def _sample_cpu(self):
+        try:
+            with open("/proc/stat", "r") as f:
+                parts = f.readline().split()
+            total = sum(int(x) for x in parts[1:8])
+            idle = int(parts[4])
+            d_total = total - self._last_cpu_total
+            d_idle = idle - self._last_cpu_idle
+            if d_total > 0:
+                self._cpu_percent = 100.0 * (1.0 - d_idle / d_total)
+            self._last_cpu_total = total
+            self._last_cpu_idle = idle
+        except Exception:
+            pass
+
+    def _sample_memory(self):
+        try:
+            with open("/proc/self/status", "r") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        self._memory_mb = int(line.split()[1]) / 1024.0
+                        return
+        except Exception:
+            pass
+
+    def _sample_hailo_temp(self):
+        if not self._hailo_init_tried:
+            self._hailo_init_tried = True
+            try:
+                from hailo_platform import Device
+                self._hailo_device = Device()
+            except Exception:
+                pass
+        if self._hailo_device is None:
+            return
+        try:
+            temp = self._hailo_device.control.get_chip_temperature()
+            self._hailo_temp = temp.ts0_temperature
+        except Exception:
+            pass
 
 _gst_module = None
 
@@ -100,6 +199,32 @@ def _run_tracker(byte_tracker, persons):
 
 
 # ---------------------------------------------------------------------------
+# ReID frame extraction helper
+# ---------------------------------------------------------------------------
+
+_buffer_utils = None
+
+def _get_frame_bgr(buffer, user_data):
+    """Extract BGR frame from GStreamer buffer for ReID cropping.
+
+    Only called when ReID needs a frame (gallery update or re-identification).
+    """
+    global _buffer_utils
+    if _buffer_utils is None:
+        from hailo_apps.python.core.common import buffer_utils
+        _buffer_utils = buffer_utils
+    try:
+        import cv2
+        frame_rgb = _buffer_utils.get_numpy_from_buffer(
+            buffer, "RGB", user_data.video_width, user_data.video_height)
+        if frame_rgb is not None:
+            return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        LOGGER.debug("[REID] Frame extraction failed: %s", e)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Main app callback
 # ---------------------------------------------------------------------------
 
@@ -111,6 +236,14 @@ def app_callback(element, buffer, user_data):
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
     """
+    _perf_t0 = user_data.perf.frame_start()
+    try:
+        _app_callback_inner(element, buffer, user_data)
+    finally:
+        user_data.perf.frame_end(_perf_t0, user_data.ui_state)
+
+
+def _app_callback_inner(element, buffer, user_data):
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     persons = [d for d in detections if d.get_label() == "person"]
@@ -122,12 +255,19 @@ def app_callback(element, buffer, user_data):
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
         user_data.shared_state.update(None, available_ids=set())
         if target_state is not None and target_state.get_target() is not None:
-            was_explicit = target_state.is_explicit_lock()
-            target_state.set_target(None)
-            if was_explicit:
-                target_state.set_paused(True)
-                target_state.set_explicit_lock(False)
-                LOGGER.info("[IDLE FALLBACK] Explicit lock lost (no persons) — entering idle")
+            # If ReID has a gallery, keep the target set so we keep searching
+            # when persons reappear. Otherwise give up immediately.
+            reid_mgr = user_data.reid_manager
+            if reid_mgr is not None and reid_mgr.has_gallery:
+                LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
+                             target_state.get_target())
+            else:
+                was_explicit = target_state.is_explicit_lock()
+                target_state.set_target(None)
+                if was_explicit:
+                    target_state.set_paused(True)
+                    target_state.set_explicit_lock(False)
+                    LOGGER.info("[IDLE FALLBACK] Explicit lock lost (no persons) — entering idle")
         _update_ui(ui_state, [], {}, None)
         if target_state is None or target_state.get_target() is None:
             LOGGER.debug("[SEARCH MODE] No person detected in frame")
@@ -144,6 +284,7 @@ def app_callback(element, buffer, user_data):
 
     # --- Target selection ---
     target_id = target_state.get_target() if target_state is not None else None
+    reid_manager = user_data.reid_manager
 
     best = None
     follow_mode = ""
@@ -151,26 +292,56 @@ def app_callback(element, buffer, user_data):
         best = person_by_id.get(target_id)
 
         if best is not None:
+            # Successfully tracking target
             target_state.update_last_seen()
             follow_mode = f"ID {target_id}"
+
+            # ReID: build/update gallery while following
+            if reid_manager is not None:
+                reid_manager.on_target_selected(target_id)
+                if reid_manager.should_update():
+                    frame_bgr = _get_frame_bgr(buffer, user_data)
+                    if frame_bgr is not None:
+                        reid_manager.update_gallery(
+                            frame_bgr, best.get_bbox(),
+                            user_data.video_width, user_data.video_height)
         else:
-            user_data.shared_state.update(None, available_ids=available_ids)
-            was_explicit = target_state.is_explicit_lock()
-            if target_state.get_target() is not None:
-                target_state.set_target(None)
-            if was_explicit:
-                # Operator locked to a specific ID that is now lost — fall back
-                # to idle so the drone holds position instead of auto-following
-                # a random person.
-                target_state.set_paused(True)
-                target_state.set_explicit_lock(False)
-                LOGGER.info("[IDLE FALLBACK] Explicit lock on ID %s lost — entering idle. Available: %s",
-                            target_id, sorted(available_ids) if available_ids else "none")
-            else:
-                LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s",
-                            target_id, sorted(available_ids) if available_ids else "none")
-            _update_ui(ui_state, persons, person_to_id, None)
-            return
+            # Target lost by tracker — try ReID re-identification
+            if reid_manager is not None and reid_manager.has_gallery and person_by_id:
+                frame_bgr = _get_frame_bgr(buffer, user_data)
+                if frame_bgr is not None:
+                    new_tid = reid_manager.try_reidentify(
+                        frame_bgr, person_by_id,
+                        user_data.video_width, user_data.video_height)
+                    if new_tid is not None:
+                        # Re-identified — resume following with the new track ID
+                        target_state.set_target(new_tid)
+                        reid_manager.on_reidentified(new_tid)
+                        best = person_by_id[new_tid]
+                        target_state.update_last_seen()
+                        follow_mode = f"REID→ID {new_tid}"
+
+            if best is None:
+                # Target not recovered — hold position
+                user_data.shared_state.update(None, available_ids=available_ids)
+                if reid_manager is not None and reid_manager.has_gallery:
+                    # Keep target set so we retry ReID on the next frame
+                    _update_ui(ui_state, persons, person_to_id, None)
+                    return
+                # No ReID gallery — give up
+                was_explicit = target_state.is_explicit_lock()
+                if target_state.get_target() is not None:
+                    target_state.set_target(None)
+                if was_explicit:
+                    target_state.set_paused(True)
+                    target_state.set_explicit_lock(False)
+                    LOGGER.info("[IDLE FALLBACK] Explicit lock on ID %s lost — entering idle. Available: %s",
+                                target_id, sorted(available_ids) if available_ids else "none")
+                else:
+                    LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s",
+                                target_id, sorted(available_ids) if available_ids else "none")
+                _update_ui(ui_state, persons, person_to_id, None)
+                return
     else:
         # No target — idle: hold position until operator picks a followee
         user_data.shared_state.update(None, available_ids=available_ids)
@@ -191,8 +362,20 @@ def app_callback(element, buffer, user_data):
         timestamp=time.monotonic(),
     ), available_ids=available_ids)
 
-    _update_ui(ui_state, persons, person_to_id,
-               target_state.get_target() if target_state else None)
+    # Use the original ID for the UI so the operator sees a stable ID
+    # even after ReID re-identifies the person with a new tracker ID.
+    ui_following_id = target_state.get_target() if target_state else None
+    ui_person_to_id = person_to_id
+    if reid_manager is not None and reid_manager.original_id is not None:
+        orig = reid_manager.original_id
+        cur = target_state.get_target() if target_state else None
+        if orig != cur and cur is not None:
+            # Remap the followed detection's ID to the original so the
+            # green highlight and "Following: ID X" both use it.
+            ui_following_id = orig
+            ui_person_to_id = dict(person_to_id)
+            ui_person_to_id[id(best)] = orig
+    _update_ui(ui_state, persons, ui_person_to_id, ui_following_id)
 
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
     LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
@@ -304,7 +487,7 @@ def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, na
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None,
-               record_enabled=False, record_dir=None):
+               record_enabled=False, record_dir=None, reid_manager=None):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -320,6 +503,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         parser: Pre-built argparse parser with all domain args already registered.
                 If None, a bare pipeline parser is created (for backward compat).
         record_dir: Directory for recording output files (optional)
+        reid_manager: ReIDManager for appearance-based re-identification (optional)
     """
     from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import (
         GStreamerTilingApp,
@@ -337,12 +521,17 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     byte_tracker=None):
+                     byte_tracker=None, reid_manager=None):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
             self.byte_tracker = byte_tracker
+            self.reid_manager = reid_manager
+            self.perf = _PerfTracker()
+            # Set after app creation so callback can extract frames for ReID
+            self.video_width = 0
+            self.video_height = 0
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -795,10 +984,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
+        reid_manager=reid_manager,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
         record_enabled=record_enabled, record_dir=record_dir,
     )
+    # Store video dimensions on user_data so the callback can extract
+    # frames for ReID cropping without needing a reference to the app.
+    user_data.video_width = app.video_width
+    user_data.video_height = app.video_height
     return app

@@ -12,6 +12,7 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
   const [recording, setRecording] = useState(false);
+  const [perf, setPerf] = useState(null);
   const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -26,6 +27,7 @@ export default function App() {
         setDetections(data.detections || []);
         setFollowingId(data.following_id);
         setVelocity(data.velocity || null);
+        setPerf(data.perf || null);
       } catch {
         // malformed event
       }
@@ -300,6 +302,14 @@ export default function App() {
               : ""}{" "}
             | Down {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
             {velocity.yawspeed_deg_s.toFixed(1)} deg/s
+          </span>
+        )}
+        {perf && (
+          <span className="perf-text">
+            {perf.fps} FPS | {perf.latency_ms} ms
+            | CPU {perf.cpu_percent}%
+            | Mem {perf.memory_mb} MB
+            {perf.hailo_temp_c > 0 ? ` | Hailo ${perf.hailo_temp_c}\u00b0C` : ""}
           </span>
         )}
         <button
