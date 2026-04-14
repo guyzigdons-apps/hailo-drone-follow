@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.stats import chi2
 from scipy.optimize import linear_sum_assignment
 
 class KalmanFilter:

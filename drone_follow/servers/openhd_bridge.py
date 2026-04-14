@@ -32,7 +32,7 @@ import socket
 import threading
 import time
 
-LOGGER = logging.getLogger("drone_follow.openhd_bridge")
+LOGGER = logging.getLogger(__name__)
 
 # Mapping: wire_name -> (mavlink_id, python_type)
 # wire_name matches both the JSON "param" field from OpenHD and the
@@ -175,10 +175,8 @@ class OpenHDBridge:
             self._target_state.set_explicit_lock(False)
             LOGGER.info("[openhd_bridge] IDLE mode (drone holding position)")
         elif value == 0:
-            self._target_state.set_paused(False)
-            self._target_state.set_target(None)
-            self._target_state.set_explicit_lock(False)
-            LOGGER.info("[openhd_bridge] AUTO mode (following largest)")
+            self._target_state.enter_auto_mode()
+            LOGGER.info("[openhd_bridge] AUTO mode (follow largest person)")
         else:
             self._target_state.set_paused(False)
             self._target_state.set_target(value)
@@ -279,12 +277,15 @@ class OpenHDBridge:
         if self._target_state is not None:
             actual_target = self._target_state.get_target()
 
-            # If the callback fell back to idle after losing an explicit lock,
-            # sync follow_id so QOpenHD badge shows IDLE instead of a stale lock.
-            if self._explicit_follow_id > 0 and self._target_state.is_paused():
-                LOGGER.info("[openhd_bridge] Explicit lock on #%d lost — syncing to IDLE",
-                            self._explicit_follow_id)
-                self._explicit_follow_id = -1
+            # If the callback fell back after losing an explicit lock,
+            # sync follow_id so QOpenHD badge reflects the actual state.
+            if self._explicit_follow_id > 0 and not self._target_state.is_explicit_lock():
+                if self._target_state.is_paused():
+                    self._explicit_follow_id = -1
+                    LOGGER.info("[openhd_bridge] Explicit lock lost — syncing to IDLE")
+                else:
+                    self._explicit_follow_id = 0
+                    LOGGER.info("[openhd_bridge] Explicit lock lost — syncing to AUTO")
 
             params[_FOLLOW_ID_PARAM] = self._explicit_follow_id
             params[_ACTIVE_ID_PARAM] = actual_target if actual_target is not None else 0

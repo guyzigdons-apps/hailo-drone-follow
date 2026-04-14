@@ -116,6 +116,10 @@ class MultiEmbeddingStrategy(GalleryStrategy):
         self._person_embeddings = {}  # name -> list of embeddings
         self._max_k = max_k
 
+    def embedding_count(self, name: str) -> int:
+        """Return the number of stored embeddings for a person."""
+        return len(self._person_embeddings.get(name, []))
+
     def add_person(self, name: str, embedding: np.ndarray):
         self._name_to_idx[name] = len(self._names)
         self._names.append(name)

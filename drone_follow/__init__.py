@@ -21,12 +21,12 @@ from .follow_api import (
 # optional runtime deps (e.g. hailo, GStreamer).
 try:
     from .pipeline_adapter import create_app
-except Exception:  # pragma: no cover - optional runtime dependencies
+except ImportError:  # pragma: no cover - optional runtime dependencies
     create_app = None
 
 try:
     from .servers import SharedUIState, WebServer
-except Exception:  # pragma: no cover - optional runtime dependencies
+except ImportError:  # pragma: no cover - optional runtime dependencies
     SharedUIState = None
     WebServer = None
 

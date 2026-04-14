@@ -1,4 +1,4 @@
-"""Tests for VelocityCommandAPI, ForwardSmoother, and _effective_target_bbox_height."""
+"""Tests for VelocityCommandAPI, ForwardSmoother, and effective_target_bbox_height."""
 
 import asyncio
 import math
@@ -12,9 +12,9 @@ from drone_follow.follow_api import (
     Detection,
     VelocityCommand,
     ForwardSmoother,
-    _distance_to_bbox_height,
-    _effective_target_bbox_height,
+    effective_target_bbox_height,
 )
+from drone_follow.follow_api.controller import _distance_to_bbox_height
 from drone_follow.drone_api import VelocityCommandAPI
 
 
@@ -302,7 +302,7 @@ class TestForwardSmootherDecayAndReset:
 
 
 # ---------------------------------------------------------------------------
-# _effective_target_bbox_height and _distance_to_bbox_height
+# effective_target_bbox_height and _distance_to_bbox_height
 # ---------------------------------------------------------------------------
 
 class TestDistanceToBboxHeight:
@@ -336,7 +336,7 @@ class TestEffectiveTargetBboxHeight:
 
     def test_distance_mode_used_when_target_distance_set(self):
         cfg = ControllerConfig(target_distance_m=8.0, vfov=41.0, person_height_m=1.7, fixed_altitude=True)
-        result = _effective_target_bbox_height(cfg, 3.0)
+        result = effective_target_bbox_height(cfg, 3.0)
         expected = _distance_to_bbox_height(3.0, 8.0, 41.0, 1.7)
         assert result == pytest.approx(expected)
 
@@ -347,13 +347,13 @@ class TestEffectiveTargetBboxHeight:
             reference_altitude_m=3.0,
         )
         # At reference altitude: effective = (3.0 * 0.3) / 3.0 = 0.3
-        assert _effective_target_bbox_height(cfg, 3.0) == pytest.approx(0.3)
+        assert effective_target_bbox_height(cfg, 3.0) == pytest.approx(0.3)
 
         # At double altitude: effective = (3.0 * 0.3) / 6.0 = 0.15
-        assert _effective_target_bbox_height(cfg, 6.0) == pytest.approx(0.15)
+        assert effective_target_bbox_height(cfg, 6.0) == pytest.approx(0.15)
 
         # At half altitude: effective = (3.0 * 0.3) / 1.5 = 0.6
-        assert _effective_target_bbox_height(cfg, 1.5) == pytest.approx(0.6)
+        assert effective_target_bbox_height(cfg, 1.5) == pytest.approx(0.6)
 
     def test_max_target_clamp(self):
         cfg = ControllerConfig(
@@ -362,7 +362,7 @@ class TestEffectiveTargetBboxHeight:
             reference_altitude_m=3.0,
         )
         # Very low altitude -> would give huge bbox target, should be clamped
-        result = _effective_target_bbox_height(cfg, 0.1)
+        result = effective_target_bbox_height(cfg, 0.1)
         assert result <= 0.9
 
     def test_min_altitude_floor(self):
@@ -372,21 +372,21 @@ class TestEffectiveTargetBboxHeight:
             reference_altitude_m=3.0,
         )
         # Altitude 0 or negative should be floored to min_altitude_m (0.5)
-        result_zero = _effective_target_bbox_height(cfg, 0.0)
-        result_neg = _effective_target_bbox_height(cfg, -1.0)
-        result_min = _effective_target_bbox_height(cfg, 0.5)
+        result_zero = effective_target_bbox_height(cfg, 0.0)
+        result_neg = effective_target_bbox_height(cfg, -1.0)
+        result_min = effective_target_bbox_height(cfg, 0.5)
         assert result_zero == pytest.approx(result_min)
         assert result_neg == pytest.approx(result_min)
 
     def test_distance_mode_higher_altitude_smaller_target(self):
         cfg = ControllerConfig(target_distance_m=8.0, vfov=41.0, fixed_altitude=True)
-        low = _effective_target_bbox_height(cfg, 2.0)
-        high = _effective_target_bbox_height(cfg, 10.0)
+        low = effective_target_bbox_height(cfg, 2.0)
+        high = effective_target_bbox_height(cfg, 10.0)
         assert low > high
 
     def test_distance_mode_clamped_to_max_target(self):
         cfg = ControllerConfig(target_distance_m=0.5, vfov=41.0, person_height_m=1.7, fixed_altitude=True)
-        result = _effective_target_bbox_height(cfg, 1.0, max_target=0.9)
+        result = effective_target_bbox_height(cfg, 1.0, max_target=0.9)
         assert result <= 0.9
 
     def test_target_distance_zero_falls_through_to_altitude_scaling(self):
@@ -396,6 +396,6 @@ class TestEffectiveTargetBboxHeight:
             reference_altitude_m=3.0,
             fixed_altitude=True,
         )
-        result = _effective_target_bbox_height(cfg, 3.0)
+        result = effective_target_bbox_height(cfg, 3.0)
         # target_distance_m=0 -> condition is falsy -> altitude scaling
         assert result == pytest.approx(0.3)
