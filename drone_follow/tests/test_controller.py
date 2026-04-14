@@ -373,6 +373,70 @@ class TestConfigFromArgsMutualExclusivity:
             ))
 
 
+class TestYawMotionCompensation:
+    """Yaw motion compensation: correct detection center_x for ongoing yaw rotation."""
+
+    def test_yawing_right_reduces_right_side_error(self):
+        """Drone yawing right + person on the right: compensation reduces yaw command."""
+        cfg = ControllerConfig(compensate_yaw_motion=True, control_loop_hz=10.0,
+                               hfov=66.0, dead_zone_deg=0.0)
+        det = _det(cx=0.7)  # person right of center
+
+        cmd_comp = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=30.0)
+        cmd_no = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=0.0)
+
+        # Compensated yaw should be smaller (drone already rotating toward target)
+        assert abs(cmd_comp.yawspeed_deg_s) < abs(cmd_no.yawspeed_deg_s)
+
+    def test_yawing_left_reduces_left_side_error(self):
+        """Drone yawing left + person on the left: compensation reduces yaw command."""
+        cfg = ControllerConfig(compensate_yaw_motion=True, control_loop_hz=10.0,
+                               hfov=66.0, dead_zone_deg=0.0)
+        det = _det(cx=0.3)  # person left of center
+
+        cmd_comp = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=-30.0)
+        cmd_no = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=0.0)
+
+        assert abs(cmd_comp.yawspeed_deg_s) < abs(cmd_no.yawspeed_deg_s)
+
+    def test_zero_yawspeed_no_effect(self):
+        """With zero prev yawspeed, compensation has no effect."""
+        cfg = ControllerConfig(compensate_yaw_motion=True, control_loop_hz=10.0,
+                               hfov=66.0, dead_zone_deg=0.0)
+        det = _det(cx=0.7)
+
+        cmd_on = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=0.0)
+        cfg_off = ControllerConfig(compensate_yaw_motion=False, control_loop_hz=10.0,
+                                    hfov=66.0, dead_zone_deg=0.0)
+        cmd_off = compute_velocity_command(det, cfg_off, prev_yawspeed_deg_s=0.0)
+
+        assert cmd_on.yawspeed_deg_s == pytest.approx(cmd_off.yawspeed_deg_s)
+
+    def test_disabled_config_no_effect(self):
+        """With compensate_yaw_motion=False, prev_yawspeed is ignored."""
+        cfg = ControllerConfig(compensate_yaw_motion=False, control_loop_hz=10.0,
+                               hfov=66.0, dead_zone_deg=0.0)
+        det = _det(cx=0.7)
+
+        cmd_with = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=50.0)
+        cmd_without = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=0.0)
+
+        assert cmd_with.yawspeed_deg_s == pytest.approx(cmd_without.yawspeed_deg_s)
+
+    def test_compensation_does_not_affect_other_axes(self):
+        """Yaw compensation should not change forward, right, or down commands."""
+        cfg = ControllerConfig(compensate_yaw_motion=True, control_loop_hz=10.0,
+                               hfov=66.0, dead_zone_deg=0.0, yaw_only=False)
+        det = _det(cx=0.7, bh=0.15)
+
+        cmd_comp = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=30.0)
+        cmd_no = compute_velocity_command(det, cfg, prev_yawspeed_deg_s=0.0)
+
+        assert cmd_comp.forward_m_s == pytest.approx(cmd_no.forward_m_s)
+        assert cmd_comp.right_m_s == pytest.approx(cmd_no.right_m_s)
+        assert cmd_comp.down_m_s == pytest.approx(cmd_no.down_m_s)
+
+
 class TestOrbitMode:
     def test_orbit_adds_lateral_velocity(self):
         """In orbit mode, tracking a target should produce lateral velocity."""

@@ -122,6 +122,7 @@ def compute_velocity_command(
     last_detection: Optional[Detection] = None,
     search_active: bool = True,
     hold_velocity: Optional[VelocityCommand] = None,
+    prev_yawspeed_deg_s: float = 0.0,
 ) -> VelocityCommand:
     """Compute a velocity command from the current detection and config.
 
@@ -146,7 +147,16 @@ def compute_velocity_command(
         return VelocityCommand(search_forward, 0.0, 0.0, search_direction * config.search_yawspeed_slow)
 
     # --- Tracking mode ---
-    error_x_deg = (detection.center_x - 0.5) * config.hfov
+    # Compensate for yaw rotation: the drone has been rotating since the frame
+    # was captured, so the detection center_x is stale by one control period.
+    if config.compensate_yaw_motion and prev_yawspeed_deg_s != 0.0:
+        dt = 1.0 / max(1.0, config.control_loop_hz)
+        yaw_shift = (prev_yawspeed_deg_s * dt) / config.hfov
+        corrected_cx = detection.center_x - yaw_shift
+    else:
+        corrected_cx = detection.center_x
+
+    error_x_deg = (corrected_cx - 0.5) * config.hfov
     error_y_deg = (detection.center_y - 0.5) * config.vfov
 
     # Yaw: signed square-root response

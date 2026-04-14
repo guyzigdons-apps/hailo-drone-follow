@@ -47,6 +47,9 @@ class ControllerConfig:
     forward_alpha: float = 0.1          # EMA smoothing factor (0=ignore new, 1=no smoothing)
     kd_forward: float = 2.0            # derivative gain: anticipate person movement
 
+    # Motion compensation
+    compensate_yaw_motion: bool = False  # correct detection center_x for ongoing yaw rotation
+
     follow_mode: str = "follow"       # "follow" or "orbit"
     orbit_speed_m_s: float = 1.0      # lateral velocity for orbit (m/s)
     orbit_direction: int = 1          # +1 = clockwise, -1 = counter-clockwise
@@ -149,6 +152,11 @@ class ControllerConfig:
         group.add_argument("--max-bbox-height-safety", type=float, default=defaults.max_bbox_height_safety,
                            help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
 
+        # Motion compensation
+        group.add_argument("--compensate-yaw-motion", action=argparse.BooleanOptionalAction,
+                           default=defaults.compensate_yaw_motion,
+                           help="Correct detection position for ongoing yaw rotation (default: off)")
+
         # Orbit mode
         group.add_argument("--follow-mode", choices=["follow", "orbit"], default=defaults.follow_mode,
                            help="Follow mode: 'follow' (default) or 'orbit' (circle around target)")
@@ -229,6 +237,7 @@ class ControllerConfig:
             smooth_forward=_arg("smooth_forward", default=defaults.smooth_forward),
             forward_alpha=_arg("forward_alpha", default=defaults.forward_alpha),
             kd_forward=_arg("kd_forward", default=defaults.kd_forward),
+            compensate_yaw_motion=_arg("compensate_yaw_motion", default=defaults.compensate_yaw_motion),
             follow_mode=_arg("follow_mode", default=defaults.follow_mode),
             orbit_speed_m_s=_arg("orbit_speed", "orbit_speed_m_s", default=defaults.orbit_speed_m_s),
             orbit_direction=_arg("orbit_direction", default=defaults.orbit_direction),

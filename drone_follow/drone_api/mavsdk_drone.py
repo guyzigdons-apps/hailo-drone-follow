@@ -429,6 +429,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 last_detection=last_valid_detection,
                 search_active=(time_since_detection >= config.search_enter_delay_s),
                 hold_velocity=_prev_cmd,
+                prev_yawspeed_deg_s=_prev_cmd.yawspeed_deg_s if _prev_cmd else 0.0,
             )
 
             if config.smooth_forward and not config.yaw_only:

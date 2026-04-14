@@ -49,6 +49,17 @@
       "read_only": false
     },
     {
+      "id": "compensate_yaw_motion",
+      "mavlink_id": "DF_COMP_YAW",
+      "type": "bool",
+      "default": false,
+      "group": "yaw",
+      "order": 5,
+      "label": "Yaw motion compensation",
+      "description": "Correct detection position for ongoing yaw rotation to reduce overshoot",
+      "read_only": false
+    },
+    {
       "id": "yaw_only",
       "mavlink_id": "DF_YAW_ONLY",
       "type": "bool",

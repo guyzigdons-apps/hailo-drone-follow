@@ -52,6 +52,12 @@ if [ ! -d "$PX4_DIR/build/px4_sitl_default" ]; then
     exit 1
 fi
 
+if ! [ -f "$PX4_DIR/build/px4_sitl_default/bin/px4-gz_bridge" ]; then
+    echo -e "${RED}Error: gz_bridge not found — PX4 was built without Gazebo support.${NC}"
+    echo -e "${RED}Install libgz-transport12-dev and re-run sim/setup_sim.sh${NC}"
+    exit 1
+fi
+
 # Set GZ_SIM_RESOURCE_PATH so Gazebo can find custom models (e.g. "Walking actor")
 export GZ_SIM_RESOURCE_PATH="${SDF_EXAMPLES}:${GZ_SIM_RESOURCE_PATH:-}"
 
@@ -70,6 +76,9 @@ if [ -n "$WORLD" ]; then
     ln -sf "$WORLD_FILE" "$PX4_WORLDS_DIR/${WORLD}.sdf"
     export PX4_GZ_WORLD="$WORLD"
 fi
+
+# Force Gazebo Garden if Harmonic is the default (see gz_garden_env.sh for details)
+source "$SCRIPT_DIR/gz_garden_env.sh" || exit 1
 
 echo -e "${GREEN}Starting PX4 SITL + Gazebo (x500_vision with camera)...${NC}"
 echo "  PX4:        $PX4_DIR"
@@ -102,8 +111,16 @@ cleanup() {
         kill "$BRIDGE_PID" 2>/dev/null || true
         wait "$BRIDGE_PID" 2>/dev/null || true
     fi
+    gz_garden_cleanup 2>/dev/null || true
 }
 trap cleanup EXIT
 
 cd "$PX4_DIR"
+# Source the generated gz_env.sh so Gazebo can find PX4's built-in models/worlds.
+if [ -f "$PX4_DIR/build/px4_sitl_default/rootfs/gz_env.sh" ]; then
+    source "$PX4_DIR/build/px4_sitl_default/rootfs/gz_env.sh"
+fi
+# Use the gz_x500_vision cmake target — it builds (if needed) AND launches PX4
+# with PX4_SIM_MODEL=gz_x500_vision automatically.  The PX4_GZ_WORLD env var
+# (set above) tells it which world to load.
 make px4_sitl gz_x500_vision
