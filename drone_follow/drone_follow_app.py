@@ -81,6 +81,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Disable ReID re-identification")
     group.add_argument("--update-interval", type=int, default=30,
                        help="Frames between ReID gallery embedding updates while following (default: 30)")
+    group.add_argument("--reid-threshold", type=float, default=0.7,
+                       help="Cosine similarity threshold for ReID match (0.0–1.0, default: 0.7)")
 
     # OpenHD integration
     group.add_argument("--openhd-stream", action="store_true",
@@ -158,6 +160,7 @@ def main():
     reid_pre.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF)
     reid_pre.add_argument("--no-reid", action="store_true")
     reid_pre.add_argument("--update-interval", type=int, default=30)
+    reid_pre.add_argument("--reid-threshold", type=float, default=0.7)
     reid_pre_args, _ = reid_pre.parse_known_args()
 
     reid_manager = None
@@ -166,6 +169,7 @@ def main():
         reid_manager = ReIDManager(
             hef_path=reid_pre_args.reid_model,
             update_interval=reid_pre_args.update_interval,
+            reid_match_threshold=reid_pre_args.reid_threshold,
         )
 
     from drone_follow.pipeline_adapter import create_app
