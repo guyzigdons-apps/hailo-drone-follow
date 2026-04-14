@@ -52,6 +52,38 @@ echo ""
 # ─── Step 1: Build repo-owned venv and install Python deps ───────────
 REPO_VENV_DIR="$SCRIPT_DIR/venv"
 
+# ─── Download ReID HEF models ──────────────────────────────────────
+REID_MODELS_DIR="/usr/local/hailo/resources/models/hailo8"
+REID_HEFS=(
+    "repvgg_a0_person_reid_512.hef"
+    "osnet_x1_0.hef"
+)
+REID_BASE_URL="https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v2.18.0/hailo8"
+
+MISSING_HEFS=()
+for hef in "${REID_HEFS[@]}"; do
+    if [ ! -f "$REID_MODELS_DIR/$hef" ]; then
+        MISSING_HEFS+=("$hef")
+    fi
+done
+
+if [ ${#MISSING_HEFS[@]} -gt 0 ]; then
+    echo -e "${GREEN}Downloading ReID HEF models...${NC}"
+    sudo mkdir -p "$REID_MODELS_DIR"
+    for hef in "${MISSING_HEFS[@]}"; do
+        echo -e "  Downloading ${CYAN}$hef${NC}..."
+        if sudo wget -q --show-progress -O "$REID_MODELS_DIR/$hef" "$REID_BASE_URL/$hef"; then
+            echo -e "  ${GREEN}Saved to $REID_MODELS_DIR/$hef${NC}"
+        else
+            echo -e "${YELLOW}  Failed to download $hef. Download manually from:${NC}"
+            echo -e "  https://github.com/hailo-ai/hailo_model_zoo/blob/master/docs/public_models/HAILO8/HAILO8_person_re_id.rst"
+            echo -e "  Place in: $REID_MODELS_DIR/"
+        fi
+    done
+else
+    echo -e "${GREEN}ReID HEF models already present in $REID_MODELS_DIR${NC}"
+fi
+
 if ! $SKIP_PYTHON; then
     echo -e "${GREEN}[1/2] Setting up repo Python venv at ${CYAN}$REPO_VENV_DIR${NC}..."
 
