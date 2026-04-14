@@ -224,7 +224,7 @@ class Hailo15PipelineApp:
 
     def _setup_inference(self):
         """Initialize pyhailort VDevice and load the YOLOv8 HEF."""
-        from hailo_platform import VDevice, FormatType
+        from hailo_platform import VDevice
 
         hef_path = _find_yolo_hef()
         LOGGER.info("[h15] Loading HEF: %s", hef_path)
@@ -232,10 +232,7 @@ class Hailo15PipelineApp:
         self._vdevice = VDevice()
         self._infer_model = self._vdevice.create_infer_model(hef_path)
 
-        # Request float32 output for easy post-processing
-        for output in self._infer_model.outputs:
-            output.set_format_type(FormatType.FLOAT32)
-
+        # Don't override format types — let NMS output use its native format
         self._configured_model = self._infer_model.configure()
 
         input_info = self._infer_model.input()
@@ -383,15 +380,9 @@ class Hailo15PipelineApp:
         nv12_resized = np.concatenate([y_resized.ravel(), uv_resized.ravel()])
         frame = np.ascontiguousarray(nv12_resized.reshape(input_shape))
 
-        # Create bindings and run
+        # Create bindings and run — for NMS outputs, don't pre-set buffers
         bindings = self._configured_model.create_bindings()
         bindings.input().set_buffer(frame)
-
-        output_buffers = {}
-        for name in self._infer_model.output_names:
-            out_shape = self._infer_model.output(name).shape
-            output_buffers[name] = np.empty(out_shape, dtype=np.float32)
-            bindings.output(name).set_buffer(output_buffers[name])
 
         self._configured_model.run([bindings], 1000)
 
@@ -405,8 +396,9 @@ class Hailo15PipelineApp:
                     nms_result, confidence_threshold=DETECTION_CONFIDENCE_THRESHOLD)
                 all_detections.extend(person_dets)
             else:
+                raw = bindings.output(name).get_buffer()
                 LOGGER.debug("[h15] Non-NMS output %s, shape %s — skipping",
-                             name, output_buffers[name].shape)
+                             name, raw.shape)
 
         # Update shared state with best detection
         if all_detections:
