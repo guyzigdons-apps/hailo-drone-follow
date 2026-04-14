@@ -345,33 +345,43 @@ class Hailo15PipelineApp:
         frame_w = struct.get_int("width")[1]
         frame_h = struct.get_int("height")[1]
 
-        # The model expects shape [192, 640, 3] (H, W, C) — NV12 input from camera
-        # is frame_h * frame_w * 1.5 bytes. We need to convert NV12 → RGB and resize.
+        # Model input shape is [192, 640, 3]. The HEF name says 384x640 — the "192"
+        # is likely 384*1.5/3 = 192, meaning the model expects raw NV12 data reshaped
+        # as [H*1.5, W] then viewed as [H*1.5/C, W, C]. Or it may just want the
+        # raw NV12 bytes resized to fit.
         #
-        # NV12 layout: Y plane (frame_h x frame_w) + UV plane (frame_h/2 x frame_w)
-        # Use PIL for resize/convert if available, otherwise nearest-neighbor with numpy.
-        target_h, target_w = input_shape[0], input_shape[1]
-        channels = input_shape[2] if len(input_shape) == 3 else 1
+        # Strategy: resize the NV12 frame to match the model's total byte count,
+        # then reshape to the expected input_shape.
+        model_bytes = int(np.prod(input_shape))
 
-        try:
-            from PIL import Image
-            # Extract Y plane and resize
-            y_plane = frame_data[:frame_w * frame_h].reshape(frame_h, frame_w)
-            img = Image.fromarray(y_plane, mode='L').resize((target_w, target_h), Image.BILINEAR)
-            if channels == 3:
-                img = img.convert('RGB')
-            frame = np.ascontiguousarray(np.array(img, dtype=np.uint8))
-        except ImportError:
-            # Fallback: nearest-neighbor resize with numpy
-            y_plane = frame_data[:frame_w * frame_h].reshape(frame_h, frame_w)
-            row_idx = (np.arange(target_h) * frame_h // target_h).astype(int)
-            col_idx = (np.arange(target_w) * frame_w // target_w).astype(int)
-            y_resized = y_plane[row_idx][:, col_idx]
-            if channels == 3:
-                frame = np.stack([y_resized, y_resized, y_resized], axis=-1)
-            else:
-                frame = y_resized
-            frame = np.ascontiguousarray(frame)
+        # Model expects 192*640*3 = 368640 bytes.
+        # For NV12 at 640x384: 640*384*1.5 = 368640 — exact match!
+        # So the model wants NV12 at 640x384, stored as [192, 640, 3].
+        # NV12 height equivalent = 192 * 3 / 1.5 = 384, width = 640.
+        model_w = input_shape[1]  # 640
+        model_nv12_h = input_shape[0] * input_shape[2] * 2 // 3  # 192*3*2/3 = 384
+
+        # Resize NV12: resize Y and UV planes separately using nearest-neighbor
+        y_h, y_w = frame_h, frame_w
+        uv_h, uv_w = frame_h // 2, frame_w
+
+        y_plane = frame_data[:y_h * y_w].reshape(y_h, y_w)
+        uv_plane = frame_data[y_h * y_w:].reshape(uv_h, uv_w)
+
+        # Nearest-neighbor resize Y plane
+        row_idx_y = (np.arange(model_nv12_h) * y_h // model_nv12_h).astype(int)
+        col_idx_y = (np.arange(model_w) * y_w // model_w).astype(int)
+        y_resized = y_plane[row_idx_y][:, col_idx_y]
+
+        # Nearest-neighbor resize UV plane
+        uv_target_h = model_nv12_h // 2
+        row_idx_uv = (np.arange(uv_target_h) * uv_h // uv_target_h).astype(int)
+        col_idx_uv = (np.arange(model_w) * uv_w // model_w).astype(int)
+        uv_resized = uv_plane[row_idx_uv][:, col_idx_uv]
+
+        # Concatenate Y + UV and reshape to model input shape
+        nv12_resized = np.concatenate([y_resized.ravel(), uv_resized.ravel()])
+        frame = np.ascontiguousarray(nv12_resized.reshape(input_shape))
 
         # Create bindings and run
         bindings = self._configured_model.create_bindings()
