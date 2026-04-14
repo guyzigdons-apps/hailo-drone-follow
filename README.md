@@ -70,7 +70,7 @@ scripts/start_air.sh
 ## How It Works
 
 1. **Detection** — The Hailo NPU runs YOLOv8n on every frame to detect people.
-2. **Tracking** — ByteTracker assigns persistent IDs across frames.
+2. **Tracking** — A pluggable tracker (ByteTracker or FastTracker) assigns persistent IDs across frames. When a target is locked, a lightweight **SOT (single-object tracking)** mode uses IoU matching to skip the full MOT tracker on most frames, saving CPU. Full MOT runs periodically (~every 5 s) to correct drift.
 3. **Target selection** — The operator picks a person to follow via the web UI or REST API. The drone enters idle (hover) until a target is selected.
 4. **ReID recovery** — If the tracker loses the target (occlusion, fast turn), ReID compares appearance embeddings to re-identify the person under a new track ID.
 5. **Control** — A PID-style controller computes yaw, forward/backward, and altitude commands at 10 Hz and sends them to the flight controller via MAVSDK offboard mode.
@@ -89,6 +89,8 @@ scripts/start_air.sh
 | `--target-altitude` | `3.0` | Target altitude in metres. Also used as takeoff height. |
 | `--yaw-only` / `--no-yaw-only` | on | Yaw only: no forward/backward movement. Use `--no-yaw-only` for full follow. |
 | `--no-reid` | off | Disable ReID re-identification |
+| `--tracker {byte,fast}` | `byte` | Tracker algorithm. `fast` is occlusion-aware (FastTracker). |
+| `--log-perf` | off | Log pipeline and tracker performance metrics every 5 s |
 | `--no-display` | off | Headless mode (no display window) |
 | `--openhd-stream` | off | Send overlay video to OpenHD via UDP RTP instead of display |
 
@@ -240,13 +242,45 @@ ENABLED=true    # set to false to disable auto-start
 
 Uninstall: `sudo scripts/boot/uninstall.sh`
 
+## Tracking
+
+### Tracker Selection
+
+Choose a tracker with `--tracker`:
+
+| Tracker | Description |
+|---|---|
+| `byte` (default) | ByteTracker — lightweight, no extra dependencies |
+| `fast` | FastTracker — occlusion-aware, better in crowded scenes |
+
+Both trackers conform to the same `Tracker` protocol and can be swapped without other changes.
+
+### SOT Mode (CPU Saving)
+
+When a target is locked, the pipeline automatically enters **SOT (single-object tracking)** mode. Instead of running the full multi-object tracker every frame, SOT uses a simple IoU match against the target's last known bounding box. This significantly reduces CPU usage on constrained hardware (RPi 5).
+
+- SOT activates automatically when following a target
+- Falls back to full MOT if the IoU match fails (target lost or occluded)
+- Periodic MOT refresh every ~150 frames (~5 s) to correct drift
+- Transparent to the rest of the pipeline — no configuration needed
+
+### Tracker Metrics
+
+With `--log-perf`, the app logs tracker metrics every 5 seconds: FPS, per-frame update time (ms), match ratio, active tracks, and ID switches. Metrics are also exposed on the `/status` endpoint.
+
 ## Architecture
 
 ```
 drone_follow/
   follow_api/          Pure domain logic (types, config, controller math, shared state)
   drone_api/           MAVSDK adapter (offboard velocity, takeoff/landing, telemetry)
-  pipeline_adapter/    Hailo/GStreamer pipeline, ByteTracker, ReID manager
+  pipeline_adapter/    Hailo/GStreamer pipeline, tracker (ByteTracker/FastTracker), ReID manager
+    tracker.py           Tracker protocol + MetricsTracker wrapper
+    tracker_factory.py   Create tracker by name (--tracker CLI arg)
+    byte_tracker.py      ByteTracker adapter
+    fast_tracker.py      FastTracker adapter
+    _fasttracker/        Vendored FastTracker implementation
+    reid_manager.py      ReID appearance-based re-identification
   servers/             HTTP servers (follow API, web UI + MJPEG, OpenHD bridge)
   sdf_examples/        Gazebo world SDF files for simulation
   ui/                  React web dashboard
@@ -261,8 +295,10 @@ sim/
 
 **Data flow:**
 ```
-Camera -> GStreamer -> Hailo NPU (YOLOv8n) -> ByteTracker -> Target Selection
-  -> ReID (if target lost) -> SharedDetectionState -> Control Loop (10 Hz)
+Camera -> GStreamer -> Hailo NPU (YOLOv8n) -> SOT (if target locked, skip tracker)
+                                            -> MOT (ByteTracker/FastTracker)
+  -> Target Selection -> ReID (if target lost)
+  -> SharedDetectionState -> Control Loop (10 Hz)
   -> MAVSDK Offboard Velocity -> PX4 Flight Controller
 ```
 

@@ -503,3 +503,27 @@ class ByteTracker:
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         
         return [t for t in self.tracked_stracks if t.is_activated]
+
+
+class ByteTrackerAdapter:
+    """Wraps :class:`ByteTracker` to conform to the :class:`Tracker` protocol."""
+
+    def __init__(self, **kwargs):
+        from .tracker import TrackedObject  # noqa: F811
+        self._TrackedObject = TrackedObject
+        self._bt = ByteTracker(**kwargs)
+
+    def update(self, detections, embeddings=None):
+        stracks = self._bt.update(detections)
+        return [
+            self._TrackedObject(
+                track_id=t.track_id,
+                input_index=t.input_index,
+                is_activated=t.is_activated,
+                score=t.score,
+            )
+            for t in stracks
+        ]
+
+    def reset(self):
+        self._bt.reset()

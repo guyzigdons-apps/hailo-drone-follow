@@ -72,6 +72,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
 
     group.add_argument("--no-display", action="store_true",
                        help="Disable display window (headless mode)")
+    group.add_argument("--log-perf", action="store_true",
+                       help="Log pipeline and tracker performance metrics periodically")
 
     # ReID re-identification
     group.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF,
@@ -81,6 +83,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Disable ReID re-identification")
     group.add_argument("--update-interval", type=int, default=30,
                        help="Frames between ReID gallery embedding updates while following (default: 30)")
+    group.add_argument("--reid-threshold", type=float, default=0.7,
+                       help="Cosine similarity threshold for ReID match (0.0–1.0, default: 0.7)")
 
     # OpenHD integration
     group.add_argument("--openhd-stream", action="store_true",
@@ -100,10 +104,12 @@ def _build_parser() -> argparse.ArgumentParser:
       - app (this file):   UI/server ports
     """
     from hailo_apps.python.core.common.core import get_pipeline_parser
+    from drone_follow.pipeline_adapter import add_tracker_args
     parser = get_pipeline_parser()
 
     ControllerConfig.add_args(parser)
     add_drone_args(parser)
+    add_tracker_args(parser)
 
     _add_app_args(parser)
 
@@ -131,6 +137,7 @@ def main():
     ui_pre.add_argument("--ui-port", type=int, default=5001)
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--record", action="store_true")
+    ui_pre.add_argument("--log-perf", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
     # Always create SharedUIState — the OpenHD bridge needs it for bbox
@@ -158,6 +165,7 @@ def main():
     reid_pre.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF)
     reid_pre.add_argument("--no-reid", action="store_true")
     reid_pre.add_argument("--update-interval", type=int, default=30)
+    reid_pre.add_argument("--reid-threshold", type=float, default=0.7)
     reid_pre_args, _ = reid_pre.parse_known_args()
 
     reid_manager = None
@@ -166,7 +174,13 @@ def main():
         reid_manager = ReIDManager(
             hef_path=reid_pre_args.reid_model,
             update_interval=reid_pre_args.update_interval,
+            reid_match_threshold=reid_pre_args.reid_threshold,
         )
+
+    # Pre-parse --tracker to pass to create_app
+    tracker_pre = argparse.ArgumentParser(add_help=False)
+    tracker_pre.add_argument("--tracker", default="byte")
+    tracker_pre_args, _ = tracker_pre.parse_known_args()
 
     from drone_follow.pipeline_adapter import create_app
 
@@ -174,7 +188,9 @@ def main():
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
                      record_enabled=ui_pre_args.record, record_dir=recordings_dir,
-                     reid_manager=reid_manager)
+                     reid_manager=reid_manager,
+                     tracker_name=tracker_pre_args.tracker,
+                     log_perf=ui_pre_args.log_perf)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)

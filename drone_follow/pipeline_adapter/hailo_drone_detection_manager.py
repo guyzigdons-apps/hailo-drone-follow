@@ -18,7 +18,9 @@ import numpy as np
 
 from drone_follow.follow_api.types import Detection
 
-from .byte_tracker import ByteTracker
+from .byte_tracker import iou_batch
+from .tracker import MetricsTracker
+from .tracker_factory import create_tracker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -109,7 +111,7 @@ def _parse_device_utilization(data: bytes) -> float:
 class _PerfTracker:
     """Lightweight performance tracker for the pipeline callback."""
 
-    def __init__(self):
+    def __init__(self, *, log_perf=False, tracker_metrics=None):
         self._frame_times = deque(maxlen=60)
         self._latencies = deque(maxlen=60)
         # CPU sampling state
@@ -124,6 +126,10 @@ class _PerfTracker:
         self._hailo_utilization = 0.0
         self._memory_mb = 0.0
         self._last_system_sample = 0.0
+        # Periodic logging
+        self._log_perf = log_perf
+        self._tracker_metrics = tracker_metrics
+        self._last_log_time = 0.0
 
     def frame_start(self):
         return time.monotonic()
@@ -142,6 +148,21 @@ class _PerfTracker:
         # Push to UI every frame (values are cached between system samples)
         if ui_state is not None:
             ui_state.update_perf(self.get_stats())
+        # Periodic logging (~5 seconds)
+        if self._log_perf and now - self._last_log_time >= 5.0:
+            self._last_log_time = now
+            stats = self.get_stats()
+            parts = [f"fps={stats['fps']}", f"latency={stats['latency_ms']}ms",
+                     f"cpu={stats['cpu_percent']}%", f"mem={stats['memory_mb']}MB",
+                     f"hailo_temp={stats['hailo_temp_c']}C",
+                     f"hailo_util={stats['hailo_util_percent']}%"]
+            if self._tracker_metrics is not None:
+                tm = self._tracker_metrics.snapshot()
+                parts.extend([f"tracker_fps={tm['fps']}",
+                              f"tracker_update={tm['update_ms']}ms",
+                              f"tracks={tm['active_tracks']}",
+                              f"id_sw={tm['id_switches']}"])
+            LOGGER.info("[PERF] %s", " | ".join(parts))
 
     def get_stats(self):
         ft = self._frame_times
@@ -277,8 +298,8 @@ def _update_ui(ui_state, persons, person_to_id, following_id):
     ui_state.update_detections(all_dets, following_id)
 
 
-def _run_tracker(byte_tracker, persons):
-    """Run ByteTracker and return (available_ids, person_by_id, person_to_id).
+def _run_tracker(tracker, persons):
+    """Run tracker and return (available_ids, person_by_id, person_to_id).
 
     person_by_id:  {track_id -> person detection}
     person_to_id:  {id(person) -> track_id}  (reverse lookup)
@@ -296,7 +317,7 @@ def _run_tracker(byte_tracker, persons):
         det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
         det_array[i, 4] = person.get_confidence()
 
-    all_tracks = byte_tracker.update(det_array)
+    all_tracks = tracker.update(det_array)
 
     for t in all_tracks:
         if t.is_activated and 0 <= t.input_index < len(persons):
@@ -307,6 +328,37 @@ def _run_tracker(byte_tracker, persons):
 
     person_to_id = {id(p): tid for tid, p in person_by_id.items()}
     return available_ids, person_by_id, person_to_id
+
+
+_SOT_IOU_THRESH = 0.3
+_SOT_MOT_REFRESH_INTERVAL = 150  # frames (~5s at 30fps)
+
+
+def _run_sot(persons, last_bbox):
+    """Lightweight single-object tracking: IOU match against last known bbox.
+
+    Returns (matched_person, new_bbox_scaled) or (None, None) if lost.
+    last_bbox is [x1, y1, x2, y2] in SCALE (1000) coordinates.
+    """
+    SCALE = 1000.0
+    n = len(persons)
+    det_bboxes = np.empty((n, 4), dtype=np.float32)
+    for i, person in enumerate(persons):
+        bbox = person.get_bbox()
+        det_bboxes[i, 0] = bbox.xmin() * SCALE
+        det_bboxes[i, 1] = bbox.ymin() * SCALE
+        det_bboxes[i, 2] = (bbox.xmin() + bbox.width()) * SCALE
+        det_bboxes[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
+
+    ious = iou_batch(last_bbox.reshape(1, 4), det_bboxes)  # shape (1, N)
+    if ious.size == 0:
+        return None, None
+
+    best_idx = np.argmax(ious[0])
+    if ious[0, best_idx] < _SOT_IOU_THRESH:
+        return None, None
+
+    return persons[best_idx], det_bboxes[best_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +394,7 @@ def _get_frame_bgr(buffer, user_data):
 def app_callback(element, buffer, user_data):
     """Tiling pipeline callback: follow operator-selected person, update shared state.
 
-    ByteTracker runs synchronously in the callback:
+    Tracker runs synchronously in the callback:
     1. Convert detections to Nx5 array, run tracker.update() synchronously
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
@@ -363,7 +415,10 @@ def _app_callback_inner(element, buffer, user_data):
     ui_state = user_data.ui_state
 
     if not persons:
-        user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
+        user_data.tracker.update(_EMPTY_DET_ARRAY)
+        user_data.sot_active = False
+        user_data.sot_last_bbox = None
+        user_data.sot_frames = 0
         user_data.shared_state.update(None, available_ids=set())
         if target_state is not None and target_state.get_target() is not None:
             # If ReID has a gallery, keep the target set so we keep searching
@@ -384,19 +439,56 @@ def _app_callback_inner(element, buffer, user_data):
             LOGGER.debug("[SEARCH MODE] No person detected in frame")
         return
 
-    available_ids, person_by_id, person_to_id = _run_tracker(
-        user_data.byte_tracker, persons)
-
-    # Attach tracking IDs to Hailo detection objects so hailooverlay renders them
-    for person in persons:
-        track_id = person_to_id.get(id(person))
-        if track_id is not None:
-            person.add_object(hailo.HailoUniqueID(track_id, hailo.TRACKING_ID))
-
-    # --- Target selection ---
+    # --- SOT/MOT dispatch ---
     target_id = target_state.get_target() if target_state is not None else None
     reid_manager = user_data.reid_manager
 
+    use_sot = (
+        target_id is not None
+        and user_data.sot_active
+        and user_data.sot_last_bbox is not None
+        and user_data.sot_target_id == target_id
+        and user_data.sot_frames < _SOT_MOT_REFRESH_INTERVAL
+    )
+
+    if use_sot:
+        matched, new_bbox = _run_sot(persons, user_data.sot_last_bbox)
+        if matched is not None:
+            # SOT succeeded
+            user_data.sot_last_bbox = new_bbox
+            user_data.sot_frames += 1
+            matched.add_object(hailo.HailoUniqueID(target_id, hailo.TRACKING_ID))
+            person_by_id = {target_id: matched}
+            person_to_id = {id(matched): target_id}
+            available_ids = {target_id}
+        else:
+            # SOT lost the target — fall back to MOT
+            LOGGER.info("[SOT→MOT] Target lost after %d SOT frames — resetting tracker",
+                        user_data.sot_frames)
+            user_data.sot_active = False
+            user_data.sot_last_bbox = None
+            user_data.sot_frames = 0
+            user_data.tracker.reset()
+            available_ids, person_by_id, person_to_id = _run_tracker(
+                user_data.tracker, persons)
+            for person in persons:
+                tid = person_to_id.get(id(person))
+                if tid is not None:
+                    person.add_object(hailo.HailoUniqueID(tid, hailo.TRACKING_ID))
+    else:
+        # Full MOT — no target, SOT not active, or periodic refresh
+        if user_data.sot_active and user_data.sot_frames >= _SOT_MOT_REFRESH_INTERVAL:
+            LOGGER.debug("[SOT] Periodic MOT refresh after %d frames", user_data.sot_frames)
+            user_data.tracker.reset()
+            user_data.sot_frames = 0
+        available_ids, person_by_id, person_to_id = _run_tracker(
+            user_data.tracker, persons)
+        for person in persons:
+            tid = person_to_id.get(id(person))
+            if tid is not None:
+                person.add_object(hailo.HailoUniqueID(tid, hailo.TRACKING_ID))
+
+    # --- Target selection ---
     best = None
     follow_mode = ""
     if target_id is not None:
@@ -416,8 +508,27 @@ def _app_callback_inner(element, buffer, user_data):
                         reid_manager.update_gallery(
                             frame_bgr, best.get_bbox(),
                             user_data.video_width, user_data.video_height)
+
+            # Activate SOT for next frame
+            SCALE = 1000.0
+            tbbox = best.get_bbox()
+            user_data.sot_last_bbox = np.array([
+                tbbox.xmin() * SCALE,
+                tbbox.ymin() * SCALE,
+                (tbbox.xmin() + tbbox.width()) * SCALE,
+                (tbbox.ymin() + tbbox.height()) * SCALE,
+            ], dtype=np.float32)
+            user_data.sot_target_id = target_id
+            if not user_data.sot_active:
+                user_data.sot_active = True
+                user_data.sot_frames = 0
+                LOGGER.info("[MOT→SOT] Entering SOT mode for target ID %d", target_id)
         else:
             # Target lost by tracker — try ReID re-identification
+            user_data.sot_active = False
+            user_data.sot_last_bbox = None
+            user_data.sot_frames = 0
+
             if reid_manager is not None and reid_manager.has_gallery and person_by_id:
                 frame_bgr = _get_frame_bgr(buffer, user_data)
                 if frame_bgr is not None:
@@ -455,6 +566,9 @@ def _app_callback_inner(element, buffer, user_data):
                 return
     else:
         # No target — idle: hold position until operator picks a followee
+        user_data.sot_active = False
+        user_data.sot_last_bbox = None
+        user_data.sot_frames = 0
         user_data.shared_state.update(None, available_ids=available_ids)
         _update_ui(ui_state, persons, person_to_id, None)
         LOGGER.debug("[IDLE] No target set. Available: %s",
@@ -598,7 +712,8 @@ def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, na
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None,
-               record_enabled=False, record_dir=None, reid_manager=None):
+               record_enabled=False, record_dir=None, reid_manager=None,
+               tracker_name=None, log_perf=False):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -632,17 +747,25 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     byte_tracker=None, reid_manager=None):
+                     tracker=None, reid_manager=None, log_perf=False):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
-            self.byte_tracker = byte_tracker
+            self.tracker = tracker
             self.reid_manager = reid_manager
-            self.perf = _PerfTracker()
+            self.perf = _PerfTracker(
+                log_perf=log_perf,
+                tracker_metrics=tracker.metrics if tracker else None,
+            )
             # Set after app creation so callback can extract frames for ReID
             self.video_width = 0
             self.video_height = 0
+            # SOT (single-object tracking) state
+            self.sot_active = False
+            self.sot_last_bbox = None   # [x1,y1,x2,y2] in SCALE coords
+            self.sot_target_id = None
+            self.sot_frames = 0
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -808,10 +931,10 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 LOGGER.debug("SHM rebuild: waiting for Hailo DMA release")
                 time.sleep(2.0)
 
-            # Reset ByteTracker to clear stale predictions from old resolution
-            if hasattr(self, 'user_data') and hasattr(self.user_data, 'byte_tracker'):
-                self.user_data.byte_tracker.reset()
-                LOGGER.debug("SHM rebuild: ByteTracker reset")
+            # Reset tracker to clear stale predictions from old resolution
+            if hasattr(self, 'user_data') and hasattr(self.user_data, 'tracker'):
+                self.user_data.tracker.reset()
+                LOGGER.debug("SHM rebuild: tracker reset")
 
             # Now build a fresh pipeline from scratch (skip base class
             # teardown since we already did it above).
@@ -1086,14 +1209,22 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             return ' ! '.join(pipeline_parts)
 
-    tracker = ByteTracker(
-        track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
+    if tracker_name is None:
+        tracker_name = "byte"
+    t0 = time.monotonic()
+    inner_tracker = create_tracker(
+        tracker_name, track_thresh=0.4, track_buffer=90,
+        match_thresh=0.5, frame_rate=30,
     )
-    LOGGER.info("[tracking] ByteTracker running synchronously in callback")
+    init_ms = (time.monotonic() - t0) * 1000.0
+    tracker = MetricsTracker(inner_tracker, init_time_ms=init_ms)
+    LOGGER.info("[tracking] %s ready (init %.1f ms), running synchronously in callback",
+                tracker_name, init_ms)
+    shared_state.tracker_metrics = tracker.metrics
 
     user_data = DroneFollowUserData(
-        shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
-        reid_manager=reid_manager,
+        shared_state, target_state, ui_state=ui_state, tracker=tracker,
+        reid_manager=reid_manager, log_perf=log_perf,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,
