@@ -168,7 +168,7 @@ def compute_velocity_command(
     return VelocityCommand(forward, right, down, yawspeed)
 
 
-def _effective_target_bbox_height(
+def effective_target_bbox_height(
     config: ControllerConfig,
     current_altitude_m: float,
     min_altitude_m: float = 0.5,

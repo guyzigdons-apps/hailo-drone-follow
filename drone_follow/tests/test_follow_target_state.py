@@ -11,10 +11,12 @@ from drone_follow.follow_api.state import FollowTargetState
 class TestFollowTargetState:
     """Test FollowTargetState thread-safe target management."""
 
-    def test_initial_state_is_none(self):
-        """Target ID should be None initially."""
+    def test_initial_state_is_auto(self):
+        """Initial state should be AUTO mode: no target, not paused, not locked."""
         state = FollowTargetState()
         assert state.get_target() is None
+        assert state.is_paused() is False
+        assert state.is_explicit_lock() is False
 
     def test_set_and_get_target(self):
         """Should store and retrieve target ID."""
@@ -128,10 +130,35 @@ class TestFollowTargetState:
         state = FollowTargetState()
         state.set_target(7)
         ts_before = state.get_last_seen()
-        
+
         time.sleep(0.01)
         state.set_target(None)
-        
+
         # last_seen should still be the old timestamp
         assert state.get_last_seen() == ts_before
         assert state.get_target() is None
+
+    def test_enter_auto_mode_from_locked(self):
+        """enter_auto_mode should reset from locked state to auto."""
+        state = FollowTargetState()
+        state.set_target(42)
+        state.set_paused(False)
+        state.set_explicit_lock(True)
+
+        state.enter_auto_mode()
+
+        assert state.get_target() is None
+        assert state.is_paused() is False
+        assert state.is_explicit_lock() is False
+
+    def test_enter_auto_mode_from_idle(self):
+        """enter_auto_mode should clear paused state."""
+        state = FollowTargetState()
+        state.set_paused(True)
+        state.set_target(None)
+
+        state.enter_auto_mode()
+
+        assert state.get_target() is None
+        assert state.is_paused() is False
+        assert state.is_explicit_lock() is False
