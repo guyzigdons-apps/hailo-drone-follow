@@ -43,8 +43,13 @@ _CONFIG_PARAMS = {
     "kp_backward":              ("DF_KP_BACK",    float),
     "max_forward":              ("DF_MAX_FWD",    float),
     "max_backward":             ("DF_MAX_BACK",   float),
-    "target_distance_m":        ("DF_TGT_DIST",   float),
-    "dead_zone_height_percent": ("DF_DZ_H_PCT",   float),
+    "target_center_y":          ("DF_TGT_CY",    float),
+    "dead_zone_y_deg":          ("DF_DZ_Y",      float),
+    "kp_altitude":              ("DF_KP_ALT",    float),
+    "dead_zone_bbox_percent":   ("DF_DZ_BH_PCT", float),
+    "max_climb_speed":          ("DF_MAX_CLM",   float),
+    "min_altitude":             ("DF_MIN_ALT",   float),
+    "max_altitude":             ("DF_MAX_ALT",   float),
     "yaw_alpha":                ("DF_YAW_ALPHA",  float),
     "forward_alpha":            ("DF_FWD_ALPHA",  float),
     "target_altitude":          ("DF_TGT_ALT",   float),
@@ -58,7 +63,7 @@ _CONFIG_PARAMS = {
 }
 
 # Fields where value 0 maps to Python None
-_NULLABLE_FIELDS = {"target_distance_m"}
+_NULLABLE_FIELDS = set()
 
 # Special params for follow target control (not in ControllerConfig)
 _FOLLOW_ID_PARAM = "follow_id"

@@ -23,7 +23,6 @@ from drone_follow.follow_api.types import VelocityCommand
 from drone_follow.follow_api.config import ControllerConfig
 from drone_follow.follow_api.controller import (
     compute_velocity_command,
-    _effective_target_bbox_height,
 )
 
 LOGGER = logging.getLogger("drone_follow.control")
@@ -394,7 +393,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
-    When config.reference_altitude_m is set and altitude_cache is provided, target bbox height is scaled by altitude.
+    Altitude commands come from compute_velocity_command() (bbox_height driven);
+    this loop enforces min/max altitude floor/ceiling only.
     If ui_state is provided, logs are also pushed to the web UI.
     """
     if telemetry_cache is None:
@@ -415,8 +415,6 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     _prev_cmd: Optional[VelocityCommand] = None
 
     # Constants
-    _ALT_HOLD_KP = 0.5
-    _ALT_HOLD_MAX_SPEED = 1.0
     _LOG_INTERVAL = 1.0
     _FWD_LOG_INTERVAL = 0.5
 
@@ -461,20 +459,24 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 hold_velocity=_prev_cmd,
             )
 
-            # Altitude hold: proportional controller toward target_altitude.
-            # This is the only altitude-producing path in the system — there is
-            # no follow-driven pitch/altitude mode.
-            if altitude_cache.get("m") is not None:
-                alt_error = config.target_altitude - altitude_cache["m"]
-                if abs(alt_error) > 0.1:  # dead zone to avoid jitter
-                    down_speed = max(-_ALT_HOLD_MAX_SPEED, min(_ALT_HOLD_MAX_SPEED, -_ALT_HOLD_KP * alt_error))
-                    cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
+            # Altitude limits: clamp bbox_height-driven altitude commands to
+            # [min_altitude, max_altitude].  compute_velocity_command() now
+            # produces the altitude command; we just enforce the floor/ceiling.
+            current_alt = altitude_cache.get("m")
+            if current_alt is not None:
+                down = cmd.down_m_s
+                if current_alt <= config.min_altitude and down > 0:
+                    down = 0.0  # at floor — don't descend further
+                elif current_alt >= config.max_altitude and down < 0:
+                    down = 0.0  # at ceiling — don't climb further
+                if down != cmd.down_m_s:
+                    cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down, cmd.yawspeed_deg_s)
 
-            # Forward-velocity log (throttled)
+            # Control-axes log (throttled)
             if now - _last_fwd_log_time >= _FWD_LOG_INTERVAL and detection is not None:
-                target_bh = config.target_bbox_height
-                _log(f"[FWD] target={target_bh:.2f} bbox={detection.bbox_height:.2f} "
-                     f"final={cmd.forward_m_s:+.2f}", level=logging.DEBUG)
+                _log(f"[CTRL] cy={detection.center_y:.2f} bh={detection.bbox_height:.2f} "
+                     f"fwd={cmd.forward_m_s:+.2f} down={cmd.down_m_s:+.2f}",
+                     level=logging.DEBUG)
                 _last_fwd_log_time = now
 
             cmd = await vel_api.send(cmd)

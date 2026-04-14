@@ -251,9 +251,14 @@ class _WebHandler(BaseHTTPRequestHandler):
         "max_forward": float,
         "max_backward": float,
         "yaw_only": bool,
-        "target_distance_m": float,
         "target_bbox_height": float,
-        "dead_zone_height_percent": float,
+        "target_center_y": float,
+        "dead_zone_y_deg": float,
+        "kp_altitude": float,
+        "dead_zone_bbox_percent": float,
+        "max_climb_speed": float,
+        "min_altitude": float,
+        "max_altitude": float,
         "smooth_yaw": bool,
         "yaw_alpha": float,
         "smooth_forward": bool,
@@ -302,7 +307,7 @@ class _WebHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, "Invalid JSON")
             return
-        _NULLABLE_FIELDS = {"target_distance_m"}
+        _NULLABLE_FIELDS = set()
         changed_keys = {}
         for key, value in payload.items():
             if key not in self._CONFIG_FIELDS:

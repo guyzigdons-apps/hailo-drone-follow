@@ -348,6 +348,54 @@ export default function App() {
                   <span className="control-value">{config.target_altitude.toFixed(1)}m</span>
                 </label>
                 <label className="control-row">
+                  <span className="control-label">Target Center Y</span>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="0.9"
+                    step="0.05"
+                    value={config.target_center_y}
+                    onChange={(e) => onSlider("target_center_y", e.target.value)}
+                  />
+                  <span className="control-value">{config.target_center_y.toFixed(2)}</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">KP Altitude</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="10"
+                    step="0.1"
+                    value={config.kp_altitude}
+                    onChange={(e) => onSlider("kp_altitude", e.target.value)}
+                  />
+                  <span className="control-value">{config.kp_altitude.toFixed(1)}</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Min Altitude</span>
+                  <input
+                    type="range"
+                    min="1"
+                    max="10"
+                    step="0.5"
+                    value={config.min_altitude}
+                    onChange={(e) => onSlider("min_altitude", e.target.value)}
+                  />
+                  <span className="control-value">{config.min_altitude.toFixed(1)}m</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Max Altitude</span>
+                  <input
+                    type="range"
+                    min="5"
+                    max="50"
+                    step="1"
+                    value={config.max_altitude}
+                    onChange={(e) => onSlider("max_altitude", e.target.value)}
+                  />
+                  <span className="control-value">{config.max_altitude.toFixed(0)}m</span>
+                </label>
+                <label className="control-row">
                   <span className="control-label">Yaw Only</span>
                   <div className="toggle-wrapper">
                     <button
@@ -462,6 +510,31 @@ export default function App() {
                     onChange={(e) => onSlider("kp_backward", e.target.value)}
                   />
                   <span className="control-value">{config.kp_backward.toFixed(1)}</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Dead Zone Y</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="10"
+                    step="0.5"
+                    value={config.dead_zone_y_deg}
+                    onChange={(e) => onSlider("dead_zone_y_deg", e.target.value)}
+                  />
+                  <span className="control-value">{config.dead_zone_y_deg.toFixed(1)}deg</span>
+                </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">Dead Zone BBox %</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="50"
+                    step="1"
+                    value={config.dead_zone_bbox_percent}
+                    disabled={config.yaw_only}
+                    onChange={(e) => onSlider("dead_zone_bbox_percent", e.target.value)}
+                  />
+                  <span className="control-value">{config.dead_zone_bbox_percent.toFixed(0)}%</span>
                 </label>
                 <label className="control-row">
                   <span className="control-label">Yaw Smooth</span>

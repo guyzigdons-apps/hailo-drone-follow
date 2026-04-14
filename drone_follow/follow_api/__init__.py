@@ -9,9 +9,8 @@ from .config import ControllerConfig
 from .state import SharedDetectionState, FollowTargetState
 from .controller import (
     compute_velocity_command,
-    _distance_to_bbox_height,
-    _effective_target_bbox_height,
     _calculate_forward_speed,
+    _calculate_altitude_speed,
 )
 
 __all__ = [
@@ -22,7 +21,6 @@ __all__ = [
     "SharedDetectionState",
     "FollowTargetState",
     "compute_velocity_command",
-    "_distance_to_bbox_height",
-    "_effective_target_bbox_height",
     "_calculate_forward_speed",
+    "_calculate_altitude_speed",
 ]

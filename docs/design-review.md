@@ -211,8 +211,9 @@ sequenceDiagram
         SDS-->>CL: Detection + frame_count
         Note over CL: Check staleness (0.5s),<br/>search timeout (60s),<br/>IDLE mode
         CL->>CTRL: detection, config
+        Note over CTRL: center_x → yaw (sqrt P)<br/>center_y → forward (sqrt P)<br/>bbox_height → down (plain P)
         CTRL-->>CL: VelocityCommand(fwd, right, down, yaw)
-        Note over CL: Alt-hold P loop (kp=0.5)
+        Note over CL: Altitude floor/ceiling clamp<br/>(min_altitude..max_altitude)
         CL->>VAPI: send(cmd)
         Note over VAPI: Clamp all axes<br/>Per-axis EMA in VelocityCommandAPI
         VAPI->>PX4: set_velocity_body(fwd, right, down, yaw)
@@ -401,6 +402,8 @@ class VelocityCommand:
 ```
 
 Single 4-DOF output per control tick. No attitude, no position targets, no thrust.
+`down_m_s` is now vision-driven from `bbox_height` (plain P: person too small →
+descend, too big → climb), with floor/ceiling clamping in `live_control_loop`.
 See [control-architecture.md](control-architecture.md) for the control math.
 
 ---
@@ -514,7 +517,7 @@ stateDiagram-v2
 
 | Mode | Behaviour |
 |------|-----------|
-| **TRACK** | Full 4-axis control: yaw centering + forward/back + alt hold + optional orbit |
+| **TRACK** | Full 4-axis control: yaw (center_x) + forward (center_y) + altitude (bbox_height) + optional orbit |
 | **SEARCH_WAIT** | Hold last velocity command (< 2s buffer) |
 | **SEARCH** | Slow yaw spin (10 deg/s) toward last-seen side, dampened forward |
 | **IDLE** | Zero velocity — hover in place |
@@ -530,13 +533,12 @@ For the control math behind each mode, see
 
 | Feature | Trigger | Response |
 |---------|---------|----------|
-| Emergency retreat | `bbox_height > 0.8` | Full reverse at `max_backward` |
-| Bottom-of-frame retreat | `bbox_bottom > 0.7` | Proportional reverse (sqrt) |
+| Emergency climb + reverse | `bbox_height > 0.8` | Max climb (`-max_climb_speed`) + full reverse (`-max_backward`) |
 | Search timeout | No detection for 60s | Land |
 | Explicit lock loss | Locked target disappears | IDLE (hover), not auto-switch |
 | Offboard mode loss | Pilot switches out of OFFBOARD | Pause control, wait for re-entry |
 | Landing protection | Ctrl+C during `action.land()` | SIGINT ignored until touchdown |
-| Altitude hold | Always active | P loop holds `target_altitude` within 0.1m |
+| Altitude limits | Always active | Floor/ceiling clamp at `min_altitude`..`max_altitude` (default 2--20 m) |
 | Axis clamping | Every tick | All axes clamped to configured max speeds |
 
 ---

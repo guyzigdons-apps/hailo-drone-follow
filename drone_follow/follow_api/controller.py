@@ -14,72 +14,78 @@ __all__ = [
 ]
 
 
-def _distance_to_bbox_height(
-    altitude_m: float,
-    horizontal_distance_m: float,
-    vfov_deg: float,
-    person_height_m: float = 1.7,
-) -> float:
-    """Convert desired horizontal distance to expected normalized bbox height (0-1).
-
-    Uses perspective projection: at a given altitude and horizontal distance,
-    compute what fraction of the vertical FOV an average person occupies.
-    """
-    slant_range = math.sqrt(horizontal_distance_m ** 2 + altitude_m ** 2)
-    angular_height = 2.0 * math.atan(person_height_m / (2.0 * slant_range))
-    vfov_rad = math.radians(vfov_deg)
-    return angular_height / vfov_rad
-
-
 def _calculate_forward_speed(
     detection: Detection,
     config: ControllerConfig,
-    target_bh: float,
 ) -> float:
-    """Plain P controller on bbox-height error, with a dead zone and safety bypasses.
+    """Signed square-root P controller on center_y error.
 
-    Pitch-induced oscillation (rigid camera → body pitch tilts image → false
-    error signal ~1-2 Hz) is suppressed downstream by the per-axis low-pass
-    EMA in VelocityCommandAPI.send(), not here.  Keep this function stateless.
+    Keeps the person vertically centred in the frame.  Symmetric to the yaw
+    controller (center_x → yawspeed), but on the vertical/forward axis.
+
+    Sign convention (fixed forward-facing camera, drone above person):
+      person below centre (center_y > target) → too close → back up  (negative)
+      person above centre (center_y < target) → too far  → approach  (positive)
     """
     if config.yaw_only or config.kp_forward == 0:
         return 0.0
 
-    # Safety bypass 1: bbox too large → full reverse.
+    error_y_deg = (detection.center_y - config.target_center_y) * config.vfov
+
+    if abs(error_y_deg) < config.dead_zone_y_deg:
+        return 0.0
+
+    # Person below centre → error positive → back up (negative forward)
+    # Asymmetric gains: kp_backward for retreat, kp_forward for approach
+    gain = config.kp_backward if error_y_deg > 0 else config.kp_forward
+    raw = -math.copysign(gain * math.sqrt(abs(error_y_deg)), error_y_deg)
+    return max(-config.max_backward, min(config.max_forward, raw))
+
+
+def _calculate_altitude_speed(
+    detection: Detection,
+    config: ControllerConfig,
+) -> float:
+    """Plain P controller on bbox_height error → altitude command.
+
+    Person too small → descend (positive down_m_s).
+    Person too big  → climb   (negative down_m_s).
+
+    Safety: bbox > max_bbox_height_safety → emergency max climb.
+    Altitude floor/ceiling is enforced downstream in live_control_loop.
+    """
+    if config.yaw_only or config.kp_altitude == 0:
+        return 0.0
+
+    # Safety: bbox too large → emergency climb
     if detection.bbox_height > config.max_bbox_height_safety:
-        return -config.max_backward
+        return -config.max_climb_speed
 
-    # Safety bypass 2: person directly under the drone → retreat.
-    bbox_bottom = detection.center_y + detection.bbox_height / 2.0
-    if bbox_bottom > config.bottom_y_threshold:
-        overshoot = bbox_bottom - config.bottom_y_threshold
-        return -config.kp_backward * math.sqrt(overshoot)
-
-    # Plain P with a single dead-zone threshold.
-    height_delta = target_bh - detection.bbox_height
-    dead_zone = (config.dead_zone_height_percent / 100.0) * target_bh
+    height_delta = config.target_bbox_height - detection.bbox_height
+    dead_zone = (config.dead_zone_bbox_percent / 100.0) * config.target_bbox_height
     if abs(height_delta) < dead_zone:
         return 0.0
 
-    gain = config.kp_forward if height_delta > 0 else config.kp_backward
-    raw = gain * height_delta  # sign preserved: +ve delta = approach, -ve = retreat
-    return max(-config.max_backward, min(config.max_forward, raw))
+    # height_delta > 0: person too small → descend → positive down_m_s
+    # height_delta < 0: person too big  → climb   → negative down_m_s
+    raw = config.kp_altitude * height_delta
+    return max(-config.max_climb_speed, min(config.max_climb_speed, raw))
 
 
 def compute_velocity_command(
     detection: Optional[Detection],
     config: ControllerConfig,
-    target_bbox_height_override: Optional[float] = None,
     last_detection: Optional[Detection] = None,
     search_active: bool = True,
     hold_velocity: Optional[VelocityCommand] = None,
 ) -> VelocityCommand:
     """Compute a velocity command from the current detection and config.
 
-    Returns a pure VelocityCommand (no MAVSDK types).
+    Control mapping:
+      center_x    → yaw        (horizontal centering)
+      center_y    → forward    (vertical centering)
+      bbox_height → down       (distance via altitude)
     """
-    target_bh = target_bbox_height_override if target_bbox_height_override is not None else config.target_bbox_height
-
     # --- Search mode: no current detection ---
     if detection is None:
         if not search_active:
@@ -88,50 +94,35 @@ def compute_velocity_command(
         search_direction = 1.0
         if last_detection is not None:
             search_direction = 1.0 if last_detection.center_x > 0.5 else -1.0
-        # Spin toward last seen direction with damped forward correction
-        search_forward = 0.0
-        if last_detection is not None:
-            raw = _calculate_forward_speed(last_detection, config, target_bh)
-            search_forward = raw * config.search_vel_damp
-            search_forward = max(search_forward, 0)
-        return VelocityCommand(search_forward, 0.0, 0.0, search_direction * config.search_yawspeed_slow)
+        return VelocityCommand(0.0, 0.0, 0.0, search_direction * config.search_yawspeed_slow)
+
+    # --- Safety: bbox too large → emergency climb + reverse ---
+    if not config.yaw_only and detection.bbox_height > config.max_bbox_height_safety:
+        # Yaw still active during safety (keep tracking)
+        error_x_deg = (detection.center_x - 0.5) * config.hfov
+        if abs(error_x_deg) < config.dead_zone_deg:
+            yawspeed = 0.0
+        else:
+            yawspeed = math.copysign(config.kp_yaw * math.sqrt(abs(error_x_deg)), error_x_deg)
+        yawspeed = max(-config.max_yawspeed, min(config.max_yawspeed, yawspeed))
+        right = config.orbit_speed_m_s * config.orbit_direction if config.follow_mode == "orbit" else 0.0
+        return VelocityCommand(-config.max_backward, right, -config.max_climb_speed, yawspeed)
 
     # --- Tracking mode ---
+    # Yaw: signed square-root response (horizontal centering)
     error_x_deg = (detection.center_x - 0.5) * config.hfov
-
-    # Yaw: signed square-root response
     if abs(error_x_deg) < config.dead_zone_deg:
         yawspeed = 0.0
     else:
         yawspeed = math.copysign(config.kp_yaw * math.sqrt(abs(error_x_deg)), error_x_deg)
     yawspeed = max(-config.max_yawspeed, min(config.max_yawspeed, yawspeed))
 
-    # Altitude is always held fixed by live_control_loop's alt-hold P loop
-    # (there is no follow-driven pitch/altitude mode).
-    down = 0.0
+    # Forward: signed square-root response (vertical centering)
+    forward = _calculate_forward_speed(detection, config)
 
-    forward = _calculate_forward_speed(detection, config, target_bh)
+    # Altitude: plain P on bbox_height error
+    down = _calculate_altitude_speed(detection, config)
 
+    # Lateral: orbit mode only
     right = config.orbit_speed_m_s * config.orbit_direction if config.follow_mode == "orbit" else 0.0
     return VelocityCommand(forward, right, down, yawspeed)
-
-
-def _effective_target_bbox_height(
-    config: ControllerConfig,
-    current_altitude_m: float,
-    min_altitude_m: float = 0.5,
-    max_target: float = 0.9,
-) -> float:
-    """Compute effective target bbox height for the current altitude.
-
-    If target_distance_m is set, use perspective geometry to derive bbox height
-    from altitude + horizontal distance. Otherwise, scale target_bbox_height
-    inversely with altitude relative to reference_altitude_m.
-    """
-    alt = max(current_altitude_m, min_altitude_m)
-    if config.target_distance_m is not None and config.target_distance_m > 0:
-        return min(_distance_to_bbox_height(
-            alt, config.target_distance_m, config.vfov, config.person_height_m,
-        ), max_target)
-    effective = (config.reference_altitude_m * config.target_bbox_height) / alt
-    return min(effective, max_target)

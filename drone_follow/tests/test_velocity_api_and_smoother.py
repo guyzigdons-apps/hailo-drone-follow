@@ -1,4 +1,4 @@
-"""Tests for VelocityCommandAPI (per-axis smoothing) and _effective_target_bbox_height."""
+"""Tests for VelocityCommandAPI (per-axis smoothing)."""
 
 import asyncio
 import time
@@ -9,8 +9,6 @@ from drone_follow.follow_api import (
     ControllerConfig,
     Detection,
     VelocityCommand,
-    _distance_to_bbox_height,
-    _effective_target_bbox_height,
 )
 from drone_follow.drone_api import VelocityCommandAPI
 
@@ -264,100 +262,3 @@ class TestDownSmoothing:
         assert r.down_m_s == pytest.approx(1.0)
 
 
-# ---------------------------------------------------------------------------
-# _effective_target_bbox_height and _distance_to_bbox_height
-# ---------------------------------------------------------------------------
-
-class TestDistanceToBboxHeight:
-
-    def test_closer_distance_gives_larger_bbox(self):
-        near = _distance_to_bbox_height(3.0, 3.0, 41.0)
-        far = _distance_to_bbox_height(3.0, 10.0, 41.0)
-        assert near > far
-
-    def test_higher_altitude_gives_smaller_bbox(self):
-        low = _distance_to_bbox_height(2.0, 8.0, 41.0)
-        high = _distance_to_bbox_height(10.0, 8.0, 41.0)
-        assert low > high
-
-    def test_taller_person_gives_larger_bbox(self):
-        short = _distance_to_bbox_height(3.0, 8.0, 41.0, person_height_m=1.5)
-        tall = _distance_to_bbox_height(3.0, 8.0, 41.0, person_height_m=2.0)
-        assert tall > short
-
-    def test_wider_fov_gives_smaller_bbox(self):
-        narrow = _distance_to_bbox_height(3.0, 8.0, 30.0)
-        wide = _distance_to_bbox_height(3.0, 8.0, 60.0)
-        assert narrow > wide
-
-    def test_result_is_positive_and_bounded(self):
-        result = _distance_to_bbox_height(3.0, 8.0, 41.0)
-        assert 0.0 < result < 1.0
-
-
-class TestEffectiveTargetBboxHeight:
-
-    def test_distance_mode_used_when_target_distance_set(self):
-        cfg = ControllerConfig(target_distance_m=8.0, vfov=41.0, person_height_m=1.7)
-        result = _effective_target_bbox_height(cfg, 3.0)
-        expected = _distance_to_bbox_height(3.0, 8.0, 41.0, 1.7)
-        assert result == pytest.approx(expected)
-
-    def test_altitude_scaling_when_no_target_distance(self):
-        cfg = ControllerConfig(
-            target_distance_m=None,
-            target_bbox_height=0.3,
-            reference_altitude_m=3.0,
-        )
-        # At reference altitude: effective = (3.0 * 0.3) / 3.0 = 0.3
-        assert _effective_target_bbox_height(cfg, 3.0) == pytest.approx(0.3)
-
-        # At double altitude: effective = (3.0 * 0.3) / 6.0 = 0.15
-        assert _effective_target_bbox_height(cfg, 6.0) == pytest.approx(0.15)
-
-        # At half altitude: effective = (3.0 * 0.3) / 1.5 = 0.6
-        assert _effective_target_bbox_height(cfg, 1.5) == pytest.approx(0.6)
-
-    def test_max_target_clamp(self):
-        cfg = ControllerConfig(
-            target_distance_m=None,
-            target_bbox_height=0.3,
-            reference_altitude_m=3.0,
-        )
-        # Very low altitude -> would give huge bbox target, should be clamped
-        result = _effective_target_bbox_height(cfg, 0.1)
-        assert result <= 0.9
-
-    def test_min_altitude_floor(self):
-        cfg = ControllerConfig(
-            target_distance_m=None,
-            target_bbox_height=0.3,
-            reference_altitude_m=3.0,
-        )
-        # Altitude 0 or negative should be floored to min_altitude_m (0.5)
-        result_zero = _effective_target_bbox_height(cfg, 0.0)
-        result_neg = _effective_target_bbox_height(cfg, -1.0)
-        result_min = _effective_target_bbox_height(cfg, 0.5)
-        assert result_zero == pytest.approx(result_min)
-        assert result_neg == pytest.approx(result_min)
-
-    def test_distance_mode_higher_altitude_smaller_target(self):
-        cfg = ControllerConfig(target_distance_m=8.0, vfov=41.0)
-        low = _effective_target_bbox_height(cfg, 2.0)
-        high = _effective_target_bbox_height(cfg, 10.0)
-        assert low > high
-
-    def test_distance_mode_clamped_to_max_target(self):
-        cfg = ControllerConfig(target_distance_m=0.5, vfov=41.0, person_height_m=1.7)
-        result = _effective_target_bbox_height(cfg, 1.0, max_target=0.9)
-        assert result <= 0.9
-
-    def test_target_distance_zero_falls_through_to_altitude_scaling(self):
-        cfg = ControllerConfig(
-            target_distance_m=0,
-            target_bbox_height=0.3,
-            reference_altitude_m=3.0,
-        )
-        result = _effective_target_bbox_height(cfg, 3.0)
-        # target_distance_m=0 -> condition is falsy -> altitude scaling
-        assert result == pytest.approx(0.3)

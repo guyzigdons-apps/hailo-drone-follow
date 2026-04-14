@@ -3,71 +3,71 @@
 import argparse
 import json
 from dataclasses import dataclass, fields, asdict
-from typing import Optional
 
 
 @dataclass
 class ControllerConfig:
     hfov: float = 66.0
     vfov: float = 41.0
-    # kp = proportional gain (P term of a PID controller).
-    # Higher kp → faster response but more overshoot.
+    # --- Yaw (horizontal centering): center_x → yawspeed ---
     kp_yaw: float = 5
     dead_zone_deg: float = 2.0
     max_yawspeed: float = 90.0
-    # max_down_speed: belt-and-suspenders clamp in VelocityCommandAPI on the
-    # down-velocity axis.  The only producer of down is the alt-hold P loop
-    # in live_control_loop (capped at _ALT_HOLD_MAX_SPEED internally), so
-    # this clamp is a safety fallback.
-    max_down_speed: float = 1.5
-    target_bbox_height: float = 0.3
-    target_distance_m: Optional[float] = None  # desired horizontal distance; overrides target_bbox_height when set
-    person_height_m: float = 1.7               # assumed person height for distance calculation
+    # --- Forward (vertical centering): center_y → forward_m_s ---
+    # Signed square-root P, symmetric to yaw. Person below center → back up.
     kp_forward: float = 1.5
     kp_backward: float = 2.5
-    dead_zone_height_percent: float = 20.0  # single-threshold dead zone as % of target_bbox_height
+    target_center_y: float = 0.5        # desired vertical position in frame (0=top, 1=bottom)
+    dead_zone_y_deg: float = 2.0        # dead zone in vertical degrees (like dead_zone_deg for yaw)
     max_forward: float = 1.0
     max_backward: float = 1.5
-    detection_timeout_s: float = 0.5
-    search_enter_delay_s: float = 2.0
-    search_timeout_s: float = 60.0
-    control_loop_hz: float = 10.0
-    max_bbox_height_safety: float = 0.8  # Safety limit: if bbox height > 0.8, we are too close
+    # --- Altitude (distance via height): bbox_height → down_m_s ---
+    # Plain P: person too small → descend, too big → climb. Constrained to [min_alt, max_alt].
+    kp_altitude: float = 3.0            # gain for bbox_height error → altitude speed
+    target_bbox_height: float = 0.3     # desired person size in frame (0-1)
+    dead_zone_bbox_percent: float = 15.0  # dead zone as % of target_bbox_height
+    max_climb_speed: float = 1.0        # max altitude change rate (m/s)
+    max_down_speed: float = 1.5         # safety clamp in VelocityCommandAPI
+    min_altitude: float = 2.0           # hard floor (m)
+    max_altitude: float = 20.0          # hard ceiling (m)
+    # --- Safety ---
+    max_bbox_height_safety: float = 0.8  # bbox > this → emergency climb + reverse
+    # --- Modes ---
     yaw_only: bool = True
-    reference_altitude_m: float = 3.0  # target_bbox_height is defined at this altitude; scales by (ref_alt/current_alt)
-    # Bottom-of-frame backward: bbox bottom edge beyond this triggers backward
-    bottom_y_threshold: float = 0.7
-    # Search mode
-    search_yawspeed_slow: float = 10.0  # yaw speed during search (slower than tracking)
-    search_vel_damp: float = 0.3        # dampening factor for forward/backward speed during search
-    min_search_forward: float = 0.2     # minimum forward speed in search when last bbox was too small
-    # --- Per-axis low-pass smoothing (EMA in VelocityCommandAPI.send()) ---
-    smooth_yaw: bool = True
-    yaw_alpha: float = 0.3              # 0=very smooth, 1=no smoothing
-    smooth_forward: bool = True
-    forward_alpha: float = 0.07         # 0.07 @ 10 Hz → τ≈1.4 s, cutoff≈0.11 Hz
-    smooth_right: bool = True           # smooth lateral axis (orbit transitions)
-    right_alpha: float = 0.3            # moderate smoothing for orbit transitions
-    smooth_down: bool = True            # smooth altitude hold P-loop output
-    down_alpha: float = 0.2             # moderate smoothing to reduce alt jitter
-
     follow_mode: str = "follow"       # "follow" or "orbit"
     orbit_speed_m_s: float = 1.0      # lateral velocity for orbit (m/s)
     orbit_direction: int = 1          # +1 = clockwise, -1 = counter-clockwise
     max_orbit_speed: float = 3.0      # max lateral speed limit
-
-    target_altitude: float = 3.0
+    # --- Search ---
+    detection_timeout_s: float = 0.5
+    search_enter_delay_s: float = 2.0
+    search_timeout_s: float = 60.0
+    search_yawspeed_slow: float = 10.0  # yaw speed during search (slower than tracking)
+    search_vel_damp: float = 0.3        # dampening factor for forward/backward speed during search
+    min_search_forward: float = 0.2     # minimum forward speed in search when last bbox was too small
+    control_loop_hz: float = 10.0
+    # --- Per-axis EMA smoothing ---
+    smooth_yaw: bool = True
+    yaw_alpha: float = 0.3              # 0=very smooth, 1=no smoothing
+    smooth_forward: bool = True
+    forward_alpha: float = 0.15         # center_y has stronger pitch coupling than bbox_height, but transient is shorter; moderate filtering
+    smooth_right: bool = True           # smooth lateral axis (orbit transitions)
+    right_alpha: float = 0.3            # moderate smoothing for orbit transitions
+    smooth_down: bool = True            # smooth bbox_height-driven altitude output
+    down_alpha: float = 0.2             # moderate smoothing to reduce alt jitter
+    # --- Takeoff/misc ---
+    target_altitude: float = 3.0        # initial altitude for --takeoff-landing; UI "Target Alt" adjusts this as a soft reference
     log_verbosity: str = "normal"  # quiet | normal | debug
 
     def __post_init__(self):
         self.validate()
 
     def validate(self):
-        """Raise ValueError if the configuration is internally inconsistent.
-
-        Altitude is always held fixed at target_altitude, so there are no
-        mutually-exclusive altitude modes to validate here.
-        """
+        """Raise ValueError if the configuration is internally inconsistent."""
+        if self.min_altitude >= self.max_altitude:
+            raise ValueError(f"min_altitude ({self.min_altitude}) must be < max_altitude ({self.max_altitude})")
+        if not 0.0 < self.target_center_y < 1.0:
+            raise ValueError(f"target_center_y must be in (0, 1), got {self.target_center_y}")
 
     # ── JSON serialization ──────────────────────────────────────────
 
@@ -105,19 +105,27 @@ class ControllerConfig:
         group.add_argument("--hfov", type=float, default=defaults.hfov)
         group.add_argument("--vfov", type=float, default=defaults.vfov)
         group.add_argument("--target-bbox-height", type=float, default=None,
-                           help=f"Target bbox height (0-1). Mutually exclusive with --target-distance. "
-                                f"(default when no --target-distance: {defaults.target_bbox_height})")
-        group.add_argument("--target-distance", type=float, default=None, metavar="M",
-                           help="Desired horizontal distance to person in metres. "
-                                "Mutually exclusive with --target-bbox-height. "
-                                "(default: None, use target-bbox-height)")
-        group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
-                           help=f"Assumed person height for distance calculation (default: {defaults.person_height_m}m)")
+                           help=f"Target bbox height (0-1) for altitude control "
+                                f"(default: {defaults.target_bbox_height})")
+        group.add_argument("--target-center-y", type=float, default=defaults.target_center_y,
+                           help=f"Desired vertical position in frame 0-1 (default: {defaults.target_center_y})")
+        group.add_argument("--dead-zone-y-deg", type=float, default=defaults.dead_zone_y_deg,
+                           help=f"Vertical dead zone in degrees (default: {defaults.dead_zone_y_deg})")
+
+        # Altitude control
+        group.add_argument("--altitude-gain", dest="kp_altitude", type=float, default=defaults.kp_altitude,
+                           help=f"Gain for bbox_height → altitude (default: {defaults.kp_altitude})")
+        group.add_argument("--dead-zone-bbox-percent", type=float, default=defaults.dead_zone_bbox_percent,
+                           help=f"Altitude dead zone as %% of target bbox height (default: {defaults.dead_zone_bbox_percent})")
+        group.add_argument("--max-climb-speed", type=float, default=defaults.max_climb_speed,
+                           help=f"Max altitude change rate m/s (default: {defaults.max_climb_speed})")
+        group.add_argument("--min-altitude", type=float, default=defaults.min_altitude,
+                           help=f"Hard altitude floor in metres (default: {defaults.min_altitude})")
+        group.add_argument("--max-altitude", type=float, default=defaults.max_altitude,
+                           help=f"Hard altitude ceiling in metres (default: {defaults.max_altitude})")
 
         # Controller gains and loop behavior
         group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
-        group.add_argument("--dead-zone-height-percent", type=float, default=defaults.dead_zone_height_percent,
-                           help="Forward dead zone as %% of target bbox height (default: 20)")
         group.add_argument("--yaw-gain", dest="kp_yaw", type=float, default=defaults.kp_yaw)
         group.add_argument("--forward-gain", dest="kp_forward", type=float, default=defaults.kp_forward)
         group.add_argument("--backward-gain", dest="kp_backward", type=float, default=defaults.kp_backward,
@@ -190,29 +198,20 @@ class ControllerConfig:
         if not isinstance(yaw_only, bool):
             yaw_only = bool(yaw_only)
 
-        ref_alt = _arg("reference_altitude", "reference_altitude_m", default=defaults.reference_altitude_m)
-        ref_alt = ref_alt if ref_alt and ref_alt > 0 else defaults.reference_altitude_m
-
-        # --target-distance and --target-bbox-height are mutually exclusive.
-        # Argparse defaults are None so we can detect user-explicit values.
-        target_distance = getattr(args, "target_distance", None)
-        target_bbox_height = getattr(args, "target_bbox_height", None)
-        if target_distance is not None and target_bbox_height is not None:
-            raise ValueError(
-                "--target-distance and --target-bbox-height are mutually exclusive"
-            )
-
         return cls(
             hfov=_arg("hfov", default=defaults.hfov),
             vfov=_arg("vfov", default=defaults.vfov),
             kp_yaw=_arg("kp_yaw", "yaw_gain", default=defaults.kp_yaw),
             kp_forward=float(_arg("kp_forward", "forward_gain", default=defaults.kp_forward)),
             kp_backward=_arg("kp_backward", "backward_gain", default=defaults.kp_backward),
+            target_center_y=_arg("target_center_y", default=defaults.target_center_y),
+            dead_zone_y_deg=_arg("dead_zone_y_deg", default=defaults.dead_zone_y_deg),
             target_bbox_height=_arg("target_bbox_height", default=defaults.target_bbox_height),
-            target_distance_m=target_distance,
-            person_height_m=_arg("person_height", "person_height_m", default=defaults.person_height_m),
-            dead_zone_height_percent=_arg("dead_zone_height_percent", default=defaults.dead_zone_height_percent),
-            reference_altitude_m=ref_alt,
+            kp_altitude=_arg("kp_altitude", "altitude_gain", default=defaults.kp_altitude),
+            dead_zone_bbox_percent=_arg("dead_zone_bbox_percent", default=defaults.dead_zone_bbox_percent),
+            max_climb_speed=_arg("max_climb_speed", default=defaults.max_climb_speed),
+            min_altitude=_arg("min_altitude", default=defaults.min_altitude),
+            max_altitude=_arg("max_altitude", default=defaults.max_altitude),
             yaw_only=yaw_only,
             detection_timeout_s=_arg("detection_timeout", "detection_timeout_s", default=defaults.detection_timeout_s),
             search_enter_delay_s=_arg("search_enter_delay", "search_enter_delay_s", default=defaults.search_enter_delay_s),
