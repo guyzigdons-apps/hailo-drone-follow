@@ -37,6 +37,7 @@ from drone_follow.follow_api.state import FollowTargetState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
 from drone_follow.servers import FollowServer
+from drone_follow.servers.web_server import SharedUIState, WebServer
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -75,6 +76,9 @@ def _build_parser() -> argparse.ArgumentParser:
     if "--follow-server-port" not in existing:
         group.add_argument("--follow-server-port", type=int, default=8080,
                            help="HTTP server port for target selection")
+    group.add_argument("--dry-run", action="store_true",
+                       help="Run control loop without drone connection — logs computed "
+                            "velocity commands from live detections")
 
     return parser
 
@@ -103,15 +107,28 @@ def main():
         LOGGER.info("[app] Config saved to %s", save_path)
         raise SystemExit(0)
 
-    # Create H15 pipeline app
+    # Create shared UI state and H15 pipeline app
+    ui_state = SharedUIState()
+
     from drone_follow.pipeline_adapter.hailo15_pipeline import create_h15_app
 
     app = create_h15_app(
-        shared_state, target_state=target_state, eos_reached=eos_reached)
+        shared_state, target_state=target_state, eos_reached=eos_reached,
+        ui_state=ui_state)
 
     # Start follow server
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
     follow_server.start()
+
+    # Start web server (MJPEG + detections + config UI)
+    ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
+    LOGGER.info("[app] UI static dir: %s (exists=%s)", ui_dir, os.path.isdir(ui_dir))
+    web_server = WebServer(
+        ui_state, target_state=target_state, shared_state=shared_state,
+        controller_config=controller_config, port=5001, static_dir=ui_dir,
+        follow_server_port=args.follow_server_port, recording_ctl=app)
+    web_server.start()
+    LOGGER.info("[app] Web UI at http://10.0.0.1:5001")
 
     def _quit_pipeline():
         try:
@@ -125,22 +142,42 @@ def main():
         _quit_pipeline()
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
-    def run_drone():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(
-                run_live_drone(args, shared_state, shutdown,
-                               config=controller_config, ui_state=None))
-        except Exception:
-            LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.",
-                           exc_info=True)
-        finally:
-            loop.close()
+    if getattr(args, "dry_run", False):
+        from drone_follow.drone_api.mavsdk_drone import live_control_loop, VelocityCommandAPI
 
-    drone_thread = threading.Thread(target=run_drone, daemon=True)
-    drone_thread.start()
-    LOGGER.info("[app] Drone control started in background thread")
+        def run_dry():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                vel_api = VelocityCommandAPI(None, controller_config)
+                loop.run_until_complete(
+                    live_control_loop(None, shared_state, controller_config,
+                                      shutdown, altitude_cache={"m": args.target_altitude}))
+            except Exception:
+                LOGGER.warning("[dry-run] Control loop error", exc_info=True)
+            finally:
+                loop.close()
+
+        drone_thread = threading.Thread(target=run_dry, daemon=True)
+        drone_thread.start()
+        LOGGER.info("[app] Dry-run control loop started (no drone connection)")
+    else:
+        def run_drone():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    run_live_drone(args, shared_state, shutdown,
+                                   config=controller_config, ui_state=None))
+            except Exception:
+                LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.",
+                               exc_info=True)
+            finally:
+                loop.close()
+
+        drone_thread = threading.Thread(target=run_drone, daemon=True)
+        drone_thread.start()
+        LOGGER.info("[app] Drone control started in background thread")
 
     def on_signal(*_):
         if not shutdown.is_set():
@@ -165,6 +202,7 @@ def main():
             shutdown.set()
         drone_thread.join(timeout=5.0)
         follow_server.stop()
+        web_server.stop()
 
 
 if __name__ == "__main__":

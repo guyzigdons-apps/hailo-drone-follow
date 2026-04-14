@@ -31,4 +31,5 @@ class Detection:
     center_x: float      # 0.0 to 1.0
     center_y: float      # 0.0 to 1.0
     bbox_height: float   # 0.0 to 1.0
-    timestamp: float
+    bbox_width: float = 0.0  # 0.0 to 1.0
+    timestamp: float = 0.0

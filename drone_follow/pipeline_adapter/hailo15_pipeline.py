@@ -206,6 +206,14 @@ class Hailo15PipelineApp:
         self._configured_model = None
         self._infer_model = None
 
+        # UDP socket for sending detection data to PC viewer
+        self._det_sock = None
+
+        # Persistent JPEG encoder pipeline for web UI
+        self._jpeg_enc = None
+        self._jpeg_src = None
+        self._jpeg_out = None
+
     # -- Recording stubs (not supported on H15 yet) --
     @property
     def is_recording(self):
@@ -250,6 +258,8 @@ class Hailo15PipelineApp:
         LOGGER.info("[h15] Encoder config: %s", encoder_path)
         LOGGER.info("[h15] Streams: %d", n_streams)
 
+        Gst.init(None)
+
         sink_parts = []
         for i in range(n_streams):
             if i == 1 and encoder_path:
@@ -262,11 +272,23 @@ class Hailo15PipelineApp:
                     f"udpsink host={UDP_HOST} port={UDP_PORT} sync=false"
                 )
             elif i == 2:
-                # FHD@15fps → appsink for detection
-                sink_parts.append(
-                    f"src.src_{i} ! queue leaky=downstream max-size-buffers=3 ! "
-                    f"appsink name=frame_sink emit-signals=true sync=false drop=true"
-                )
+                if self.ui_state is not None:
+                    # FHD@15fps → tee: inference + raw NV12 for web UI (boxes drawn in Python)
+                    sink_parts.append(
+                        f"src.src_{i} ! queue leaky=downstream max-size-buffers=3 ! "
+                        f"tee name=t "
+                        f"t. ! queue leaky=downstream max-size-buffers=3 ! "
+                        f"appsink name=frame_sink emit-signals=true sync=false drop=true "
+                        f"t. ! queue leaky=downstream max-size-buffers=1 ! "
+                        f"videoscale ! video/x-raw,width=640,height=360 ! "
+                        f"appsink name=raw_sink emit-signals=true sync=false drop=true max-buffers=1"
+                    )
+                else:
+                    # FHD@15fps → appsink for detection only
+                    sink_parts.append(
+                        f"src.src_{i} ! queue leaky=downstream max-size-buffers=3 ! "
+                        f"appsink name=frame_sink emit-signals=true sync=false drop=true"
+                    )
             else:
                 sink_parts.append(
                     f"src.src_{i} ! queue leaky=downstream max-size-buffers=1 ! "
@@ -279,14 +301,99 @@ class Hailo15PipelineApp:
             + " ".join(sink_parts)
         )
         LOGGER.info("[h15] Pipeline: %s", pipeline_str)
-
-        Gst.init(None)
         self.pipeline = Gst.parse_launch(pipeline_str)
 
-        # Connect appsink
+        # Connect appsink for inference
         appsink = self.pipeline.get_by_name("frame_sink")
         if appsink:
             appsink.connect("new-sample", self._on_new_sample)
+
+        # Connect raw NV12 appsink for web UI (box drawing + JPEG encode in Python)
+        raw_sink = self.pipeline.get_by_name("raw_sink")
+        if raw_sink:
+            raw_sink.connect("new-sample", self._on_raw_web_sample)
+
+    def _ensure_jpeg_encoder(self, width, height):
+        """Create a persistent GStreamer pipeline for NV12→JPEG encoding."""
+        if self._jpeg_enc is not None:
+            return
+        caps = f"video/x-raw,format=NV12,width={width},height={height},framerate=0/1"
+        self._jpeg_enc = Gst.parse_launch(
+            f"appsrc name=src caps={caps} is-live=true format=time ! "
+            f"videoconvert ! jpegenc quality=70 ! "
+            f"appsink name=out emit-signals=false sync=false drop=true max-buffers=1"
+        )
+        self._jpeg_src = self._jpeg_enc.get_by_name("src")
+        self._jpeg_out = self._jpeg_enc.get_by_name("out")
+        self._jpeg_enc.set_state(Gst.State.PLAYING)
+        LOGGER.info("[h15] JPEG encoder pipeline started (%dx%d)", width, height)
+
+    def _on_raw_web_sample(self, appsink):
+        """Raw NV12 appsink callback: draw boxes, encode JPEG, push to web UI."""
+        sample = appsink.emit("pull-sample")
+        if sample is None or self.ui_state is None:
+            return Gst.FlowReturn.OK
+
+        buf = sample.get_buffer()
+        caps = sample.get_caps()
+        struct = caps.get_structure(0)
+        w = struct.get_int("width")[1]
+        h = struct.get_int("height")[1]
+
+        success, map_info = buf.map(Gst.MapFlags.READ)
+        if not success:
+            return Gst.FlowReturn.OK
+        try:
+            frame = np.frombuffer(map_info.data, dtype=np.uint8).copy()
+        finally:
+            buf.unmap(map_info)
+
+        # Draw detection boxes on Y plane
+        det, _ = self.shared_state.get_latest()
+        if det is not None:
+            y_plane = frame[:w * h].reshape(h, w)
+            bw = int(det.bbox_width * w) if det.bbox_width > 0 else int(det.bbox_height * w * 0.5)
+            bh = int(det.bbox_height * h)
+            cx, cy = int(det.center_x * w), int(det.center_y * h)
+            x1, y1 = max(0, cx - bw // 2), max(0, cy - bh // 2)
+            x2, y2 = min(w - 1, cx + bw // 2), min(h - 1, cy + bh // 2)
+            t = 2
+            y_plane[y1:y1 + t, x1:x2] = 235
+            y_plane[max(0, y2 - t):y2, x1:x2] = 235
+            y_plane[y1:y2, x1:x1 + t] = 235
+            y_plane[y1:y2, max(0, x2 - t):x2] = 235
+
+        # Encode to JPEG via persistent pipeline
+        self._ensure_jpeg_encoder(w, h)
+        enc_buf = Gst.Buffer.new_allocate(None, len(frame), None)
+        enc_buf.fill(0, frame.tobytes())
+        self._jpeg_src.emit("push-buffer", enc_buf)
+
+        out_sample = self._jpeg_out.emit("try-pull-sample", int(200 * 1e6))
+        if out_sample is not None:
+            out_buf = out_sample.get_buffer()
+            ok, out_map = out_buf.map(Gst.MapFlags.READ)
+            if ok:
+                self.ui_state.update_frame(bytes(out_map.data))
+                out_buf.unmap(out_map)
+
+        return Gst.FlowReturn.OK
+
+    def _send_detections_udp(self, detections):
+        """Send detection data to PC viewer via UDP (port UDP_PORT + 1)."""
+        import json as _json
+        import socket
+        if self._det_sock is None:
+            self._det_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        payload = _json.dumps([{
+            "cx": d.center_x, "cy": d.center_y,
+            "bh": d.bbox_height, "bw": d.bbox_width,
+            "conf": d.confidence,
+        } for d in detections]).encode()
+        try:
+            self._det_sock.sendto(payload, (UDP_HOST, UDP_PORT + 1))
+        except OSError:
+            pass
 
     def _on_new_sample(self, appsink):
         """Appsink callback: grab frame, run inference, update detections."""
@@ -399,14 +506,27 @@ class Hailo15PipelineApp:
             if output.is_nms:
                 # NMS output: parse the flat buffer as per-class detections
                 nms_data = output_buffers[name]
-                if self._frame_count <= 3:
-                    LOGGER.info("[h15] NMS raw output: shape=%s min=%.3f max=%.3f",
-                                nms_data.shape, nms_data.min(), nms_data.max())
+                if self._frame_count == 1:
+                    LOGGER.info("[h15] NMS output: shape=%s, format=HAILO_NMS_BY_CLASS",
+                                nms_data.shape)
                 person_dets = extract_person_detections(
                     nms_data, confidence_threshold=DETECTION_CONFIDENCE_THRESHOLD)
                 all_detections.extend(person_dets)
             else:
                 LOGGER.debug("[h15] Non-NMS output %s — skipping", name)
+
+        # Send detections to PC viewer overlay
+        self._send_detections_udp(all_detections)
+
+        # Push detections to web UI
+        if self.ui_state is not None:
+            self.ui_state.update_detections([{
+                "id": i,
+                "bbox": [d.center_x - d.bbox_width / 2, d.center_y - d.bbox_height / 2,
+                         d.bbox_width, d.bbox_height],
+                "confidence": d.confidence,
+                "label": d.label,
+            } for i, d in enumerate(all_detections)])
 
         # Update shared state with best detection
         if all_detections:
@@ -416,7 +536,7 @@ class Hailo15PipelineApp:
             self.shared_state.update(None, available_ids=set())
 
         if self._frame_count % 30 == 0:
-            LOGGER.debug("[h15] frame=%d detections=%d", self._frame_count, len(all_detections))
+            LOGGER.info("[h15] frame=%d detections=%d", self._frame_count, len(all_detections))
 
     # -- Run --
 
@@ -456,6 +576,8 @@ class Hailo15PipelineApp:
 
     def stop(self):
         """Stop the pipeline and clean up."""
+        if self._jpeg_enc:
+            self._jpeg_enc.set_state(Gst.State.NULL)
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
         if self.loop:
