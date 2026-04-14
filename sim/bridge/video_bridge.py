@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Gazebo camera -> UDP JPEG bridge.
+"""Gazebo camera -> UDP H.264 RTP bridge.
 
-Subscribes to a Gazebo gz-transport camera topic, encodes each frame as JPEG,
-and sends it as a UDP datagram.  The drone-follow app consumes this via
+Subscribes to a Gazebo gz-transport camera topic, encodes each frame as H.264,
+wraps it in RTP, and sends via UDP.  The drone-follow app consumes this via
 ``--input udp://0.0.0.0:5600``.
 
 Usage:
     sim/bridge/video_bridge.py                 # defaults
     sim/bridge/video_bridge.py --discover      # list available gz topics
-    sim/bridge/video_bridge.py --port 5600 --quality 80
+    sim/bridge/video_bridge.py --port 5600 --bitrate 2000
 """
 
 import os
@@ -17,7 +17,6 @@ os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 import argparse
 import signal
-import socket
 import sys
 import time
 
@@ -26,9 +25,13 @@ import numpy as np
 from gz.msgs10.image_pb2 import Image
 from gz.transport13 import Node
 
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst
+
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Gazebo camera -> UDP JPEG bridge")
+    p = argparse.ArgumentParser(description="Gazebo camera -> UDP H.264 RTP bridge")
     p.add_argument(
         "--topic",
         default="/camera",
@@ -36,8 +39,8 @@ def parse_args():
     )
     p.add_argument("--host", default="127.0.0.1", help="UDP destination host (default: 127.0.0.1)")
     p.add_argument("--port", type=int, default=5600, help="UDP destination port (default: 5600)")
-    p.add_argument("--quality", type=int, default=80, help="JPEG quality 0-100 (default: 80)")
-    p.add_argument("--fps", type=float, default=0, help="Max FPS, 0=unlimited (default: 0)")
+    p.add_argument("--bitrate", type=int, default=2000, help="H.264 bitrate in kbps (default: 2000)")
+    p.add_argument("--fps", type=int, default=30, help="Target FPS (default: 30)")
     p.add_argument("--discover", action="store_true", help="List available gz topics and exit")
     return p.parse_args()
 
@@ -61,44 +64,53 @@ def main():
             print("  (none found — is Gazebo running?)")
         return
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    dest = (args.host, args.port)
-    encode_params = [cv2.IMWRITE_JPEG_QUALITY, args.quality]
-    min_interval = 1.0 / args.fps if args.fps > 0 else 0
-    last_send = [0.0]
+    Gst.init(None)
+
+    # Pipeline is created lazily on the first frame (need to know resolution).
+    pipeline = [None]
+    appsrc = [None]
     frame_count = [0]
 
-    def on_image(msg: Image):
-        now = time.monotonic()
-        if min_interval and (now - last_send[0]) < min_interval:
-            return
+    def create_pipeline(width, height):
+        pipeline_str = (
+            f"appsrc name=src is-live=true format=time "
+            f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={args.fps}/1 ! "
+            f"queue max-size-buffers=3 leaky=downstream ! "
+            f"videoconvert ! "
+            f"x264enc tune=zerolatency speed-preset=ultrafast bitrate={args.bitrate} "
+            f"key-int-max={args.fps} ! "
+            f"video/x-h264,profile=baseline ! "
+            f"rtph264pay config-interval=1 pt=96 ! "
+            f"udpsink host={args.host} port={args.port} sync=false async=false"
+        )
+        pipe = Gst.parse_launch(pipeline_str)
+        src = pipe.get_by_name("src")
+        pipe.set_state(Gst.State.PLAYING)
+        return pipe, src
 
+    def on_image(msg: Image):
         try:
             w, h = msg.width, msg.height
             fmt = msg.pixel_format_type
             data = msg.data
 
-            if fmt == _RGB_INT8:
-                channels = 3
-            elif fmt == _BGR_INT8:
-                channels = 3
-            else:
-                # Fall back to 3 channels (most common)
-                channels = 3
-
+            channels = 3
             frame = np.frombuffer(data, dtype=np.uint8).reshape(h, w, channels)
 
             if fmt == _RGB_INT8:
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-            ok, jpeg = cv2.imencode(".jpg", frame, encode_params)
-            if not ok:
-                return
+            # Create pipeline on first frame when resolution is known.
+            if pipeline[0] is None:
+                pipeline[0], appsrc[0] = create_pipeline(w, h)
+                print(f"[bridge] Created H.264 pipeline ({w}x{h} @ {args.fps}fps)")
 
-            sock.sendto(jpeg.tobytes(), dest)
-            last_send[0] = now
+            buf = Gst.Buffer.new_wrapped(frame.tobytes())
+            buf.pts = frame_count[0] * Gst.SECOND // args.fps
+            buf.duration = Gst.SECOND // args.fps
+            appsrc[0].emit("push-buffer", buf)
+
             frame_count[0] += 1
-
             if frame_count[0] % 300 == 0:
                 print(f"[bridge] Sent {frame_count[0]} frames ({w}x{h})")
 
@@ -106,7 +118,7 @@ def main():
             print(f"[bridge] Error: {e}", file=sys.stderr)
 
     print(f"[bridge] Subscribing to: {args.topic}")
-    print(f"[bridge] Sending JPEG to udp://{args.host}:{args.port} (quality={args.quality})")
+    print(f"[bridge] Sending H.264 RTP to udp://{args.host}:{args.port} (bitrate={args.bitrate}kbps)")
 
     subscribed = node.subscribe(Image, args.topic, on_image)
     if not subscribed:
@@ -116,13 +128,17 @@ def main():
 
     print("[bridge] Waiting for frames... (Ctrl+C to stop)")
 
-    # Block until interrupted
-    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    def shutdown(*_):
+        if pipeline[0]:
+            appsrc[0].emit("end-of-stream")
+            pipeline[0].set_state(Gst.State.NULL)
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
     try:
         signal.pause()
     except AttributeError:
-        # Windows fallback
         while True:
             time.sleep(1)
 
