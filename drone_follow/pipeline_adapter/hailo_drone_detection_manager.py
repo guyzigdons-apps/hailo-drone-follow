@@ -19,6 +19,7 @@ from drone_follow.follow_api.types import Detection
 from drone_follow.perf_tracker import PerfTracker
 
 from .byte_tracker import ByteTracker
+from .reid_manager import get_frame_bgr
 
 LOGGER = logging.getLogger(__name__)
 
@@ -102,32 +103,6 @@ def _run_tracker(byte_tracker, persons):
 
 
 # ---------------------------------------------------------------------------
-# ReID frame extraction helper
-# ---------------------------------------------------------------------------
-
-_buffer_utils = None
-
-def _get_frame_bgr(buffer, user_data):
-    """Extract BGR frame from GStreamer buffer for ReID cropping.
-
-    Only called when ReID needs a frame (gallery update or re-identification).
-    """
-    global _buffer_utils
-    if _buffer_utils is None:
-        from hailo_apps.python.core.common import buffer_utils
-        _buffer_utils = buffer_utils
-    try:
-        import cv2
-        frame_rgb = _buffer_utils.get_numpy_from_buffer(
-            buffer, "RGB", user_data.video_width, user_data.video_height)
-        if frame_rgb is not None:
-            return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-    except Exception as e:
-        LOGGER.debug("[REID] Frame extraction failed: %s", e)
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Main app callback
 # ---------------------------------------------------------------------------
 
@@ -203,7 +178,7 @@ def _app_callback_inner(element, buffer, user_data):
             if reid_manager is not None:
                 reid_manager.on_target_selected(target_id)
                 if reid_manager.should_update():
-                    frame_bgr = _get_frame_bgr(buffer, user_data)
+                    frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
                     if frame_bgr is not None:
                         reid_manager.update_gallery(
                             frame_bgr, best.get_bbox(),
@@ -211,7 +186,7 @@ def _app_callback_inner(element, buffer, user_data):
         else:
             # Target lost by tracker — try ReID re-identification
             if reid_manager is not None and reid_manager.has_gallery and person_by_id:
-                frame_bgr = _get_frame_bgr(buffer, user_data)
+                frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
                 if frame_bgr is not None:
                     new_tid = reid_manager.try_reidentify(
                         frame_bgr, person_by_id,

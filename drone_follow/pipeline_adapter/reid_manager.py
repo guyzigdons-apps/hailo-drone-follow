@@ -17,6 +17,27 @@ import numpy as np
 
 LOGGER = logging.getLogger(__name__)
 
+_buffer_utils = None
+
+def get_frame_bgr(buffer, video_width, video_height):
+    """Extract BGR frame from GStreamer buffer for ReID cropping.
+
+    Only called when ReID needs a frame (gallery update or re-identification).
+    """
+    global _buffer_utils
+    if _buffer_utils is None:
+        from hailo_apps.python.core.common import buffer_utils
+        _buffer_utils = buffer_utils
+    try:
+        import cv2
+        frame_rgb = _buffer_utils.get_numpy_from_buffer(
+            buffer, "RGB", video_width, video_height)
+        if frame_rgb is not None:
+            return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        LOGGER.debug("[REID] Frame extraction failed: %s", e)
+    return None
+
 
 def _crop_person(
     frame_bgr: np.ndarray, hailo_bbox, video_width: int, video_height: int,
