@@ -41,13 +41,15 @@ class ControllerConfig:
     search_yawspeed_slow: float = 10.0  # yaw speed during search (slower than tracking)
     search_vel_damp: float = 0.3        # dampening factor for forward/backward speed during search
     min_search_forward: float = 0.2     # minimum forward speed in search when last bbox was too small
-    # Yaw smoothing
-    smooth_yaw: bool = True             # enable low-pass smoothing on yaw command
-    yaw_alpha: float = 0.3              # yaw EMA factor (0=very smooth, 1=no smoothing)
-    # Forward smoothing: first-order low-pass (EMA) on the forward command.
-    # Attenuates ~1-2 Hz pitch-induced oscillation without requiring state machines.
-    smooth_forward: bool = True         # enable forward velocity smoothing
-    forward_alpha: float = 0.07         # EMA alpha; 0.07 @ 10 Hz → τ≈1.4 s, cutoff≈0.11 Hz
+    # --- Per-axis low-pass smoothing (EMA in VelocityCommandAPI.send()) ---
+    smooth_yaw: bool = True
+    yaw_alpha: float = 0.3              # 0=very smooth, 1=no smoothing
+    smooth_forward: bool = True
+    forward_alpha: float = 0.07         # 0.07 @ 10 Hz → τ≈1.4 s, cutoff≈0.11 Hz
+    smooth_right: bool = True           # smooth lateral axis (orbit transitions)
+    right_alpha: float = 0.3            # moderate smoothing for orbit transitions
+    smooth_down: bool = True            # smooth altitude hold P-loop output
+    down_alpha: float = 0.2             # moderate smoothing to reduce alt jitter
 
     follow_mode: str = "follow"       # "follow" or "orbit"
     orbit_speed_m_s: float = 1.0      # lateral velocity for orbit (m/s)
@@ -138,6 +140,14 @@ class ControllerConfig:
                            help=f"Enable/disable forward velocity smoothing (default: {defaults.smooth_forward})")
         group.add_argument("--forward-alpha", type=float, default=defaults.forward_alpha,
                            help=f"EMA smoothing factor for forward velocity (0=sluggish, 1=no smoothing, default: {defaults.forward_alpha})")
+        group.add_argument("--smooth-right", action=argparse.BooleanOptionalAction, default=defaults.smooth_right,
+                           help=f"Enable/disable lateral velocity smoothing (default: {defaults.smooth_right})")
+        group.add_argument("--right-alpha", type=float, default=defaults.right_alpha,
+                           help=f"EMA smoothing factor for lateral velocity (0=sluggish, 1=no smoothing, default: {defaults.right_alpha})")
+        group.add_argument("--smooth-down", action=argparse.BooleanOptionalAction, default=defaults.smooth_down,
+                           help=f"Enable/disable vertical velocity smoothing (default: {defaults.smooth_down})")
+        group.add_argument("--down-alpha", type=float, default=defaults.down_alpha,
+                           help=f"EMA smoothing factor for vertical velocity (0=sluggish, 1=no smoothing, default: {defaults.down_alpha})")
 
         # Safety limits
         group.add_argument("--max-forward", type=float, default=defaults.max_forward,
@@ -216,6 +226,10 @@ class ControllerConfig:
             yaw_alpha=_arg("yaw_alpha", default=defaults.yaw_alpha),
             smooth_forward=_arg("smooth_forward", default=defaults.smooth_forward),
             forward_alpha=_arg("forward_alpha", default=defaults.forward_alpha),
+            smooth_right=_arg("smooth_right", default=defaults.smooth_right),
+            right_alpha=_arg("right_alpha", default=defaults.right_alpha),
+            smooth_down=_arg("smooth_down", default=defaults.smooth_down),
+            down_alpha=_arg("down_alpha", default=defaults.down_alpha),
             follow_mode=_arg("follow_mode", default=defaults.follow_mode),
             orbit_speed_m_s=_arg("orbit_speed", "orbit_speed_m_s", default=defaults.orbit_speed_m_s),
             orbit_direction=_arg("orbit_direction", default=defaults.orbit_direction),

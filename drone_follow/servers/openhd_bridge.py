@@ -51,6 +51,10 @@ _CONFIG_PARAMS = {
     "yaw_only":                 ("DF_YAW_ONLY",   bool),
     "smooth_yaw":               ("DF_SMTH_YAW",   bool),
     "smooth_forward":           ("DF_SMTH_FWD",   bool),
+    "right_alpha":              ("DF_RT_ALPHA",   float),
+    "smooth_right":             ("DF_SMTH_RT",    bool),
+    "down_alpha":               ("DF_DN_ALPHA",   float),
+    "smooth_down":              ("DF_SMTH_DN",    bool),
 }
 
 # Fields where value 0 maps to Python None

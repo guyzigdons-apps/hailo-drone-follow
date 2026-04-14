@@ -23,7 +23,6 @@ from drone_follow.follow_api.types import VelocityCommand
 from drone_follow.follow_api.config import ControllerConfig
 from drone_follow.follow_api.controller import (
     compute_velocity_command,
-    ForwardSmoother,
     _effective_target_bbox_height,
 )
 
@@ -60,43 +59,68 @@ def _to_mavsdk(cmd: VelocityCommand) -> VelocityBodyYawspeed:
 
 class VelocityCommandAPI:
     """Wrapper around drone.offboard.set_velocity_body that enforces max
-    velocity limits and applies an exponential low-pass filter on the yaw axis.
+    velocity limits and applies per-axis exponential low-pass (EMA) filters.
 
     Usage:
         api = VelocityCommandAPI(drone, config)
         await api.send(cmd)          # clamped + filtered
-        await api.send_zero()        # immediate zero (bypasses filter)
+        await api.send_zero()        # immediate zero (resets all filters)
     """
 
-    def __init__(self, drone, config: ControllerConfig, yaw_alpha: Optional[float] = None):
+    def __init__(self, drone, config: ControllerConfig):
         """
         Args:
             drone: MAVSDK System (or None for print-only mode).
-            config: ControllerConfig used to read max_* limits.
-            yaw_alpha: Low-pass filter coefficient for yaw (0..1).
-                       Smaller = more smoothing, larger = faster response.
+            config: ControllerConfig used to read max_* limits and
+                    per-axis smooth_*/alpha settings.
         """
         self._drone = drone
         self._config = config
-        self._yaw_alpha = config.yaw_alpha if yaw_alpha is None else yaw_alpha
         self._filtered_yaw: float = 0.0
+        self._filtered_forward: float = 0.0
+        self._filtered_right: float = 0.0
+        self._filtered_down: float = 0.0
+
+    @staticmethod
+    def _ema(raw: float, prev: float, alpha: float) -> float:
+        """First-order exponential moving average (low-pass filter)."""
+        return alpha * raw + (1.0 - alpha) * prev
 
     async def send(self, cmd: VelocityCommand) -> VelocityCommand:
-        """Clamp velocity components, apply yaw low-pass filter, and send.
+        """Clamp velocity components, apply per-axis low-pass filters, and send.
 
         Returns the command that was actually sent (after clamping/filtering).
         """
-        # Clamp each axis to configured maximums
-        forward = max(-self._config.max_backward, min(self._config.max_forward, cmd.forward_m_s))
-        max_lat = self._config.max_orbit_speed
-        right = max(-max_lat, min(max_lat, cmd.right_m_s))
-        down = max(-self._config.max_down_speed, min(self._config.max_down_speed, cmd.down_m_s))
-        yaw_raw = max(-self._config.max_yawspeed, min(self._config.max_yawspeed, cmd.yawspeed_deg_s))
+        cfg = self._config
 
-        if self._config.smooth_yaw:
-            # Low-pass filter on yaw: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
-            self._filtered_yaw = (self._yaw_alpha * yaw_raw
-                                  + (1.0 - self._yaw_alpha) * self._filtered_yaw)
+        # Clamp each axis to configured maximums
+        forward = max(-cfg.max_backward, min(cfg.max_forward, cmd.forward_m_s))
+        max_lat = cfg.max_orbit_speed
+        right = max(-max_lat, min(max_lat, cmd.right_m_s))
+        down = max(-cfg.max_down_speed, min(cfg.max_down_speed, cmd.down_m_s))
+        yaw_raw = max(-cfg.max_yawspeed, min(cfg.max_yawspeed, cmd.yawspeed_deg_s))
+
+        # Per-axis EMA filtering
+        if cfg.smooth_forward:
+            self._filtered_forward = self._ema(forward, self._filtered_forward, cfg.forward_alpha)
+            forward = self._filtered_forward
+        else:
+            self._filtered_forward = forward
+
+        if cfg.smooth_right:
+            self._filtered_right = self._ema(right, self._filtered_right, cfg.right_alpha)
+            right = self._filtered_right
+        else:
+            self._filtered_right = right
+
+        if cfg.smooth_down:
+            self._filtered_down = self._ema(down, self._filtered_down, cfg.down_alpha)
+            down = self._filtered_down
+        else:
+            self._filtered_down = down
+
+        if cfg.smooth_yaw:
+            self._filtered_yaw = self._ema(yaw_raw, self._filtered_yaw, cfg.yaw_alpha)
             yaw_out = self._filtered_yaw
         else:
             self._filtered_yaw = yaw_raw
@@ -110,8 +134,11 @@ class VelocityCommandAPI:
         return clamped
 
     async def send_zero(self) -> None:
-        """Send an immediate zero-velocity command and reset the yaw filter."""
+        """Send an immediate zero-velocity command and reset all filter states."""
         self._filtered_yaw = 0.0
+        self._filtered_forward = 0.0
+        self._filtered_right = 0.0
+        self._filtered_down = 0.0
         zero = VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
         if self._drone is not None:
             await self._drone.offboard.set_velocity_body(zero)
@@ -121,9 +148,12 @@ class VelocityCommandAPI:
         if self._drone is not None:
             await self._drone.offboard.set_velocity_body(_to_mavsdk(cmd))
 
-    def reset_filter(self) -> None:
-        """Reset the yaw low-pass filter state."""
+    def reset_filters(self) -> None:
+        """Reset all per-axis low-pass filter states."""
         self._filtered_yaw = 0.0
+        self._filtered_forward = 0.0
+        self._filtered_right = 0.0
+        self._filtered_down = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +413,6 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     last_valid_detection: Optional[VelocityCommand] = None
     _prev_target_alt = config.target_altitude
     _prev_cmd: Optional[VelocityCommand] = None
-    _fwd_smoother = ForwardSmoother()
 
     # Constants
     _ALT_HOLD_KP = 0.5
@@ -431,10 +460,6 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 search_active=(time_since_detection >= config.search_enter_delay_s),
                 hold_velocity=_prev_cmd,
             )
-
-            if config.smooth_forward and not config.yaw_only:
-                smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
-                cmd = VelocityCommand(smoothed_fwd, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
 
             # Altitude hold: proportional controller toward target_altitude.
             # This is the only altitude-producing path in the system — there is
@@ -727,7 +752,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                         break
 
                     offboard_lost = asyncio.Event()
-                    vel_api.reset_filter()
+                    vel_api.reset_filters()
                     control_task = asyncio.create_task(
                         live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
                                           ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))

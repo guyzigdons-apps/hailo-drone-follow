@@ -11,7 +11,6 @@ from .config import ControllerConfig
 
 __all__ = [
     "compute_velocity_command",
-    "ForwardSmoother",
 ]
 
 
@@ -40,8 +39,8 @@ def _calculate_forward_speed(
     """Plain P controller on bbox-height error, with a dead zone and safety bypasses.
 
     Pitch-induced oscillation (rigid camera → body pitch tilts image → false
-    error signal ~1-2 Hz) is suppressed downstream by the low-pass EMA in
-    ForwardSmoother, not here.  Keep this function stateless.
+    error signal ~1-2 Hz) is suppressed downstream by the per-axis low-pass
+    EMA in VelocityCommandAPI.send(), not here.  Keep this function stateless.
     """
     if config.yaw_only or config.kp_forward == 0:
         return 0.0
@@ -65,31 +64,6 @@ def _calculate_forward_speed(
     gain = config.kp_forward if height_delta > 0 else config.kp_backward
     raw = gain * height_delta  # sign preserved: +ve delta = approach, -ve = retreat
     return max(-config.max_backward, min(config.max_forward, raw))
-
-
-class ForwardSmoother:
-    """First-order low-pass (EMA) on the forward command.
-
-    The pitch-induced oscillation sits at roughly 1-2 Hz.  With a 10 Hz loop
-    and alpha ~0.07, the cutoff is ~0.11 Hz, which attenuates the oscillation
-    by ~25 dB while leaving the sub-0.1 Hz tracking bandwidth intact.
-    """
-
-    def __init__(self):
-        self._smoothed_forward: float = 0.0
-
-    def update(self, detection: Optional[Detection], raw_forward: float,
-               config: ControllerConfig) -> float:
-        """Return smoothed forward velocity (EMA).  `detection` is accepted for
-        API compatibility with the previous rate-aware smoother but is unused."""
-        del detection  # no longer used; kept for signature stability
-        target = max(-config.max_backward, min(config.max_forward, raw_forward))
-        alpha = config.forward_alpha
-        self._smoothed_forward = alpha * target + (1.0 - alpha) * self._smoothed_forward
-        return self._smoothed_forward
-
-    def reset(self):
-        self._smoothed_forward = 0.0
 
 
 def compute_velocity_command(

@@ -3,11 +3,12 @@
   "groups": [
     {"id": "yaw",    "label": "YAW CONTROL",         "order": 1},
     {"id": "fwd",    "label": "FORWARD / BACKWARD",   "order": 2},
-    {"id": "target", "label": "TARGET & DEAD ZONE",    "order": 3},
-    {"id": "flight", "label": "FLIGHT",                "order": 4},
-    {"id": "track",  "label": "TRACKING",              "order": 5},
-    {"id": "video",  "label": "VIDEO",                 "order": 6},
-    {"id": "rec",    "label": "RECORDING",              "order": 7}
+    {"id": "target", "label": "TARGET & DEAD ZONE",    "order": 4},
+    {"id": "flight", "label": "FLIGHT",                "order": 5},
+    {"id": "lat",    "label": "LATERAL / ALTITUDE",     "order": 3},
+    {"id": "track",  "label": "TRACKING",              "order": 6},
+    {"id": "video",  "label": "VIDEO",                 "order": 7},
+    {"id": "rec",    "label": "RECORDING",              "order": 8}
   ],
   "params": [
     {
@@ -139,6 +140,56 @@
       "order": 6,
       "label": "Smooth forward",
       "description": "Enable exponential smoothing on forward/backward commands",
+      "read_only": false
+    },
+    {
+      "id": "right_alpha",
+      "mavlink_id": "DF_RT_ALPHA",
+      "type": "float",
+      "default": 0.3,
+      "min": 0.01,
+      "max": 1.0,
+      "step": 0.01,
+      "group": "lat",
+      "order": 1,
+      "label": "Lateral smoothing (α)",
+      "description": "Low-pass filter coefficient for lateral (orbit) commands",
+      "read_only": false
+    },
+    {
+      "id": "smooth_right",
+      "mavlink_id": "DF_SMTH_RT",
+      "type": "bool",
+      "default": true,
+      "group": "lat",
+      "order": 2,
+      "label": "Smooth lateral",
+      "description": "Enable exponential smoothing on lateral commands",
+      "read_only": false
+    },
+    {
+      "id": "down_alpha",
+      "mavlink_id": "DF_DN_ALPHA",
+      "type": "float",
+      "default": 0.2,
+      "min": 0.01,
+      "max": 1.0,
+      "step": 0.01,
+      "group": "lat",
+      "order": 3,
+      "label": "Altitude smoothing (α)",
+      "description": "Low-pass filter coefficient for altitude hold commands",
+      "read_only": false
+    },
+    {
+      "id": "smooth_down",
+      "mavlink_id": "DF_SMTH_DN",
+      "type": "bool",
+      "default": true,
+      "group": "lat",
+      "order": 4,
+      "label": "Smooth altitude",
+      "description": "Enable exponential smoothing on altitude hold commands",
       "read_only": false
     },
     {

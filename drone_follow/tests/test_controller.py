@@ -9,8 +9,8 @@ from drone_follow.follow_api import (
     Detection,
     ControllerConfig,
     compute_velocity_command,
-    ForwardSmoother,
 )
+from drone_follow.drone_api import VelocityCommandAPI
 
 
 def _det(cx=0.5, cy=0.5, bh=0.3):
@@ -375,28 +375,42 @@ class TestForwardLowPass:
         assert cmd_close.forward_m_s == -1.5
 
     def test_ema_attenuates_step_input(self):
-        """Low alpha produces slow convergence to a step input."""
-        smoother = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=0.07, max_forward=5.0, max_backward=5.0)
-        # Step from 0 → 1.0 m/s; after one update, output should be α * step = 0.07
-        first = smoother.update(None, 1.0, cfg)
-        assert first == pytest.approx(0.07, abs=1e-6)
-        # After many updates, converges toward the target
+        """Low alpha produces slow convergence to a step input (via VelocityCommandAPI)."""
+        import asyncio
+        cfg = ControllerConfig(
+            forward_alpha=0.07, max_forward=5.0, max_backward=5.0,
+            smooth_forward=True, smooth_yaw=False, smooth_right=False, smooth_down=False,
+        )
+        api = VelocityCommandAPI(drone=None, config=cfg)
+        loop = asyncio.get_event_loop()
+        from drone_follow.follow_api import VelocityCommand
+        # Step from 0 → 1.0 m/s; after one send, output should be α * step = 0.07
+        first = loop.run_until_complete(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
+        assert first.forward_m_s == pytest.approx(0.07, abs=1e-6)
+        # After many sends, converges toward the target
         for _ in range(100):
-            result = smoother.update(None, 1.0, cfg)
-        assert result == pytest.approx(1.0, abs=0.01)
+            result = loop.run_until_complete(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
+        assert result.forward_m_s == pytest.approx(1.0, abs=0.01)
 
     def test_direction_reversal_is_smooth(self):
-        """When input flips sign, EMA transitions through zero smoothly."""
-        smoother = ForwardSmoother()
-        cfg = ControllerConfig(forward_alpha=0.2, max_forward=5.0, max_backward=5.0)
+        """When input flips sign, EMA transitions through zero smoothly (via VelocityCommandAPI)."""
+        import asyncio
+        cfg = ControllerConfig(
+            forward_alpha=0.2, max_forward=5.0, max_backward=5.0,
+            smooth_forward=True, smooth_yaw=False, smooth_right=False, smooth_down=False,
+        )
+        api = VelocityCommandAPI(drone=None, config=cfg)
+        loop = asyncio.get_event_loop()
+        from drone_follow.follow_api import VelocityCommand
         # Settle at +1.0
         for _ in range(100):
-            smoother.update(None, 1.0, cfg)
+            loop.run_until_complete(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
         # Abrupt flip to -1.0 — output must pass through zero, not jump
-        prev = smoother.update(None, -1.0, cfg)
+        r = loop.run_until_complete(api.send(VelocityCommand(-1.0, 0.0, 0.0, 0.0)))
+        prev = r.forward_m_s
         for _ in range(10):
-            nxt = smoother.update(None, -1.0, cfg)
+            r = loop.run_until_complete(api.send(VelocityCommand(-1.0, 0.0, 0.0, 0.0)))
+            nxt = r.forward_m_s
             # Each step should move toward -1.0 monotonically (no overshoot)
             assert nxt <= prev + 1e-9
             prev = nxt

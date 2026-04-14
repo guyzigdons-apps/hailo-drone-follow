@@ -336,7 +336,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
     from hailo_apps.python.core.common.core import get_pipeline_parser
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
-        QUEUE, DISPLAY_PIPELINE,
+        QUEUE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
         TILE_CROPPER_PIPELINE, SOURCE_PIPELINE, OVERLAY_PIPELINE,
     )
@@ -676,7 +676,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return
             Gst = _get_gst()
             with self._record_lock:
-                for name in ("record_valve", "record_overlay", "record_appsink"):
+                for name in ("record_valve", "record_appsink"):
                     el = self.pipeline.get_by_name(name)
                     if el is not None:
                         el.set_state(Gst.State.NULL)
@@ -753,24 +753,25 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-            # Primary output branch: OpenHD stream, display, or fakesink
+            # Primary output sink (WITHOUT overlay — overlay is shared upstream)
             if openhd_stream:
                 openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
                 openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 3917)
-                primary_branch = (
-                    f"{OVERLAY_PIPELINE(name='openhd_overlay')} ! " +
-                    _openhd_stream_pipeline(port=openhd_port, bitrate=openhd_bitrate)
-                )
+                primary_sink = _openhd_stream_pipeline(port=openhd_port, bitrate=openhd_bitrate)
             elif no_display:
-                primary_branch = f"fakesink sync={self.sync}"
+                primary_sink = f"fakesink sync={self.sync}"
             else:
-                primary_branch = DISPLAY_PIPELINE(
-                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                # Inline display pipeline without overlay (DISPLAY_PIPELINE has overlay built in)
+                primary_sink = (
+                    f"{QUEUE(name='hailo_display_videoconvert_q')} ! "
+                    f"videoconvert name=hailo_display_videoconvert n-threads=2 qos=false ! "
+                    f"{QUEUE(name='hailo_display_q')} ! "
+                    f"fpsdisplaysink name=hailo_display video-sink={self.video_sink} "
+                    f"sync={self.sync} text-overlay={self.show_fps} signal-fps-measurements=true "
                 )
 
-            # Build extra branches beyond primary
-            extra_branches = []
-
+            # MJPEG branch for web UI (no overlay — browser draws interactive SVG)
+            mjpeg_branch = None
             if self._ui_enabled:
                 mjpeg_branch = (
                     f"videoconvert n-threads=2 ! "
@@ -779,35 +780,52 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     f"jpegenc quality=70 ! "
                     f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
                 )
-                extra_branches.append(
-                    f"t. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch}"
-                )
 
+            # Recording branch (no overlay — shares overlayed frames from t_post)
+            record_branch = None
             if self._record_enabled:
-                # Recording branch: pipe raw RGB frames into an appsink that
-                # forwards to an ffmpeg subprocess (see _on_record_sample /
-                # start_recording).  This avoids in-pipeline x264enc/mp4mux
-                # state manipulation and EOS signaling, which could block or
-                # produce 0-byte files.
                 record_branch = (
                     f"valve name=record_valve drop=true ! "
-                    f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
                     f"videoconvert n-threads=2 ! video/x-raw,format=RGB ! "
                     f"appsink name=record_appsink emit-signals=true drop=true "
                     f"sync=false async=false max-buffers=1"
                 )
-                extra_branches.append(
-                    f"t. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
-                )
 
-            if extra_branches:
+            # Assemble output pipeline with two-stage tee:
+            #   t_pre (before overlay) — MJPEG taps clean frames here
+            #   t_post (after overlay) — primary + recording tap overlayed frames
+            has_mjpeg = mjpeg_branch is not None
+            has_record = record_branch is not None
+
+            if has_mjpeg and has_record:
+                # Two-stage tee: t_pre feeds MJPEG (clean) and overlay path;
+                # t_post feeds primary + recording (overlayed)
                 output_pipeline = (
-                    f"tee name=t "
-                    f"t. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_branch} "
-                    + " ".join(extra_branches)
+                    f"tee name=t_pre "
+                    f"t_pre. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
+                    f"t_pre. ! {QUEUE(name='overlay_q', leaky='downstream')} ! "
+                    f"{OVERLAY_PIPELINE(name='hailo_overlay')} ! tee name=t_post "
+                    f"t_post. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_sink} "
+                    f"t_post. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
+                )
+            elif has_mjpeg:
+                # MJPEG only: t_pre feeds MJPEG (clean) and overlay → primary
+                output_pipeline = (
+                    f"tee name=t_pre "
+                    f"t_pre. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
+                    f"t_pre. ! {QUEUE(name='overlay_q', leaky='downstream')} ! "
+                    f"{OVERLAY_PIPELINE(name='hailo_overlay')} ! {primary_sink}"
+                )
+            elif has_record:
+                # Recording only: overlay → t_post feeds primary + recording
+                output_pipeline = (
+                    f"{OVERLAY_PIPELINE(name='hailo_overlay')} ! tee name=t_post "
+                    f"t_post. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_sink} "
+                    f"t_post. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
                 )
             else:
-                output_pipeline = primary_branch
+                # No extra branches: overlay → primary
+                output_pipeline = f"{OVERLAY_PIPELINE(name='hailo_overlay')} ! {primary_sink}"
 
             if skip_tiling:
                 # Direct pipeline: source → inference → callback → output

@@ -27,12 +27,11 @@ Audience: someone who wants to understand or tune the control loop, not someone 
                                                    (follow_api/controller.py)                                                              
                                                                     │                                                                      
                                                                     ▼                                                                      
-                                            ForwardSmoother.update()    (EMA + D feed-forward)                                             
-                                            alt-hold P loop             (if --fixed-altitude)                                              
+                                            alt-hold P loop             (always active)                                                    
                                                                     │                                                                      
                                                                     ▼                                                                      
                                                VelocityCommandAPI.send()  ──► drone.offboard.set_velocity_body()                           
-                                               (clamp + yaw EMA)            (mavsdk_drone.py)                                              
+                                               (clamp + per-axis EMA)       (mavsdk_drone.py)                                              
                                                                                                   │                                        
                                                                                                   ▼                                        
                                                                                     MAVLink SET_POSITION_TARGET_LOCAL_NED                  
@@ -100,7 +99,7 @@ yawspeed = clamp(yawspeed, ±max_yawspeed)
 
 - **P controller with a square-root response** — softer near zero error, still quick on large errors.  Standard practice in vision-servo yawing to avoid the step-step-step feeling of pure-P at low gain.
 - **Dead zone** (`dead_zone_deg = 2°`) suppresses jitter from noisy detections.
-- **EMA low-pass** (`yaw_alpha = 0.3`) in `VelocityCommandAPI` — filters the commanded yawspeed before it hits MAVSDK.
+- **EMA low-pass** (`yaw_alpha = 0.3`) in `VelocityCommandAPI.send()` — filters the commanded yawspeed before it hits MAVSDK. All four axes have per-axis EMA in `send()`: yaw (α=0.3), forward (α=0.07), right (α=0.3), down (α=0.2).
 
 ### 3.2 Altitude — single mode, always fixed
 
@@ -138,8 +137,8 @@ gain = kp_forward if height_delta > 0 else kp_backward
 raw = gain * height_delta
 forward = clamp(raw, -max_backward, max_forward)
 
-# 5. Output low-pass (ForwardSmoother): first-order EMA.
-#    alpha = 0.07 @ 10 Hz  →  τ ≈ 1.4 s, cutoff ≈ 0.11 Hz
+# 5. Output low-pass (VelocityCommandAPI per-axis EMA): first-order EMA.
+#    forward_alpha = 0.07 @ 10 Hz  →  τ ≈ 1.4 s, cutoff ≈ 0.11 Hz
 smoothed = alpha * forward + (1 - alpha) * prev_smoothed
 ```
 
@@ -323,8 +322,7 @@ Target ID persistence is provided by **ByteTracker** (standard MOT algorithm, `p
 | Dual-path (app-managed vs pilot-managed) lifecycle | ✅ Common pattern | Safer for real flight |
 | ByteTracker for ID persistence | ✅ Standard MOT | Widely used in vision + follow apps |
 | P controllers per axis | ✅ Standard | Yaw, forward, alt-hold are all plain P |
-| EMA low-pass on yaw command | ✅ Standard first-order filter | |
-| **EMA low-pass on forward command** (oscillation fix) | ✅ Standard first-order filter | α=0.07 @ 10 Hz puts the cutoff well below the pitch-coupling frequency |
+| Per-axis EMA low-pass in VelocityCommandAPI | ✅ Standard first-order filter | yaw α=0.3, forward α=0.07, right α=0.3, down α=0.2 — all applied in `send()` |
 | Dead zones around zero error | ✅ Standard | Suppresses sensor noise |
 | Clamps / max-speed saturation | ✅ Standard | |
 | Image-based visual servoing (center_x → yaw, bbox_height → distance) | ✅ Textbook IBVS | Classic Chaumette/Hutchinson formulation at a very simplified level |
@@ -345,7 +343,7 @@ If you want to review end-to-end, read in this order:
 1. **`follow_api/types.py`** — domain primitives (5 fields, 30 lines)
 2. **`follow_api/config.py::ControllerConfig`** — every knob in one place
 3. **`follow_api/controller.py::compute_velocity_command`** — the math
-4. **`drone_api/mavsdk_drone.py::VelocityCommandAPI.send`** — clamp + yaw EMA
+4. **`drone_api/mavsdk_drone.py::VelocityCommandAPI.send`** — clamp + per-axis EMA (yaw, forward, right, down)
 5. **`drone_api/mavsdk_drone.py::live_control_loop`** — the 10 Hz loop + alt hold
 6. **`drone_api/mavsdk_drone.py::run_live_drone`** — lifecycle, takeoff-landing, offboard-handover
 7. **`pipeline_adapter/hailo_drone_detection_manager.py::app_callback`** — target selection, IDLE fallback, ByteTracker

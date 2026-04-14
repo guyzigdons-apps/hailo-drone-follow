@@ -511,6 +511,54 @@ export default function App() {
                   />
                   <span className="control-value">{config.forward_alpha.toFixed(2)}</span>
                 </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">Right Smooth</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.smooth_right ? "toggle-on" : ""}`}
+                      disabled={config.yaw_only}
+                      onClick={() => onToggle("smooth_right")}
+                    >
+                      {config.smooth_right ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">Right Alpha</span>
+                  <input
+                    type="range"
+                    min="0.05"
+                    max="1.0"
+                    step="0.05"
+                    value={config.right_alpha}
+                    disabled={config.yaw_only}
+                    onChange={(e) => onSlider("right_alpha", e.target.value)}
+                  />
+                  <span className="control-value">{config.right_alpha.toFixed(2)}</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Down Smooth</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.smooth_down ? "toggle-on" : ""}`}
+                      onClick={() => onToggle("smooth_down")}
+                    >
+                      {config.smooth_down ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Down Alpha</span>
+                  <input
+                    type="range"
+                    min="0.05"
+                    max="1.0"
+                    step="0.05"
+                    value={config.down_alpha}
+                    onChange={(e) => onSlider("down_alpha", e.target.value)}
+                  />
+                  <span className="control-value">{config.down_alpha.toFixed(2)}</span>
+                </label>
               </div>
             </div>
           )}
