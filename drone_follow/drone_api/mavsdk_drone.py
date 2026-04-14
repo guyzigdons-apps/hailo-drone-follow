@@ -379,7 +379,6 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
 
     period = 1.0 / max(0.1, config.control_loop_hz)
     last_detection_time = time.monotonic()
-    last_valid_detection: Optional[VelocityCommand] = None
     _prev_target_alt = config.target_altitude
     _prev_cmd: Optional[VelocityCommand] = None
     _fwd_smoother = ForwardSmoother()
@@ -405,16 +404,15 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                     detection = None
                 else:
                     last_detection_time = now
-                    last_valid_detection = detection
 
-            # IDLE mode: ignore all detections and hold position indefinitely
-            if target_state is not None and target_state.is_paused():
+            # IDLE mode: ignore detections but don't block search spin
+            is_idle = target_state is not None and target_state.is_paused()
+            if is_idle:
                 detection = None
-                last_detection_time = now  # reset so search/land timers never advance
 
-            # Check search timeout
+            # Check search timeout (skip while idle — no auto-land without a target)
             time_since_detection = now - last_detection_time
-            if time_since_detection > config.search_timeout_s:
+            if not is_idle and time_since_detection > config.search_timeout_s:
                 _log(f"[drone] Search timeout ({config.search_timeout_s}s) exceeded - no person found. Landing...", level=logging.WARNING)
                 shutdown.set()
                 break
@@ -424,16 +422,26 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 _log(f"[drone] Target altitude changed: {_prev_target_alt:.1f}m -> {config.target_altitude:.1f}m", level=logging.INFO)
                 _prev_target_alt = config.target_altitude
 
+            # Pause search spin when people are visible so the operator can pick a target
+            search_active = (time_since_detection >= config.search_enter_delay_s)
+            if search_active and detection is None and shared_state.get_available_ids():
+                search_active = False
+
             cmd = compute_velocity_command(
                 detection, config,
-                last_detection=last_valid_detection,
-                search_active=(time_since_detection >= config.search_enter_delay_s),
+                last_detection=shared_state.get_last_valid_detection(),
+                search_active=search_active,
                 hold_velocity=_prev_cmd,
                 prev_yawspeed_deg_s=_prev_cmd.yawspeed_deg_s if _prev_cmd else 0.0,
             )
 
             if config.smooth_forward and not config.yaw_only:
-                smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
+                # Bypass smoothing for safety backward commands — react immediately
+                if cmd.forward_m_s <= -config.max_backward * 0.9:
+                    _fwd_smoother.reset()
+                    smoothed_fwd = cmd.forward_m_s
+                else:
+                    smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
                 cmd = VelocityCommand(smoothed_fwd, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
 
             # Fixed-altitude hold: proportional controller toward target_altitude
@@ -461,6 +469,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                     mode = "ORBIT"
                 elif detection is not None:
                     mode = "TRACK"
+                elif not search_active and shared_state.get_available_ids():
+                    mode = "DETECTED"
                 elif time_since_detection >= config.search_enter_delay_s:
                     mode = "SEARCH"
                 else:

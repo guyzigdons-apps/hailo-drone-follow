@@ -13,12 +13,15 @@ class SharedDetectionState:
     def __init__(self):
         self._lock = threading.Lock()
         self._detection: Optional[Detection] = None
+        self._last_valid_detection: Optional[Detection] = None
         self._frame_count: int = 0
         self._available_ids: set = set()
 
     def update(self, detection: Optional[Detection], available_ids: set = None):
         with self._lock:
             self._detection = detection
+            if detection is not None:
+                self._last_valid_detection = detection
             self._frame_count += 1
             if available_ids is not None:
                 self._available_ids = available_ids
@@ -26,6 +29,11 @@ class SharedDetectionState:
     def get_latest(self):
         with self._lock:
             return self._detection, self._frame_count
+
+    def get_last_valid_detection(self) -> Optional[Detection]:
+        """Return the most recent non-None detection (survives None updates)."""
+        with self._lock:
+            return self._last_valid_detection
 
     def get_available_ids(self):
         """Get the set of currently visible detection IDs."""
@@ -40,7 +48,7 @@ class FollowTargetState:
         self._lock = threading.Lock()
         self._target_id: Optional[int] = None
         self._last_seen: Optional[float] = None
-        self._paused: bool = True
+        self._paused: bool = False
         self._explicit_lock: bool = False
 
     def set_paused(self, paused: bool):

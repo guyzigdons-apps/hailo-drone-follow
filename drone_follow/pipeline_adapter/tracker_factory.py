@@ -17,7 +17,7 @@ DEFAULT_TRACKER = "byte"
 
 
 def create_tracker(name: str, *, track_thresh: float = 0.4,
-                   track_buffer: int = 90, match_thresh: float = 0.5,
+                   track_buffer: int = 90, match_thresh: float = 0.55,
                    frame_rate: int = 30) -> Tracker:
     """Instantiate a tracker by name.
 
@@ -50,3 +50,7 @@ def add_tracker_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--tracker", choices=TRACKER_CHOICES, default=DEFAULT_TRACKER,
         help=f"Tracker algorithm (default: {DEFAULT_TRACKER})")
+    group.add_argument(
+        "--sot", action="store_true", default=False,
+        help="Enable SOT/MOT hybrid tracking: use lightweight IOU-based single-object "
+             "tracking between full MOT refreshes (default: disabled)")

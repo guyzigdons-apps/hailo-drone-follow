@@ -177,9 +177,10 @@ def main():
             reid_match_threshold=reid_pre_args.reid_threshold,
         )
 
-    # Pre-parse --tracker to pass to create_app
+    # Pre-parse --tracker and --sot to pass to create_app
     tracker_pre = argparse.ArgumentParser(add_help=False)
     tracker_pre.add_argument("--tracker", default="byte")
+    tracker_pre.add_argument("--sot", action="store_true", default=False)
     tracker_pre_args, _ = tracker_pre.parse_known_args()
 
     from drone_follow.pipeline_adapter import create_app
@@ -190,7 +191,8 @@ def main():
                      record_enabled=ui_pre_args.record, record_dir=recordings_dir,
                      reid_manager=reid_manager,
                      tracker_name=tracker_pre_args.tracker,
-                     log_perf=ui_pre_args.log_perf)
+                     log_perf=ui_pre_args.log_perf,
+                     sot_enabled=tracker_pre_args.sot)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)

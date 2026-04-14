@@ -444,7 +444,8 @@ def _app_callback_inner(element, buffer, user_data):
     reid_manager = user_data.reid_manager
 
     use_sot = (
-        target_id is not None
+        user_data.sot_enabled
+        and target_id is not None
         and user_data.sot_active
         and user_data.sot_last_bbox is not None
         and user_data.sot_target_id == target_id
@@ -565,15 +566,25 @@ def _app_callback_inner(element, buffer, user_data):
                 _update_ui(ui_state, persons, person_to_id, None)
                 return
     else:
-        # No target — idle: hold position until operator picks a followee
+        # No target — auto-follow the largest visible person
         user_data.sot_active = False
         user_data.sot_last_bbox = None
         user_data.sot_frames = 0
-        user_data.shared_state.update(None, available_ids=available_ids)
-        _update_ui(ui_state, persons, person_to_id, None)
-        LOGGER.debug("[IDLE] No target set. Available: %s",
-                    sorted(available_ids) if available_ids else "none")
-        return
+        if person_by_id:
+            largest_tid, largest_person = max(
+                person_by_id.items(),
+                key=lambda item: item[1].get_bbox().height(),
+            )
+            best = largest_person
+            follow_mode = f"AUTO→ID {largest_tid}"
+            LOGGER.debug("[AUTO] Following largest person ID %s (h=%.2f). Available: %s",
+                        largest_tid, best.get_bbox().height(),
+                        sorted(available_ids) if available_ids else "none")
+        else:
+            user_data.shared_state.update(None, available_ids=available_ids)
+            _update_ui(ui_state, persons, person_to_id, None)
+            LOGGER.debug("[IDLE] No target set, no persons visible")
+            return
 
     bbox = best.get_bbox()
     cx = bbox.xmin() + bbox.width() / 2
@@ -713,7 +724,7 @@ def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, na
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None,
                record_enabled=False, record_dir=None, reid_manager=None,
-               tracker_name=None, log_perf=False):
+               tracker_name=None, log_perf=False, sot_enabled=False):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -747,13 +758,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     tracker=None, reid_manager=None, log_perf=False):
+                     tracker=None, reid_manager=None, log_perf=False,
+                     sot_enabled=False):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
             self.tracker = tracker
             self.reid_manager = reid_manager
+            self.sot_enabled = sot_enabled
             self.perf = _PerfTracker(
                 log_perf=log_perf,
                 tracker_metrics=tracker.metrics if tracker else None,
@@ -1224,7 +1237,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, tracker=tracker,
-        reid_manager=reid_manager, log_perf=log_perf,
+        reid_manager=reid_manager, log_perf=log_perf, sot_enabled=sot_enabled,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,

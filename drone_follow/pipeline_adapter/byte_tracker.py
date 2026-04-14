@@ -28,6 +28,9 @@ class KalmanFilter:
         self._std_weight_position = 1. / 5    # Was 1/20, now 4x higher uncertainty
         self._std_weight_velocity = 1. / 10   # Was 1/60, now 6x higher uncertainty
         self._std_weight_acceleration = 1. / 20  # Was 1/100, now 5x higher
+        # Extra noise for aspect ratio — shape changes abruptly during turns
+        self._std_aspect_ratio_pos = 3e-1     # was 1e-1
+        self._std_aspect_ratio_vel = 5e-2     # was 1e-2
 
     def initiate(self, measurement):
         mean_pos = measurement
@@ -38,11 +41,11 @@ class KalmanFilter:
         std = [
             2 * self._std_weight_position * measurement[3],
             2 * self._std_weight_position * measurement[3],
-            1e-1,
+            self._std_aspect_ratio_pos,
             2 * self._std_weight_position * measurement[3],
             10 * self._std_weight_velocity * measurement[3],
             10 * self._std_weight_velocity * measurement[3],
-            1e-2,
+            self._std_aspect_ratio_vel,
             10 * self._std_weight_velocity * measurement[3],
             10 * self._std_weight_acceleration * measurement[3],
             10 * self._std_weight_acceleration * measurement[3]
@@ -51,8 +54,8 @@ class KalmanFilter:
         return mean, covariance
 
     def predict(self, mean, covariance):
-        std_pos = [self._std_weight_position * mean[3]] * 2 + [1e-1] + [self._std_weight_position * mean[3]]
-        std_vel = [self._std_weight_velocity * mean[3]] * 2 + [1e-2] + [self._std_weight_velocity * mean[3]]
+        std_pos = [self._std_weight_position * mean[3]] * 2 + [self._std_aspect_ratio_pos] + [self._std_weight_position * mean[3]]
+        std_vel = [self._std_weight_velocity * mean[3]] * 2 + [self._std_aspect_ratio_vel] + [self._std_weight_velocity * mean[3]]
         std_acc = [self._std_weight_acceleration * mean[3]] * 2
         
         motion_cov = np.diag(np.square(np.r_[std_pos, std_vel, std_acc]))
@@ -64,7 +67,7 @@ class KalmanFilter:
         std = [
             self._std_weight_position * mean[3],
             self._std_weight_position * mean[3],
-            1e-1,
+            self._std_aspect_ratio_pos,
             self._std_weight_position * mean[3]
         ]
         innovation_cov = np.diag(np.square(std))
@@ -406,6 +409,7 @@ class ByteTracker:
                 refind_stracks.append(track)
 
         # Center-distance fallback: catch tracks lost due to shape change (e.g. 90° turn)
+        # High alpha = mostly center distance (stable during turns), low size weight
         u_track_tracked = [i for i in u_track if strack_pool[i].state == 2]
         if len(u_track_tracked) > 0 and len(u_detection) > 0:
             fallback_tracks = [strack_pool[i] for i in u_track_tracked]
@@ -413,9 +417,9 @@ class ByteTracker:
             cdist = combined_cost_batch(
                 [t.tlbr for t in fallback_tracks],
                 [d.tlbr for d in fallback_dets],
-                alpha=0.6,
+                alpha=0.85,
             )
-            matches_fb, u_track_fb, u_det_fb = linear_assignment(cdist, thresh=0.4)
+            matches_fb, u_track_fb, u_det_fb = linear_assignment(cdist, thresh=0.45)
 
             for itracked, idet in matches_fb:
                 track = fallback_tracks[itracked]
