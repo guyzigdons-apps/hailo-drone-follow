@@ -47,26 +47,42 @@ git submodule update --init --recursive
 echo -e "  PX4-Autopilot at: $PX4_DIR"
 echo -e "  Version: $(git describe --tags 2>/dev/null || echo 'unknown')"
 
-# Step 2: Apply camera patch to x500_vision model
+# Step 2: Apply patches
 echo ""
-echo -e "${GREEN}[2/3] Applying camera patch to x500_vision model...${NC}"
-PATCH_FILE="$SCRIPT_DIR/patches/x500_vision_camera.patch"
-if [ -f "$PATCH_FILE" ]; then
-    # Apply only if not already applied
-    if git apply --check "$PATCH_FILE" 2>/dev/null; then
-        git apply "$PATCH_FILE"
-        echo -e "  Camera sensor added to x500_vision model."
-    else
-        echo -e "${YELLOW}  Patch already applied or conflicts — skipping.${NC}"
+echo -e "${GREEN}[2/3] Applying patches...${NC}"
+
+# Helper: apply a patch if not already applied
+apply_patch() {
+    local patch_file="$1"
+    local description="$2"
+    if [ ! -f "$patch_file" ]; then
+        echo -e "${RED}  Error: Patch file not found at $patch_file${NC}"
+        exit 1
     fi
-else
-    echo -e "${RED}  Error: Patch file not found at $PATCH_FILE${NC}"
-    exit 1
-fi
+    if git apply --check "$patch_file" 2>/dev/null; then
+        git apply "$patch_file"
+        echo -e "  Applied: $description"
+    else
+        echo -e "${YELLOW}  Already applied or conflicts — skipping: $description${NC}"
+    fi
+}
+
+# Gazebo Harmonic (gz-transport13) compatibility for PX4 v1.14 (expects gz-transport12)
+apply_patch "$SCRIPT_DIR/patches/gz_transport13_compat.patch" "gz-transport13 compatibility"
+
+# Camera sensor on x500_vision model
+apply_patch "$SCRIPT_DIR/patches/x500_vision_camera.patch" "x500_vision camera sensor"
 
 # Step 3: Build PX4 SITL
 echo ""
 echo -e "${GREEN}[3/3] Building PX4 SITL firmware (this may take 10-20 minutes on first build)...${NC}"
+# PX4 v1.14 does not compile cleanly with GCC 12+/13+:
+#   - False-positive -Warray-bounds in the matrix template lib → downgrade to warning
+#   - Missing <cstdint> includes (GCC 13 no longer transitively provides uint8_t) → force-include
+# These flags are only read by CMake at initial configure, so if the build dir
+# already exists from before these flags were added, delete it first (or run
+# `rm -rf build/px4_sitl_default` manually).
+export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-Wno-error=array-bounds -include cstdint"
 make px4_sitl_default
 
 echo ""
