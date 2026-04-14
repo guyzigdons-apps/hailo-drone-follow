@@ -380,9 +380,15 @@ class Hailo15PipelineApp:
         nv12_resized = np.concatenate([y_resized.ravel(), uv_resized.ravel()])
         frame = np.ascontiguousarray(nv12_resized.reshape(input_shape))
 
-        # Create bindings and run — for NMS outputs, don't pre-set buffers
+        # Create bindings with pre-allocated output buffers
         bindings = self._configured_model.create_bindings()
         bindings.input().set_buffer(frame)
+
+        output_buffers = {}
+        for name in self._infer_model.output_names:
+            out_shape = self._infer_model.output(name).shape
+            output_buffers[name] = np.empty(out_shape, dtype=np.float32)
+            bindings.output(name).set_buffer(output_buffers[name])
 
         self._configured_model.run([bindings], 1000)
 
@@ -391,14 +397,16 @@ class Hailo15PipelineApp:
         for name in self._infer_model.output_names:
             output = self._infer_model.output(name)
             if output.is_nms:
-                nms_result = bindings.output(name).get_buffer()
+                # NMS output: parse the flat buffer as per-class detections
+                nms_data = output_buffers[name]
+                if self._frame_count <= 3:
+                    LOGGER.info("[h15] NMS raw output: shape=%s min=%.3f max=%.3f",
+                                nms_data.shape, nms_data.min(), nms_data.max())
                 person_dets = extract_person_detections(
-                    nms_result, confidence_threshold=DETECTION_CONFIDENCE_THRESHOLD)
+                    nms_data, confidence_threshold=DETECTION_CONFIDENCE_THRESHOLD)
                 all_detections.extend(person_dets)
             else:
-                raw = bindings.output(name).get_buffer()
-                LOGGER.debug("[h15] Non-NMS output %s, shape %s — skipping",
-                             name, raw.shape)
+                LOGGER.debug("[h15] Non-NMS output %s — skipping", name)
 
         # Update shared state with best detection
         if all_detections:
