@@ -40,7 +40,7 @@ class FollowTargetState:
         self._lock = threading.Lock()
         self._target_id: Optional[int] = None
         self._last_seen: Optional[float] = None
-        self._paused: bool = True
+        self._paused: bool = False
         self._explicit_lock: bool = False
 
     def set_paused(self, paused: bool):
@@ -62,6 +62,13 @@ class FollowTargetState:
         """Return True if the current target was explicitly locked by the operator."""
         with self._lock:
             return self._explicit_lock
+
+    def enter_auto_mode(self):
+        """Atomically reset to AUTO mode: no target, not paused, not locked."""
+        with self._lock:
+            self._target_id = None
+            self._paused = False
+            self._explicit_lock = False
 
     def set_target(self, detection_id: Optional[int]):
         """Set the target detection ID to follow."""

@@ -62,12 +62,12 @@ def _build_det_info(person, track_id=None):
     return det_info
 
 
-def _update_ui(ui_state, persons, person_to_id, following_id):
+def _update_ui(ui_state, persons, person_to_id, following_id, paused=False):
     """Push detection metadata to the web UI if enabled."""
     if ui_state is None:
         return
     all_dets = [_build_det_info(p, person_to_id.get(id(p))) for p in persons]
-    ui_state.update_detections(all_dets, following_id)
+    ui_state.update_detections(all_dets, following_id, paused=paused)
 
 
 def _run_tracker(byte_tracker, persons):
@@ -102,6 +102,17 @@ def _run_tracker(byte_tracker, persons):
     return available_ids, person_by_id, person_to_id
 
 
+def _find_biggest_person(person_by_id):
+    """Return (track_id, person) for the person with the largest bbox area, or (None, None)."""
+    best_id, best_person, best_area = None, None, -1.0
+    for tid, person in person_by_id.items():
+        bbox = person.get_bbox()
+        area = bbox.width() * bbox.height()
+        if area > best_area:
+            best_id, best_person, best_area = tid, person, area
+    return best_id, best_person
+
+
 # ---------------------------------------------------------------------------
 # Main app callback
 # ---------------------------------------------------------------------------
@@ -133,20 +144,23 @@ def _app_callback_inner(element, buffer, user_data):
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
         user_data.shared_state.update(None, available_ids=set())
         if target_state is not None and target_state.get_target() is not None:
-            # If ReID has a gallery, keep the target set so we keep searching
-            # when persons reappear. Otherwise give up immediately.
             reid_mgr = user_data.reid_manager
             if reid_mgr is not None and reid_mgr.has_gallery:
-                LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
-                             target_state.get_target())
+                # ReID gallery exists — check timeout
+                last_seen = target_state.get_last_seen()
+                if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
+                                user_data.reid_search_timeout)
+                    target_state.enter_auto_mode()
+                    reid_mgr.clear()
+                else:
+                    LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
+                                 target_state.get_target())
             else:
-                was_explicit = target_state.is_explicit_lock()
-                target_state.set_target(None)
-                if was_explicit:
-                    target_state.set_paused(True)
-                    target_state.set_explicit_lock(False)
-                    LOGGER.info("[IDLE FALLBACK] Explicit lock lost (no persons) — entering idle")
-        _update_ui(ui_state, [], {}, None)
+                target_state.enter_auto_mode()
+                LOGGER.info("[AUTO] Target lost (no persons, no ReID gallery) — returning to auto mode")
+        _paused = target_state.is_paused() if target_state else False
+        _update_ui(ui_state, [], {}, None, paused=_paused)
         if target_state is None or target_state.get_target() is None:
             LOGGER.debug("[SEARCH MODE] No person detected in frame")
         return
@@ -174,7 +188,7 @@ def _app_callback_inner(element, buffer, user_data):
             target_state.update_last_seen()
             follow_mode = f"ID {target_id}"
 
-            # ReID: build/update gallery while following
+            # ReID: build/update gallery while following (auto or locked)
             if reid_manager is not None:
                 reid_manager.on_target_selected(target_id)
                 if reid_manager.should_update():
@@ -184,48 +198,70 @@ def _app_callback_inner(element, buffer, user_data):
                             frame_bgr, best.get_bbox(),
                             user_data.video_width, user_data.video_height)
         else:
-            # Target lost by tracker — try ReID re-identification
+            # Target lost by tracker
             if reid_manager is not None and reid_manager.has_gallery and person_by_id:
-                frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
-                if frame_bgr is not None:
-                    new_tid = reid_manager.try_reidentify(
-                        frame_bgr, person_by_id,
-                        user_data.video_width, user_data.video_height)
-                    if new_tid is not None:
-                        # Re-identified — resume following with the new track ID
-                        target_state.set_target(new_tid)
-                        reid_manager.on_reidentified(new_tid)
-                        best = person_by_id[new_tid]
-                        target_state.update_last_seen()
-                        follow_mode = f"REID→ID {new_tid}"
-
-            if best is None:
-                # Target not recovered — hold position
-                user_data.shared_state.update(None, available_ids=available_ids)
-                if reid_manager is not None and reid_manager.has_gallery:
-                    # Keep target set so we retry ReID on the next frame
-                    _update_ui(ui_state, persons, person_to_id, None)
-                    return
-                # No ReID gallery — give up
-                was_explicit = target_state.is_explicit_lock()
-                if target_state.get_target() is not None:
-                    target_state.set_target(None)
-                if was_explicit:
-                    target_state.set_paused(True)
-                    target_state.set_explicit_lock(False)
-                    LOGGER.info("[IDLE FALLBACK] Explicit lock on ID %s lost — entering idle. Available: %s",
-                                target_id, sorted(available_ids) if available_ids else "none")
+                # ReID gallery exists — try re-identification
+                last_seen = target_state.get_last_seen()
+                if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
+                                user_data.reid_search_timeout)
+                    target_state.enter_auto_mode()
+                    reid_manager.clear()
+                    # Fall through to auto-select below
                 else:
-                    LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s",
-                                target_id, sorted(available_ids) if available_ids else "none")
-                _update_ui(ui_state, persons, person_to_id, None)
-                return
-    else:
-        # No target — idle: hold position until operator picks a followee
+                    frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
+                    if frame_bgr is not None:
+                        new_tid = reid_manager.try_reidentify(
+                            frame_bgr, person_by_id,
+                            user_data.video_width, user_data.video_height)
+                        if new_tid is not None:
+                            # Re-identified — resume following with the new track ID
+                            target_state.set_target(new_tid)
+                            reid_manager.on_reidentified(new_tid)
+                            best = person_by_id[new_tid]
+                            target_state.update_last_seen()
+                            follow_mode = f"REID→ID {new_tid}"
+
+                    if best is None:
+                        # ReID didn't match — hold position and retry next frame
+                        user_data.shared_state.update(None, available_ids=available_ids)
+                        _update_ui(ui_state, persons, person_to_id, None)
+                        return
+            else:
+                # No ReID gallery — return to auto mode
+                target_state.enter_auto_mode()
+                LOGGER.info("[AUTO] Target ID %s lost — returning to auto mode. Available: %s",
+                            target_id, sorted(available_ids) if available_ids else "none")
+
+    # Re-read target_id after possible enter_auto_mode() calls above
+    target_id = target_state.get_target() if target_state is not None else None
+
+    if target_id is None and best is None:
+        if target_state is not None and target_state.is_paused():
+            # True IDLE — hold position
+            user_data.shared_state.update(None, available_ids=available_ids)
+            _update_ui(ui_state, persons, person_to_id, None, paused=True)
+            LOGGER.debug("[IDLE] Paused. Available: %s",
+                        sorted(available_ids) if available_ids else "none")
+            return
+        # AUTO mode — select biggest person
+        biggest_id, biggest_person = _find_biggest_person(person_by_id)
+        if biggest_id is not None:
+            target_state.set_target(biggest_id)
+            target_state.update_last_seen()
+            best = biggest_person
+            follow_mode = f"AUTO→ID {biggest_id}"
+            LOGGER.debug("[AUTO] Selected biggest person ID %s. Available: %s",
+                        biggest_id, sorted(available_ids) if available_ids else "none")
+        else:
+            user_data.shared_state.update(None, available_ids=available_ids)
+            _update_ui(ui_state, persons, person_to_id, None)
+            return
+
+    if best is None:
+        # Safety fallback — should not normally reach here
         user_data.shared_state.update(None, available_ids=available_ids)
         _update_ui(ui_state, persons, person_to_id, None)
-        LOGGER.debug("[IDLE] No target set. Available: %s",
-                    sorted(available_ids) if available_ids else "none")
         return
 
     bbox = best.get_bbox()
@@ -365,7 +401,8 @@ def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, na
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None,
-               record_enabled=False, record_dir=None, reid_manager=None):
+               record_enabled=False, record_dir=None, reid_manager=None,
+               reid_search_timeout: float = 20.0):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -382,6 +419,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 If None, a bare pipeline parser is created (for backward compat).
         record_dir: Directory for recording output files (optional)
         reid_manager: ReIDManager for appearance-based re-identification (optional)
+        reid_search_timeout: Seconds to search via ReID before returning to auto mode (default: 20.0)
     """
     from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import (
         GStreamerTilingApp,
@@ -399,13 +437,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     byte_tracker=None, reid_manager=None):
+                     byte_tracker=None, reid_manager=None, reid_search_timeout=20.0):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
             self.byte_tracker = byte_tracker
             self.reid_manager = reid_manager
+            self.reid_search_timeout = reid_search_timeout
             self.perf = PerfTracker()
             # Set after app creation so callback can extract frames for ReID
             self.video_width = 0
@@ -860,7 +899,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
-        reid_manager=reid_manager,
+        reid_manager=reid_manager, reid_search_timeout=reid_search_timeout,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,

@@ -13,6 +13,7 @@ export default function App() {
   const [config, setConfig] = useState(null);
   const [recording, setRecording] = useState(false);
   const [perf, setPerf] = useState(null);
+  const [paused, setPaused] = useState(false);
   const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -28,6 +29,7 @@ export default function App() {
         setFollowingId(data.following_id);
         setVelocity(data.velocity || null);
         setPerf(data.perf || null);
+        setPaused(data.paused ?? false);
       } catch {
         // malformed event
       }
@@ -292,7 +294,7 @@ export default function App() {
         <span className="status-text">
           {followingId != null
             ? `Following: ID ${followingId}`
-            : "Auto (largest person)"}
+            : paused ? "Idle (paused)" : "Auto (largest person)"}
         </span>
         {velocity && (
           <span className="velocity-text">

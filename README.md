@@ -71,8 +71,8 @@ scripts/start_air.sh
 
 1. **Detection** — The Hailo NPU runs YOLOv8n on every frame to detect people.
 2. **Tracking** — ByteTracker assigns persistent IDs across frames.
-3. **Target selection** — The operator picks a person to follow via the web UI or REST API. The drone enters idle (hover) until a target is selected.
-4. **ReID recovery** — If the tracker loses the target (occlusion, fast turn), ReID compares appearance embeddings to re-identify the person under a new track ID.
+3. **Target selection** — By default the drone auto-follows the largest person in frame (**AUTO** mode). The operator can click a person in the web UI or use the REST API to lock onto a specific person (**LOCKED** mode).
+4. **ReID recovery** — If the tracker loses the target (occlusion, fast turn), ReID compares appearance embeddings to re-identify the person under a new track ID. Works in both auto and locked modes. If ReID cannot recover the target within the search timeout (`--reid-timeout`, default 20s), the app returns to auto mode.
 5. **Control** — A PID-style controller computes yaw, forward/backward, and altitude commands at 10 Hz and sends them to the flight controller via MAVSDK offboard mode.
 
 ## Key CLI Options
@@ -89,6 +89,7 @@ scripts/start_air.sh
 | `--target-altitude` | `3.0` | Target altitude in metres. Also used as takeoff height. |
 | `--yaw-only` / `--no-yaw-only` | on | Yaw only: no forward/backward movement. Use `--no-yaw-only` for full follow. |
 | `--no-reid` | off | Disable ReID re-identification |
+| `--reid-timeout` | `20.0` | Seconds to search via ReID before returning to auto mode |
 | `--no-display` | off | Headless mode (no display window) |
 | `--openhd-stream` | off | Send overlay video to OpenHD via UDP RTP instead of display |
 
@@ -101,7 +102,7 @@ Enable with `--ui` (served on port 5001). Provides live MJPEG video, detection o
 ### Status Bar
 
 Shows real-time telemetry:
-- **Following indicator** — Which person is being tracked (by ID), or idle if no target.
+- **Following indicator** — Current mode: "Auto (largest person)", "Following: ID X" (locked), or "Idle (paused)".
 - **Velocity readout** — Mode (TRACK / SEARCH / ORBIT) and commanded velocities.
 - **Performance** — FPS, latency, CPU%, memory, Hailo NN core utilization, and chip temperature.
 - **Record / Clear Target** buttons.
@@ -139,7 +140,7 @@ Always running on port 8080 (change with `--follow-server-port`).
 |---|---|
 | `GET /status` | Current state: `following_id`, `last_seen`, `available_ids` |
 | `POST /follow/<id>` | Follow person with tracking ID. Returns 404 if ID not in frame. |
-| `POST /follow/clear` | Clear target, enter idle (hover). Clears ReID gallery. |
+| `POST /follow/clear` | Clear target, return to auto mode (follow largest). Clears ReID gallery. |
 
 ```bash
 curl http://localhost:8080/status
@@ -147,17 +148,30 @@ curl -X POST http://localhost:8080/follow/3
 curl -X POST http://localhost:8080/follow/clear
 ```
 
+## Follow Modes
+
+| Mode | Description |
+|---|---|
+| **AUTO** (default) | Follows the largest person in frame. No operator input needed. If the person leaves, the next largest is selected. |
+| **LOCKED** | Operator clicks a person in the UI or uses `POST /follow/<id>`. ReID gallery is built for recovery. |
+| **IDLE** | Drone holds position, ignores all detections. Set via OpenHD ground station (`follow_id = -1`). |
+
+- Clicking "Clear Target" in the UI (or `POST /follow/clear`) returns to AUTO mode.
+- ReID galleries are built for both auto-selected and locked targets, so the drone can recover its target after temporary occlusion in either mode.
+
 ## ReID Re-identification
 
-When the tracker loses the followed person (occlusion, ID switch, fast movement), ReID uses appearance embeddings to find them again among visible detections.
+When the tracker loses a **locked** target (occlusion, ID switch, fast movement), ReID uses appearance embeddings to find them again among visible detections.
 
-- **Gallery** — While following, the app periodically extracts appearance embeddings from the target and stores up to 10 in a gallery.
+- **Gallery** — While following any target (auto or locked), the app periodically extracts appearance embeddings and stores up to 10 in a gallery.
 - **Recovery** — When the target is lost, all visible persons are compared against the gallery. The best match above the similarity threshold is re-identified as the target.
+- **Timeout** — If ReID cannot recover the target within the search timeout (default 20s, configurable via `--reid-timeout`), the app clears the gallery and returns to auto mode (follow largest person).
 - **Seamless** — The UI shows the original ID throughout; the track ID change is handled internally.
 
 Enabled by default. Disable with `--no-reid`. Tune with:
 - `--reid-model PATH` — HEF model path (default: `repvgg_a0_person_reid_512.hef`)
 - `--update-interval N` — Frames between gallery updates (default: 30)
+- `--reid-timeout SECONDS` — Seconds to search via ReID before returning to auto mode (default: 20)
 
 ## Simulation (Bundled PX4 SITL)
 
@@ -261,9 +275,10 @@ sim/
 
 **Data flow:**
 ```
-Camera -> GStreamer -> Hailo NPU (YOLOv8n) -> ByteTracker -> Target Selection
-  -> ReID (if target lost) -> SharedDetectionState -> Control Loop (10 Hz)
-  -> MAVSDK Offboard Velocity -> PX4 Flight Controller
+Camera -> GStreamer -> Hailo NPU (YOLOv8n) -> ByteTracker
+  -> Target Selection (auto: largest / locked: specific ID)
+  -> ReID (if locked target lost, --reid-timeout) -> SharedDetectionState
+  -> Control Loop (10 Hz) -> MAVSDK Offboard Velocity -> PX4 Flight Controller
 ```
 
 The `follow_api` package has zero external dependencies, making the controller logic testable without hardware.
