@@ -67,6 +67,13 @@ body {
   text-align: center;
 }
 
+.perf-text {
+  margin: 0 8px;
+  color: #a0a0a0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .clear-btn {
   padding: 6px 16px;
   background: #444;
@@ -300,6 +307,13 @@ body {
 
   .velocity-text {
     order: 1;
+    flex-basis: 100%;
+    margin: 0;
+    text-align: left;
+  }
+
+  .perf-text {
+    order: 2;
     flex-basis: 100%;
     margin: 0;
     text-align: left;

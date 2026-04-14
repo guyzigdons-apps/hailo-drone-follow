@@ -17,10 +17,12 @@ Pipeline options (--input, --input-codec, etc.) are passed through to the tiling
 import faulthandler
 faulthandler.enable()
 
+import os
+os.environ.setdefault("HAILO_MONITOR", "1")
+
 import argparse
 import asyncio
 import logging
-import os
 import signal
 import threading
 import time
@@ -28,10 +30,11 @@ from drone_follow.follow_api import ControllerConfig, SharedDetectionState
 from drone_follow.follow_api.state import FollowTargetState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
-from drone_follow.sim import WorldLoader
 from drone_follow.servers import FollowServer, OpenHDBridge
 
-LOGGER = logging.getLogger("drone_follow.app")
+LOGGER = logging.getLogger(__name__)
+
+_DEFAULT_REID_HEF = "/usr/local/hailo/resources/models/hailo8/repvgg_a0_person_reid_512.hef"
 
 
 def _configure_logging(verbosity: str) -> None:
@@ -69,6 +72,20 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
 
     group.add_argument("--no-display", action="store_true",
                        help="Disable display window (headless mode)")
+
+    # ReID re-identification
+    group.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF,
+                       help="Path to ReID HEF model for appearance-based re-identification "
+                            f"(default: {_DEFAULT_REID_HEF}). Use --no-reid to disable.")
+    group.add_argument("--no-reid", action="store_true",
+                       help="Disable ReID re-identification")
+    group.add_argument("--update-interval", type=int, default=30,
+                       help="Frames between ReID gallery embedding updates while following (default: 30)")
+    group.add_argument("--reid-threshold", type=float, default=0.7,
+                       help="Cosine similarity threshold for ReID match (0.0–1.0, default: 0.7)")
+    group.add_argument("--reid-timeout", type=float, default=20.0,
+                       help="Seconds to search for a lost locked target via ReID before returning "
+                            "to auto mode (default: 20.0)")
 
     # OpenHD integration
     group.add_argument("--openhd-stream", action="store_true",
@@ -151,12 +168,32 @@ def main():
     # Build the full parser from all domains, then pass to pipeline adapter
     parser = _build_parser()
 
+    # Pre-parse ReID args to initialize the manager before create_app
+    reid_pre = argparse.ArgumentParser(add_help=False)
+    reid_pre.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF)
+    reid_pre.add_argument("--no-reid", action="store_true")
+    reid_pre.add_argument("--update-interval", type=int, default=30)
+    reid_pre.add_argument("--reid-threshold", type=float, default=0.7)
+    reid_pre.add_argument("--reid-timeout", type=float, default=20.0)
+    reid_pre_args, _ = reid_pre.parse_known_args()
+
+    reid_manager = None
+    if not reid_pre_args.no_reid and reid_pre_args.reid_model:
+        from drone_follow.pipeline_adapter.reid_manager import ReIDManager
+        reid_manager = ReIDManager(
+            hef_path=reid_pre_args.reid_model,
+            update_interval=reid_pre_args.update_interval,
+            reid_match_threshold=reid_pre_args.reid_threshold,
+        )
+
     from drone_follow.pipeline_adapter import create_app
 
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
-                     record_enabled=record_branch_enabled, record_dir=recordings_dir)
+                     record_enabled=record_branch_enabled, record_dir=recordings_dir,
+                     reid_manager=reid_manager,
+                     reid_search_timeout=reid_pre_args.reid_timeout)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
@@ -172,7 +209,8 @@ def main():
         raise SystemExit(0)
 
     # Start follow server (always available)
-    follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
+    follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port,
+                                 reid_manager=reid_manager)
     follow_server.start()
 
     # Start OpenHD parameter bridge (allows QOpenHD to control follow params,
@@ -201,7 +239,7 @@ def main():
             else:
                 app.cleanup_recording_branch()
             app.loop.quit()
-        except Exception:
+        except (AttributeError, RuntimeError):
             pass
 
     def _eos_to_shutdown():
@@ -260,6 +298,8 @@ def main():
             app.cleanup_recording_branch()
         # Wait for drone thread to finish cleanly
         drone_thread.join(timeout=5.0)
+        if reid_manager is not None:
+            reid_manager.release()
         if web_server is not None:
             web_server.stop()
         openhd_bridge.stop()

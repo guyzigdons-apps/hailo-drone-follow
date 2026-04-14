@@ -260,5 +260,3 @@ class TestDownSmoothing:
         loop = asyncio.get_event_loop()
         r = loop.run_until_complete(api.send(VelocityCommand(0.0, 0.0, 1.0, 0.0)))
         assert r.down_m_s == pytest.approx(1.0)
-
-

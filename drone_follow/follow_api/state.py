@@ -63,6 +63,13 @@ class FollowTargetState:
         with self._lock:
             return self._explicit_lock
 
+    def enter_auto_mode(self):
+        """Atomically reset to AUTO mode: no target, not paused, not locked."""
+        with self._lock:
+            self._target_id = None
+            self._paused = False
+            self._explicit_lock = False
+
     def set_target(self, detection_id: Optional[int]):
         """Set the target detection ID to follow."""
         with self._lock:

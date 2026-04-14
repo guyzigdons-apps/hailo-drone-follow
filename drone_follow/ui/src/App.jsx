@@ -12,6 +12,8 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
   const [recording, setRecording] = useState(false);
+  const [perf, setPerf] = useState(null);
+  const [paused, setPaused] = useState(false);
   const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -26,6 +28,8 @@ export default function App() {
         setDetections(data.detections || []);
         setFollowingId(data.following_id);
         setVelocity(data.velocity || null);
+        setPerf(data.perf || null);
+        setPaused(data.paused ?? false);
       } catch {
         // malformed event
       }
@@ -290,7 +294,7 @@ export default function App() {
         <span className="status-text">
           {followingId != null
             ? `Following: ID ${followingId}`
-            : "Auto (largest person)"}
+            : paused ? "Idle (paused)" : "Auto (largest person)"}
         </span>
         {velocity && (
           <span className="velocity-text">
@@ -300,6 +304,15 @@ export default function App() {
               : ""}{" "}
             | Down {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
             {velocity.yawspeed_deg_s.toFixed(1)} deg/s
+          </span>
+        )}
+        {perf && (
+          <span className="perf-text">
+            {perf.fps} FPS | {perf.latency_ms} ms
+            | CPU {perf.cpu_percent}%
+            | Mem {perf.memory_mb} MB
+            {perf.hailo_util_percent > 0 ? ` | NN ${perf.hailo_util_percent}%` : ""}
+            {perf.hailo_temp_c > 0 ? ` | ${perf.hailo_temp_c}\u00b0C` : ""}
           </span>
         )}
         <button
@@ -677,14 +690,14 @@ export default function App() {
                 <g
                   key={det.id ?? `${det.bbox.x}-${det.bbox.y}`}
                   onClick={hasId ? () => handleFollow(det.id) : undefined}
-                  style={{ cursor: hasId ? "pointer" : "default" }}
+                  style={{ cursor: hasId ? "pointer" : "default", pointerEvents: "auto" }}
                 >
                   <rect
                     x={x}
                     y={y}
                     width={w}
                     height={h}
-                    fill="none"
+                    fill="transparent"
                     stroke={isFollowing ? "#00ff00" : "#ffffff"}
                     strokeWidth={isFollowing ? 3 : 2}
                     strokeOpacity={0.9}

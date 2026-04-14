@@ -33,7 +33,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
-LOGGER = logging.getLogger("drone_follow.web_server")
+LOGGER = logging.getLogger(__name__)
 
 
 class SharedUIState:
@@ -43,6 +43,7 @@ class SharedUIState:
         self._lock = threading.Lock()
         self._detections: list = []
         self._following_id: Optional[int] = None
+        self._paused: bool = False
         self._frame_jpeg: Optional[bytes] = None
         self._frame_snapshot: Optional[dict] = None
         self._velocity = {
@@ -52,15 +53,18 @@ class SharedUIState:
             "mode": "IDLE",
             "ts": time.time(),
         }
+        self._perf = {}
         self._frame_event = threading.Event()
         self._logs: deque = deque(maxlen=200)
         self._log_counter: int = 0
 
-    def update_detections(self, detections: list, following_id: Optional[int] = None):
+    def update_detections(self, detections: list, following_id: Optional[int] = None,
+                          paused: bool = False):
         """Called from app_callback with detection metadata."""
         with self._lock:
             self._detections = detections
             self._following_id = following_id
+            self._paused = paused
 
     def update_frame(self, jpeg_bytes: bytes):
         """Called from appsink callback with pre-encoded JPEG bytes.
@@ -73,7 +77,9 @@ class SharedUIState:
             self._frame_snapshot = {
                 "detections": list(self._detections),
                 "following_id": self._following_id,
+                "paused": self._paused,
                 "velocity": dict(self._velocity),
+                "perf": dict(self._perf),
             }
         self._frame_event.set()
         self._frame_event.clear()
@@ -84,8 +90,15 @@ class SharedUIState:
             return {
                 "detections": list(self._detections),
                 "following_id": self._following_id,
+                "paused": self._paused,
                 "velocity": dict(self._velocity),
+                "perf": dict(self._perf),
             }
+
+    def update_perf(self, perf: dict):
+        """Called from pipeline callback with performance metrics."""
+        with self._lock:
+            self._perf = perf
 
     def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str, right_m_s: float = 0.0):
         """Called from control loop to expose current command velocity in UI."""

@@ -35,6 +35,28 @@ The Cube Orange+ connects via USB as `/dev/ttyACM0`. Using `--serial` builds the
 ### UDP (simulation)
 Without `--serial`, defaults to `udpin://0.0.0.0:14540` for SITL/Gazebo.
 
+## Follow Modes
+
+The app has three follow modes:
+
+- **AUTO** (default) — Automatically follows the largest person in frame. No operator input needed. The drone starts in this mode on boot. ReID gallery is built so the target can be recovered after temporary occlusion.
+- **LOCKED** — Operator explicitly clicks a person in the UI to lock onto them. ReID gallery is also built for recovery.
+- **IDLE** — Drone holds position, ignores all detections. Entered via OpenHD ground station (`follow_id = -1`).
+
+### Auto mode behavior
+- Selects the person with the largest bounding box area each frame
+- ReID gallery is built while following, so the target can be recovered after occlusion
+- If ReID search times out, the gallery is cleared and the next biggest person is selected
+- Clicking "Clear Target" in the UI returns to auto mode
+
+### ReID search timeout
+When a locked target is lost, ReID searches for a configurable duration (`--reid-timeout`, default 20s). If the target is not re-identified within that time, the app returns to auto mode (not idle). The timeout applies both when other persons are visible (ReID compares embeddings each frame) and when no persons are visible (holding position).
+
+### OpenHD follow_id semantics
+- `-1` = IDLE (drone holds position)
+- `0` = AUTO (follow largest person)
+- `N` = LOCKED to person N
+
 ## PX4 Offboard Mode
 
 ### How it works in this app
