@@ -11,7 +11,7 @@ For complete setup and deployment instructions with OpenHD, see [SETUP_GUIDE.md]
 ### Prerequisites
 
 - **Ubuntu 22.04+** with Python 3.10+
-- **Hailo device** (Hailo-8 or Hailo-8L) — PCIe card or M.2 module
+- **Hailo device** (Hailo-8, Hailo-8L, or Hailo-10H) — PCIe card or M.2 module
 - **HailoRT driver** — must be installed before running the installer
 - **Node.js / npm** (optional, for the web UI)
 - For **simulation**: Gazebo Garden, `python3-gz-transport13`, `python3-gz-msgs10`
