@@ -73,9 +73,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 
 ## Virtual Environment
 
-This repo owns its own venv at `./venv/` (created with `--system-site-packages` so apt-installed Hailo bindings are visible). Both `hailo-apps` and `drone-follow` are installed into it as editable packages. Always `source setup_env.sh` before running — it activates `./venv/`, exports `PYTHONPATH`, runs the RPi kernel-compatibility check, and loads `/usr/local/hailo/resources/.env`.
-
-The hailo-apps system installer (`sudo hailo-apps/install.sh`) is a separate one-time bootstrap that compiles the C++ postprocess modules and downloads HEFs — it does **not** own the Python venv.
+This repo owns its own venv at `./venv/` (created with `--system-site-packages` so apt-installed Hailo bindings are visible). `drone-follow` is installed as an editable package, and `hailo-apps` is pip-installed from GitHub (the `[hailo]` extra in `pyproject.toml`). Always `source setup_env.sh` before running — it activates `./venv/`, exports `PYTHONPATH`, runs the RPi kernel-compatibility check, and loads `/usr/local/hailo/resources/.env`.
 
 ## Development Machine Setup (x86_64)
 
@@ -99,20 +97,15 @@ sudo dpkg -i hailort_<version>_<arch>.deb
 sudo reboot
 hailortcli fw-control identify  # verify device detected
 
-# 2. One-time hailo-apps system bootstrap (C++ postprocess + HEFs + /usr/local/hailo/resources):
-git clone -b dev https://github.com/hailocs/hailo-apps-internal.git hailo-apps
-sudo hailo-apps/install.sh
-
-# 3. Build the repo-owned venv and editable-install hailo-apps + drone-follow:
+# 2. Build the repo-owned venv with drone-follow + hailo-apps from GitHub:
 ./install.sh
 
 # Options:
-#   --hailo-apps-dir DIR   Use an existing hailo-apps checkout (default: ./hailo-apps)
 #   --skip-ui              Skip UI npm install and build
 #   --skip-python          Skip Python dependency installation
 ```
 
-Step 2 is one-time and runs as `sudo` because it touches `/usr/local/`. Step 3 owns only `./venv/` (no sudo) and is the only step you need to re-run after pulling drone-follow updates.
+`install.sh` creates `./venv/` (no sudo), installs `drone-follow` as editable, and pulls `hailo-apps` from GitHub via the `[hailo]` extra. Re-run after pulling drone-follow updates.
 
 Verify: `source setup_env.sh && drone-follow --help`
 

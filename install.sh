@@ -2,21 +2,13 @@
 set -e
 
 # Install script for drone-follow
-# Installs: hailo-apps Python package (editable), drone-follow Python package
-# (editable), and the UI.
+# Installs: drone-follow Python package (editable) with hailo-apps pulled from
+# GitHub, plus the web UI.
 #
 # Prerequisites (one-time system setup, NOT done by this script):
 #   - HailoRT and TAPPAS .deb + .whl packages installed (Hailo Developer Zone)
-#   - /usr/local/hailo/resources/ populated with HEF models
-#   - hailo-apps C++ postprocess modules compiled
-# On a fresh machine, run `sudo hailo-apps/install.sh` ONCE to do all of the
-# above; afterwards only this script is needed to (re)build the Python env
-# and UI.
-#
-# Expects hailo-apps to be cloned inside the project directory (./hailo-apps).
-# Override with --hailo-apps-dir or HAILO_APPS_DIR env var. If the checkout
-# doesn't exist, it will be cloned (required since hailo-apps is an editable
-# Python dep of this project).
+#   - /usr/local/hailo/resources/ populated with HEF models and C++ postprocess
+#     modules (install via hailo-apps system installer or TAPPAS deb)
 #
 # Usage: ./install.sh [OPTIONS]
 
@@ -31,7 +23,6 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Defaults
-HAILO_APPS_DIR="${HAILO_APPS_DIR:-$SCRIPT_DIR/hailo-apps}"
 SKIP_UI=false
 SKIP_PYTHON=false
 
@@ -39,19 +30,13 @@ usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --hailo-apps-dir DIR   Path to hailo-apps checkout (default: ./hailo-apps)"
     echo "  --skip-ui              Skip UI npm install and build"
     echo "  --skip-python          Skip Python venv + dependency installation"
     echo "  --help, -h             Show this help message"
-    echo ""
-    echo "Environment variables:"
-    echo "  HAILO_APPS_DIR         Same as --hailo-apps-dir"
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --hailo-apps-dir)   HAILO_APPS_DIR="$2"; shift 2 ;;
-        --hailo-apps-dir=*) HAILO_APPS_DIR="${1#*=}"; shift ;;
         --skip-ui)          SKIP_UI=true; shift ;;
         --skip-python)      SKIP_PYTHON=true; shift ;;
         --help|-h)          usage; exit 0 ;;
@@ -64,23 +49,11 @@ echo "  drone-follow installer"
 echo "========================================="
 echo ""
 
-# ─── Step 1: Ensure hailo-apps checkout exists ───────────────────────
-# hailo-apps is installed as an editable Python dep in Step 2, so the checkout
-# must exist regardless of whether its system installer has been run.
-echo -e "${GREEN}[1/3] Resolving hailo-apps checkout...${NC}"
-if [ ! -d "$HAILO_APPS_DIR" ]; then
-    echo -e "${YELLOW}  hailo-apps not found at: $HAILO_APPS_DIR${NC}"
-    echo -e "  Cloning hailo-apps from github (branch: dev)..."
-    git clone -b dev https://github.com/hailocs/hailo-apps-internal.git "$HAILO_APPS_DIR"
-fi
-HAILO_APPS_DIR="$(cd "$HAILO_APPS_DIR" && pwd)"
-echo -e "  Using hailo-apps at: ${CYAN}$HAILO_APPS_DIR${NC}"
-
-# ─── Step 2: Build repo-owned venv and install Python deps ───────────
+# ─── Step 1: Build repo-owned venv and install Python deps ───────────
 REPO_VENV_DIR="$SCRIPT_DIR/venv"
 
 if ! $SKIP_PYTHON; then
-    echo -e "${GREEN}[2/3] Setting up repo Python venv at ${CYAN}$REPO_VENV_DIR${NC}..."
+    echo -e "${GREEN}[1/2] Setting up repo Python venv at ${CYAN}$REPO_VENV_DIR${NC}..."
 
     if [ ! -d "$REPO_VENV_DIR" ]; then
         python3 -m venv --system-site-packages "$REPO_VENV_DIR"
@@ -94,20 +67,17 @@ if ! $SKIP_PYTHON; then
 
     pip install --upgrade pip setuptools wheel
 
-    echo -e "  Installing hailo-apps (editable)..."
-    pip install -e "$HAILO_APPS_DIR"
-
-    echo -e "  Installing drone-follow (editable)..."
-    pip install -e "$SCRIPT_DIR"
+    echo -e "  Installing drone-follow + hailo-apps from GitHub..."
+    pip install -e ".[hailo]"
 
     echo -e "${GREEN}  drone-follow + hailo-apps installed into $REPO_VENV_DIR.${NC}"
 else
-    echo -e "${YELLOW}[2/3] Skipping Python dependencies (--skip-python)${NC}"
+    echo -e "${YELLOW}[1/2] Skipping Python dependencies (--skip-python)${NC}"
 fi
 
-# ─── Step 3: Install and build UI ────────────────────────────────────
+# ─── Step 2: Install and build UI ────────────────────────────────────
 if ! $SKIP_UI; then
-    echo -e "${GREEN}[3/3] Installing and building UI...${NC}"
+    echo -e "${GREEN}[2/2] Installing and building UI...${NC}"
 
     UI_DIR="$SCRIPT_DIR/drone_follow/ui"
     if [ ! -f "$UI_DIR/package.json" ]; then
@@ -128,7 +98,7 @@ if ! $SKIP_UI; then
         echo -e "${GREEN}  UI built successfully.${NC}"
     fi
 else
-    echo -e "${YELLOW}[3/3] Skipping UI installation (--skip-ui)${NC}"
+    echo -e "${YELLOW}[2/2] Skipping UI installation (--skip-ui)${NC}"
 fi
 
 # ─── Regenerate setup_env.sh ─────────────────────────────────────────
