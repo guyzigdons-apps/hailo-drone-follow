@@ -44,6 +44,9 @@ def add_drone_args(parser) -> None:
                        help="Baud rate for serial connection (default: 57600)")
     group.add_argument("--takeoff-landing", action="store_true",
                        help="Enable auto arm/takeoff/land (default: off — drone must already be airborne)")
+    group.add_argument("--auto-offboard", action="store_true",
+                       help="Start offboard control immediately without waiting for GCS mode switch "
+                            "(for bench testing with ArduCopter)")
     group.add_argument("--target-altitude", type=float, default=3.0,
                        help="Target altitude in metres (default: 3.0). Also used as takeoff height with --takeoff-landing.")
     group.add_argument("--mission-duration", type=float, default=300.0)
@@ -291,6 +294,18 @@ def _ignore_sigint_during_landing(ignore: bool) -> None:
 # Live Control Loop
 # ---------------------------------------------------------------------------
 
+async def _setup_telemetry_rates(drone) -> None:
+    """Request telemetry at reasonable rates. Needed for ArduCopter which may not auto-stream."""
+    try:
+        await drone.telemetry.set_rate_position(2.0)
+    except Exception as e:
+        LOGGER.debug("[telem] set_rate_position failed: %s", e)
+    try:
+        await drone.telemetry.set_rate_velocity_ned(5.0)
+    except Exception as e:
+        LOGGER.debug("[telem] set_rate_velocity_ned failed: %s", e)
+
+
 async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asyncio.Event) -> None:
     """Background task: stream position and store relative altitude (m) in altitude_cache['m']."""
     try:
@@ -298,8 +313,8 @@ async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asynci
             if shutdown.is_set():
                 return
             altitude_cache["m"] = position.relative_altitude_m
-    except Exception:
-        pass
+    except Exception as e:
+        LOGGER.warning("[telem] Altitude stream ended: %s", e)
 
 
 async def _telemetry_velocity_task(drone, telemetry_cache: dict, shutdown: asyncio.Event) -> None:
@@ -311,8 +326,8 @@ async def _telemetry_velocity_task(drone, telemetry_cache: dict, shutdown: async
             telemetry_cache["vel_north"] = vel.north_m_s
             telemetry_cache["vel_east"] = vel.east_m_s
             telemetry_cache["vel_down"] = vel.down_m_s
-    except Exception:
-        pass
+    except Exception as e:
+        LOGGER.warning("[telem] Velocity stream ended: %s", e)
 
 
 async def _telemetry_position_task(drone, telemetry_cache: dict, shutdown: asyncio.Event) -> None:
@@ -325,8 +340,8 @@ async def _telemetry_position_task(drone, telemetry_cache: dict, shutdown: async
             telemetry_cache["lon"] = pos.longitude_deg
             telemetry_cache["abs_alt"] = pos.absolute_altitude_m
             telemetry_cache["rel_alt"] = pos.relative_altitude_m
-    except Exception:
-        pass
+    except Exception as e:
+        LOGGER.warning("[telem] Position stream ended: %s", e)
 
 
 async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict,
@@ -334,6 +349,7 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
     """Background task: log drone telemetry at 1 Hz for flight debugging."""
     telem_logger = logging.getLogger("drone_follow.telemetry")
     interval = 1.0
+    _no_data_count = 0
     while not shutdown.is_set():
         await asyncio.sleep(interval)
         alt = altitude_cache.get("m")
@@ -342,7 +358,12 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
         ve = telemetry_cache.get("vel_east")
         vd = telemetry_cache.get("vel_down")
         if alt is None and vn is None:
+            _no_data_count += 1
+            if _no_data_count <= 5 or _no_data_count % 10 == 0:
+                telem_logger.warning("[TELEM] No telemetry data yet (alt=%s vel=%s) — %ds",
+                                     alt, vn, _no_data_count)
             continue
+        _no_data_count = 0
         parts = []
         if rel_alt is not None:
             parts.append(f"alt={rel_alt:.2f}m")
@@ -636,6 +657,8 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                 f"No drone detected on {args.connection} after {_CONNECTION_TIMEOUT_S}s. "
                 "Pipeline continues without drone control.")
 
+        await _setup_telemetry_rates(drone)
+
         armed = False
         vel_api = VelocityCommandAPI(drone, config)
         alt_task = None
@@ -702,6 +725,31 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     await _cancel_task(t)
                 if shutdown.is_set():
                     LOGGER.warning("[drone] Shutdown requested, landing...")
+            elif getattr(args, 'auto_offboard', False):
+                # Auto-offboard: start control loop immediately without waiting
+                # for GCS mode switch. For bench testing (especially ArduCopter
+                # where GUIDED mode may not map to MAVSDK's OFFBOARD).
+                LOGGER.info("[drone] Auto-offboard: starting control loop immediately")
+                altitude_cache: dict = {}
+                alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
+                await _cancel_task(telem_tasks[-1])
+                telem_tasks[-1] = asyncio.create_task(
+                    _telemetry_log_task(drone, altitude_cache, telemetry_cache, shutdown, ui_state=ui_state))
+
+                try:
+                    await _start_offboard(drone, vel_api, shutdown)
+                except Exception as e:
+                    LOGGER.warning("[drone] Offboard start failed (%s) — running control loop anyway", e)
+
+                if not shutdown.is_set():
+                    control_task = asyncio.create_task(
+                        live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
+                                          ui_state=ui_state, telemetry_cache=telemetry_cache))
+                    await asyncio.wait(
+                        [asyncio.create_task(shutdown.wait()),
+                         asyncio.create_task(asyncio.sleep(args.mission_duration))],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
             else:
                 # Default (no --takeoff-landing): stream zero setpoints so PX4
                 # sees an offboard signal, then wait for the pilot to switch to
