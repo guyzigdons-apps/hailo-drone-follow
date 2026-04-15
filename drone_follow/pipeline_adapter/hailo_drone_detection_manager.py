@@ -16,12 +16,15 @@ import hailo
 import numpy as np
 
 from drone_follow.follow_api.types import Detection
+from drone_follow.perf_tracker import PerfTracker
 
 from .byte_tracker import ByteTracker
+from .reid_manager import get_frame_bgr
 
-LOGGER = logging.getLogger("drone_follow.app")
+LOGGER = logging.getLogger(__name__)
 
 _EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
+
 
 _gst_module = None
 
@@ -59,12 +62,12 @@ def _build_det_info(person, track_id=None):
     return det_info
 
 
-def _update_ui(ui_state, persons, person_to_id, following_id):
+def _update_ui(ui_state, persons, person_to_id, following_id, paused=False):
     """Push detection metadata to the web UI if enabled."""
     if ui_state is None:
         return
     all_dets = [_build_det_info(p, person_to_id.get(id(p))) for p in persons]
-    ui_state.update_detections(all_dets, following_id)
+    ui_state.update_detections(all_dets, following_id, paused=paused)
 
 
 def _run_tracker(byte_tracker, persons):
@@ -99,18 +102,37 @@ def _run_tracker(byte_tracker, persons):
     return available_ids, person_by_id, person_to_id
 
 
+def _find_biggest_person(person_by_id):
+    """Return (track_id, person) for the person with the largest bbox area, or (None, None)."""
+    best_id, best_person, best_area = None, None, -1.0
+    for tid, person in person_by_id.items():
+        bbox = person.get_bbox()
+        area = bbox.width() * bbox.height()
+        if area > best_area:
+            best_id, best_person, best_area = tid, person, area
+    return best_id, best_person
+
+
 # ---------------------------------------------------------------------------
 # Main app callback
 # ---------------------------------------------------------------------------
 
 def app_callback(element, buffer, user_data):
-    """Tiling pipeline callback: pick largest person (or specific tracked person), update shared state.
+    """Tiling pipeline callback: follow operator-selected person, update shared state.
 
     ByteTracker runs synchronously in the callback:
     1. Convert detections to Nx5 array, run tracker.update() synchronously
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
     """
+    _perf_t0 = user_data.perf.frame_start()
+    try:
+        _app_callback_inner(element, buffer, user_data)
+    finally:
+        user_data.perf.frame_end(_perf_t0, user_data.ui_state)
+
+
+def _app_callback_inner(element, buffer, user_data):
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     persons = [d for d in detections if d.get_label() == "person"]
@@ -122,10 +144,25 @@ def app_callback(element, buffer, user_data):
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
         user_data.shared_state.update(None, available_ids=set())
         if target_state is not None and target_state.get_target() is not None:
-            target_state.set_target(None)
-        _update_ui(ui_state, [], {}, target_state.get_target() if target_state else None)
+            reid_mgr = user_data.reid_manager
+            if reid_mgr is not None and reid_mgr.has_gallery:
+                # ReID gallery exists — check timeout
+                last_seen = target_state.get_last_seen()
+                if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
+                                user_data.reid_search_timeout)
+                    target_state.enter_auto_mode()
+                    reid_mgr.clear()
+                else:
+                    LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
+                                 target_state.get_target())
+            else:
+                target_state.enter_auto_mode()
+                LOGGER.info("[AUTO] Target lost (no persons, no ReID gallery) — returning to auto mode")
+        _paused = target_state.is_paused() if target_state else False
+        _update_ui(ui_state, [], {}, None, paused=_paused)
         if target_state is None or target_state.get_target() is None:
-            LOGGER.debug("[SEARCH MODE] No person detected in frame - follow state cleared")
+            LOGGER.debug("[SEARCH MODE] No person detected in frame")
         return
 
     available_ids, person_by_id, person_to_id = _run_tracker(
@@ -139,6 +176,7 @@ def app_callback(element, buffer, user_data):
 
     # --- Target selection ---
     target_id = target_state.get_target() if target_state is not None else None
+    reid_manager = user_data.reid_manager
 
     best = None
     follow_mode = ""
@@ -146,27 +184,85 @@ def app_callback(element, buffer, user_data):
         best = person_by_id.get(target_id)
 
         if best is not None:
+            # Successfully tracking target
             target_state.update_last_seen()
             follow_mode = f"ID {target_id}"
+
+            # ReID: build/update gallery while following (auto or locked)
+            if reid_manager is not None:
+                reid_manager.on_target_selected(target_id)
+                if reid_manager.should_update():
+                    frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
+                    if frame_bgr is not None:
+                        reid_manager.update_gallery(
+                            frame_bgr, best.get_bbox(),
+                            user_data.video_width, user_data.video_height)
+        else:
+            # Target lost by tracker
+            if reid_manager is not None and reid_manager.has_gallery and person_by_id:
+                # ReID gallery exists — try re-identification
+                last_seen = target_state.get_last_seen()
+                if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
+                                user_data.reid_search_timeout)
+                    target_state.enter_auto_mode()
+                    reid_manager.clear()
+                    # Fall through to auto-select below
+                else:
+                    frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
+                    if frame_bgr is not None:
+                        new_tid = reid_manager.try_reidentify(
+                            frame_bgr, person_by_id,
+                            user_data.video_width, user_data.video_height)
+                        if new_tid is not None:
+                            # Re-identified — resume following with the new track ID
+                            target_state.set_target(new_tid)
+                            reid_manager.on_reidentified(new_tid)
+                            best = person_by_id[new_tid]
+                            target_state.update_last_seen()
+                            follow_mode = f"REID→ID {new_tid}"
+
+                    if best is None:
+                        # ReID didn't match — hold position and retry next frame
+                        user_data.shared_state.update(None, available_ids=available_ids)
+                        _update_ui(ui_state, persons, person_to_id, None)
+                        return
+            else:
+                # No ReID gallery — return to auto mode
+                target_state.enter_auto_mode()
+                LOGGER.info("[AUTO] Target ID %s lost — returning to auto mode. Available: %s",
+                            target_id, sorted(available_ids) if available_ids else "none")
+
+    # Re-read target_id after possible enter_auto_mode() calls above
+    target_id = target_state.get_target() if target_state is not None else None
+
+    if target_id is None and best is None:
+        if target_state is not None and target_state.is_paused():
+            # True IDLE — hold position
+            user_data.shared_state.update(None, available_ids=available_ids)
+            _update_ui(ui_state, persons, person_to_id, None, paused=True)
+            LOGGER.debug("[IDLE] Paused. Available: %s",
+                        sorted(available_ids) if available_ids else "none")
+            return
+        # AUTO mode — select biggest person
+        biggest_id, biggest_person = _find_biggest_person(person_by_id)
+        if biggest_id is not None:
+            target_state.set_target(biggest_id)
+            target_state.update_last_seen()
+            best = biggest_person
+            follow_mode = f"AUTO→ID {biggest_id}"
+            LOGGER.debug("[AUTO] Selected biggest person ID %s. Available: %s",
+                        biggest_id, sorted(available_ids) if available_ids else "none")
         else:
             user_data.shared_state.update(None, available_ids=available_ids)
-            if target_state.get_target() is not None:
-                target_state.set_target(None)
-            _update_ui(ui_state, persons, person_to_id, target_state.get_target())
-            if target_state.get_target() is None:
-                LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
-                            target_id, sorted(available_ids) if available_ids else "none")
+            _update_ui(ui_state, persons, person_to_id, None)
             return
-    else:
-        best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
-        best_tid = person_to_id.get(id(best))
-        if best_tid is not None and target_state is not None:
-            target_state.set_target(best_tid)
-            follow_mode = f"locked ID {best_tid}"
-        elif best_tid is not None:
-            follow_mode = f"largest (ID {best_tid})"
-        else:
-            follow_mode = "largest (no tracking)"
+
+    if best is None:
+        # Safety fallback — should not normally reach here
+        user_data.shared_state.update(None, available_ids=available_ids)
+        _update_ui(ui_state, persons, person_to_id, None)
+        return
 
     bbox = best.get_bbox()
     cx = bbox.xmin() + bbox.width() / 2
@@ -180,12 +276,122 @@ def app_callback(element, buffer, user_data):
         timestamp=time.monotonic(),
     ), available_ids=available_ids)
 
-    _update_ui(ui_state, persons, person_to_id,
-               target_state.get_target() if target_state else None)
+    # Use the original ID for the UI so the operator sees a stable ID
+    # even after ReID re-identifies the person with a new tracker ID.
+    ui_following_id = target_state.get_target() if target_state else None
+    ui_person_to_id = person_to_id
+    if reid_manager is not None and reid_manager.original_id is not None:
+        orig = reid_manager.original_id
+        cur = target_state.get_target() if target_state else None
+        if orig != cur and cur is not None:
+            # Remap the followed detection's ID to the original so the
+            # green highlight and "Following: ID X" both use it.
+            ui_following_id = orig
+            ui_person_to_id = dict(person_to_id)
+            ui_person_to_id[id(best)] = orig
+    _update_ui(ui_state, persons, ui_person_to_id, ui_following_id)
 
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
     LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
                 follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
+
+
+# ---------------------------------------------------------------------------
+# OpenHD pipeline helpers (local to drone-follow; not in hailo-apps core)
+# ---------------------------------------------------------------------------
+
+def _openhd_stream_pipeline(port=5500, host="127.0.0.1", bitrate=3917, name="openhd_stream"):
+    """H264 SW encode + RTP + UDP sink for OpenHD input.
+
+    Uses x264enc with ultrafast/zerolatency settings.
+    RPi5 has no hardware H264 encoder; Hailo inference runs on the accelerator,
+    leaving CPU available for software encoding.
+    """
+    from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
+    encoder = (
+        f"x264enc name={name}_encoder bitrate={bitrate} "
+        f"speed-preset=ultrafast tune=zerolatency "
+        f"sliced-threads=false threads=2 key-int-max=5"
+    )
+    return (
+        f"{QUEUE(name=f'{name}_convert_q')} ! "
+        f"videoconvert n-threads=2 ! video/x-raw,format=I420 ! "
+        f"{QUEUE(name=f'{name}_enc_q')} ! "
+        f"{encoder} ! "
+        f"rtph264pay config-interval=1 pt=96 mtu=1440 ! "
+        f"udpsink host={host} port={port} sync=false async=false"
+    )
+
+
+# Sideband metadata file written by OpenHD with current SHM resolution
+_SHM_META_PATH = "/tmp/openhd_raw_video.meta"
+
+
+def _read_shm_resolution():
+    """Read current SHM resolution from OpenHD's sideband metadata file.
+
+    Returns (width, height, fps) or None if the file doesn't exist or is invalid.
+    OpenHD writes this file every time the camera pipeline (re)starts, so it
+    always reflects the active capture resolution.
+    """
+    import json as _json
+    try:
+        with open(_SHM_META_PATH, "r") as f:
+            meta = _json.loads(f.read())
+        w = int(meta["width"])
+        h = int(meta["height"])
+        fps = int(meta.get("fps", 30))
+        if w > 0 and h > 0 and fps > 0:
+            return (w, h, fps)
+    except (FileNotFoundError, KeyError, ValueError, _json.JSONDecodeError) as e:
+        LOGGER.debug("Cannot read SHM metadata from %s: %s", _SHM_META_PATH, e)
+    return None
+
+
+def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, name="source"):
+    """Build a GStreamer source pipeline for OpenHD shared-memory NV12 passthrough.
+
+    shmsrc buffers are read-only (mmap'd shared memory).  Force an immediate
+    NV12->I420 conversion to create writable buffers (cheap UV deinterleave).
+
+    The caps MUST match the resolution that OpenHD is actually writing into
+    shared memory.  We read the sideband metadata file that OpenHD writes on
+    every pipeline (re)start to auto-detect the correct resolution, falling
+    back to the caller-supplied video_width/video_height if the file is absent.
+    """
+    from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
+
+    # Auto-detect resolution from OpenHD metadata
+    shm_res = _read_shm_resolution()
+    if shm_res is not None:
+        shm_w, shm_h, shm_fps = shm_res
+        if shm_w != video_width or shm_h != video_height or shm_fps != frame_rate:
+            LOGGER.info(
+                "SHM resolution from metadata (%dx%d@%d) differs from "
+                "CLI/defaults (%dx%d@%d) — using metadata values",
+                shm_w, shm_h, shm_fps, video_width, video_height, frame_rate,
+            )
+            video_width = shm_w
+            video_height = shm_h
+            frame_rate = shm_fps
+
+    socket_path = str(video_source).split('://', 1)[1]
+
+    source_element = (
+        f'shmsrc socket-path={socket_path} do-timestamp=true is-live=true name={name} ! '
+        f'video/x-raw,format=NV12,width={video_width},height={video_height},'
+        f'framerate={frame_rate}/1,pixel-aspect-ratio=1/1 ! '
+        f'videoconvert ! video/x-raw,format=I420 ! '
+    )
+    return (
+        f"{source_element} "
+        f"{QUEUE(name=f'{name}_scale_q')} ! "
+        f"videoscale name={name}_videoscale n-threads=2 ! "
+        f"{QUEUE(name=f'{name}_convert_q')} ! "
+        f"videoconvert n-threads=3 name={name}_convert qos=false ! "
+        f"video/x-raw, pixel-aspect-ratio=1/1, format=RGB, "
+        f"width={video_width}, height={video_height}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +401,8 @@ def app_callback(element, buffer, user_data):
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None,
-               record_enabled=False, record_dir=None):
+               record_enabled=False, record_dir=None, reid_manager=None,
+               reid_search_timeout: float = 20.0):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -211,6 +418,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         parser: Pre-built argparse parser with all domain args already registered.
                 If None, a bare pipeline parser is created (for backward compat).
         record_dir: Directory for recording output files (optional)
+        reid_manager: ReIDManager for appearance-based re-identification (optional)
+        reid_search_timeout: Seconds to search via ReID before returning to auto mode (default: 20.0)
     """
     from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import (
         GStreamerTilingApp,
@@ -228,12 +437,18 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     byte_tracker=None):
+                     byte_tracker=None, reid_manager=None, reid_search_timeout=20.0):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
             self.byte_tracker = byte_tracker
+            self.reid_manager = reid_manager
+            self.reid_search_timeout = reid_search_timeout
+            self.perf = PerfTracker()
+            # Set after app creation so callback can extract frames for ReID
+            self.video_width = 0
+            self.video_height = 0
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -249,7 +464,39 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self._record_dir = record_dir or os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
             self._record_lock = threading.Lock()
+            self._shm_rebuild_pending = False
+
+            # Pre-detect SHM resolution BEFORE super().__init__() so that
+            # the tiling configuration (tile grid, overlap, batch size) is
+            # computed with the correct frame dimensions.  Without this,
+            # the base class configures tiling for the CLI default (e.g.
+            # 1280x720) while the SHM source actually delivers 640x480,
+            # causing a buffer size mismatch → Hailo DMA crash.
+            if parser is not None:
+                _pre_args, _ = parser.parse_known_args()
+                _pre_input = getattr(_pre_args, 'input', None)
+                if _pre_input and str(_pre_input).startswith('shm://'):
+                    shm_res = _read_shm_resolution()
+                    if shm_res is not None:
+                        shm_w, shm_h, shm_fps = shm_res
+                        LOGGER.info(
+                            "Pre-init: SHM metadata says %dx%d@%d — "
+                            "injecting into parser defaults",
+                            shm_w, shm_h, shm_fps)
+                        # Override the parser defaults so the base class
+                        # sees the correct resolution during configure().
+                        parser.set_defaults(
+                            width=shm_w, height=shm_h,
+                            frame_rate=shm_fps)
+
             super().__init__(app_callback, user_data, parser=parser)
+            # After base class init, sync resolution from SHM metadata if in
+            # SHM mode so that self.video_width/height are correct for any
+            # future rebuild (watchdog, manual, etc.).
+            if str(getattr(self, 'video_source', '')).startswith('shm://'):
+                shm_res = _read_shm_resolution()
+                if shm_res is not None:
+                    self.video_width, self.video_height, self.frame_rate = shm_res
             # Connect appsink after pipeline is created by super().__init__
             if self._ui_enabled:
                 self._connect_mjpeg_sink()
@@ -272,6 +519,139 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     self._ui_state.update_frame(bytes(map_info.data))
                     buf.unmap(map_info)
             return Gst.FlowReturn.OK
+
+        def bus_call(self, bus, message, loop):
+            """Override to rebuild pipeline on errors in SHM mode instead of shutting down."""
+            import gi
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst, GLib
+            t = message.type
+            if t == Gst.MessageType.ERROR:
+                err, debug = message.parse_error()
+                is_shm = str(getattr(self, 'video_source', '')).startswith('shm://')
+                if is_shm and not self._shm_rebuild_pending:
+                    self._shm_rebuild_pending = True
+                    LOGGER.warning("SHM pipeline error (%s) — waiting for socket + rebuilding", err)
+                    # Start polling for the SHM socket to reappear (OpenHD may
+                    # be restarting its pipeline with a new resolution).
+                    self._shm_poll_count = 0
+                    GLib.timeout_add(500, self._shm_wait_for_socket)
+                    return True
+                elif is_shm:
+                    # Additional error while rebuild already pending — ignore
+                    return True
+            return super().bus_call(bus, message, loop)
+
+        def _shm_wait_for_socket(self):
+            """Poll until the SHM socket and metadata file exist, then rebuild.
+
+            OpenHD removes the socket and recreates it during pipeline restart.
+            The metadata file is written first (during setup()), then the socket
+            appears when shmsink enters PLAYING.  We poll every 500ms for up to
+            30s (60 attempts) before giving up.
+            """
+            self._shm_poll_count += 1
+            socket_path = str(self.video_source).split('://', 1)[1]
+            meta_ok = _read_shm_resolution() is not None
+            socket_ok = os.path.exists(socket_path)
+            if socket_ok and meta_ok:
+                LOGGER.info("SHM socket + metadata ready after %d polls — rebuilding pipeline",
+                            self._shm_poll_count)
+                self._shm_rebuild()
+                return False  # stop polling
+            if self._shm_poll_count >= 60:
+                LOGGER.warning("SHM socket/metadata did not reappear after 30s — rebuilding anyway")
+                self._shm_rebuild()
+                return False
+            if self._shm_poll_count % 10 == 0:
+                LOGGER.debug("Waiting for SHM socket (exists=%s) + metadata (exists=%s) [poll %d]",
+                             socket_ok, meta_ok, self._shm_poll_count)
+            return True  # keep polling
+
+        def _shm_rebuild(self):
+            """Rebuild pipeline after SHM error (e.g. OpenHD resolution change).
+
+            Re-reads the OpenHD metadata file so the new pipeline uses
+            the correct caps for the (potentially changed) resolution.
+            Performs a careful teardown to avoid kernel warnings from the
+            Hailo PCIe driver's DMA buffer mapping (find_vma race on
+            kernel 6.12+).
+            """
+            import gi
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+
+            self._shm_rebuild_pending = False
+            # Update our video dimensions from the metadata file so the
+            # rebuilt pipeline negotiates the correct SHM buffer layout.
+            shm_res = _read_shm_resolution()
+            if shm_res is not None:
+                new_w, new_h, new_fps = shm_res
+                if new_w != self.video_width or new_h != self.video_height:
+                    LOGGER.info(
+                        "SHM rebuild: resolution changed %dx%d -> %dx%d",
+                        self.video_width, self.video_height, new_w, new_h,
+                    )
+                self.video_width = new_w
+                self.video_height = new_h
+                self.frame_rate = new_fps
+
+            # Pre-teardown: transition the old pipeline through READY/NULL
+            # explicitly so in-flight Hailo inference buffers are drained
+            # before we create the new pipeline.
+            if self.pipeline:
+                LOGGER.debug("SHM rebuild: pipeline PLAYING -> NULL (drain Hailo buffers)")
+                self.pipeline.set_state(Gst.State.NULL)
+                self.pipeline.get_state(5 * Gst.SECOND)
+                bus = self.pipeline.get_bus()
+                if bus:
+                    bus.remove_signal_watch()
+                self.pipeline = None
+                # The Hailo PCIe driver needs time to fully release DMA
+                # buffer mappings before new ones can be allocated.
+                # Without this delay, hailo_vdma_buffer_map triggers
+                # kernel warnings (find_vma race) and a segfault.
+                LOGGER.debug("SHM rebuild: waiting for Hailo DMA release")
+                time.sleep(2.0)
+
+            # Reset ByteTracker to clear stale predictions from old resolution
+            if hasattr(self, 'user_data') and hasattr(self.user_data, 'byte_tracker'):
+                self.user_data.byte_tracker.reset()
+                LOGGER.debug("SHM rebuild: ByteTracker reset")
+
+            # Now build a fresh pipeline from scratch (skip base class
+            # teardown since we already did it above).
+            self.watchdog_paused = True
+            self.rebuild_count += 1
+            try:
+                LOGGER.debug("SHM rebuild: creating new pipeline")
+                pipeline_string = self.get_pipeline_string()
+                LOGGER.debug("SHM rebuild: pipeline string: %s", pipeline_string)
+
+                self.pipeline = Gst.parse_launch(pipeline_string)
+
+                bus = self.pipeline.get_bus()
+                bus.add_signal_watch()
+                bus.connect("message", self.bus_call, self.loop)
+
+                self._connect_callback()
+                self._on_pipeline_rebuilt()
+
+                from hailo_apps.python.core.gstreamer.gstreamer_app import disable_qos
+                disable_qos(self.pipeline)
+
+                ret = self.pipeline.set_state(Gst.State.PLAYING)
+                if ret == Gst.StateChangeReturn.FAILURE:
+                    LOGGER.error("SHM rebuild: failed to start new pipeline")
+                    self.loop.quit()
+                    return False
+
+                LOGGER.info("SHM rebuild: pipeline rebuilt and playing")
+                self.watchdog_paused = False
+            except Exception:
+                LOGGER.error("SHM rebuild: exception", exc_info=True)
+                self.loop.quit()
+            return False
 
         def on_eos(self):
             if self._eos_reached is not None:
@@ -377,19 +757,28 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                         el.set_state(Gst.State.NULL)
 
         def get_pipeline_string(self):
-            if not self._ui_enabled and not self._record_enabled:
+            openhd_stream = getattr(self.options_menu, 'openhd_stream', False)
+            no_display = getattr(self.options_menu, 'no_display', False)
+            is_shm = str(self.video_source).startswith('shm://')
+
+            # If no custom output needed, delegate to parent
+            if not self._ui_enabled and not self._record_enabled and not openhd_stream and not is_shm and not no_display:
                 return super().get_pipeline_string()
 
-            # Build custom pipeline with optional tee branches
-            source_pipeline = SOURCE_PIPELINE(
-                video_source=self.video_source,
-                video_width=self.video_width,
-                video_height=self.video_height,
-                frame_rate=self.frame_rate,
-                sync=self.sync,
-                horizontal_mirror=self.horizontal_mirror,
-                vertical_mirror=self.vertical_mirror,
-            )
+            if is_shm:
+                source_pipeline = _shm_source_pipeline(
+                    self.video_source, self.video_width, self.video_height,
+                    self.frame_rate,
+                )
+            else:
+                source_pipeline = SOURCE_PIPELINE(
+                    video_source=self.video_source,
+                    video_width=self.video_width,
+                    video_height=self.video_height,
+                    frame_rate=self.frame_rate,
+                    sync=self.sync,
+                    horizontal_mirror=False,
+                )
 
             detection_pipeline = INFERENCE_PIPELINE(
                 hef_path=self.hef_path,
@@ -399,29 +788,61 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 config_json=self.labels_json,
             )
 
-            tiling_mode = 1 if self.use_multi_scale else 0
-            scale_level = self.scale_level if self.use_multi_scale else 0
-            tile_cropper_pipeline = TILE_CROPPER_PIPELINE(
-                detection_pipeline,
-                name='tile_cropper_wrapper',
-                internal_offset=True,
-                scale_level=scale_level,
-                tiling_mode=tiling_mode,
-                tiles_along_x_axis=self.tiles_x,
-                tiles_along_y_axis=self.tiles_y,
-                overlap_x_axis=self.overlap_x,
-                overlap_y_axis=self.overlap_y,
-                iou_threshold=self.iou_threshold,
-                border_threshold=self.border_threshold,
+            # Detect identity case: 1x1 tiles where frame matches model
+            # input exactly.  The hailotilecropper has a DMA buffer-pool
+            # negotiation bug in this passthrough path (no scaling needed)
+            # that crashes the Hailo PCIe driver.  Skip the tile cropper
+            # entirely — the inference pipeline processes the full frame
+            # directly and produces identical results since coordinates
+            # map 1:1 when frame_size == model_input_size.
+            skip_tiling = (
+                self.tiles_x == 1 and self.tiles_y == 1
+                and not self.use_multi_scale
+                and self.video_width == self.model_input_width
+                and self.video_height == self.model_input_height
             )
+
+            if skip_tiling:
+                LOGGER.info(
+                    "Bypassing tile cropper: 1x1 tiles with frame "
+                    "(%dx%d) matching model input — direct inference",
+                    self.video_width, self.video_height,
+                )
+            else:
+                tiling_mode = 1 if self.use_multi_scale else 0
+                scale_level = self.scale_level if self.use_multi_scale else 0
+                tile_cropper_pipeline = TILE_CROPPER_PIPELINE(
+                    detection_pipeline,
+                    name='tile_cropper_wrapper',
+                    internal_offset=True,
+                    scale_level=scale_level,
+                    tiling_mode=tiling_mode,
+                    tiles_along_x_axis=self.tiles_x,
+                    tiles_along_y_axis=self.tiles_y,
+                    overlap_x_axis=self.overlap_x,
+                    overlap_y_axis=self.overlap_y,
+                    iou_threshold=self.iou_threshold,
+                    border_threshold=self.border_threshold,
+                )
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-            display_branch = DISPLAY_PIPELINE(
-                video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
-            )
+            # Primary output branch: OpenHD stream, display, or fakesink
+            if openhd_stream:
+                openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
+                openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 3917)
+                primary_branch = (
+                    f"{OVERLAY_PIPELINE(name='openhd_overlay')} ! " +
+                    _openhd_stream_pipeline(port=openhd_port, bitrate=openhd_bitrate)
+                )
+            elif no_display:
+                primary_branch = f"fakesink sync={self.sync}"
+            else:
+                primary_branch = DISPLAY_PIPELINE(
+                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                )
 
-            # Build extra branches beyond display
+            # Build extra branches beyond primary
             extra_branches = []
 
             if self._ui_enabled:
@@ -430,7 +851,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     f"videorate max-rate={self._ui_fps} ! "
                     f"video/x-raw,framerate={self._ui_fps}/1 ! "
                     f"jpegenc quality=70 ! "
-                    f"appsink name=mjpeg_sink sync=false drop=false emit-signals=true"
+                    f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
                 )
                 extra_branches.append(
                     f"t. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch}"
@@ -448,14 +869,25 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     f"t. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
                 )
 
-            # Use tee when there are extra branches beyond display
-            output_pipeline = (
-                f"tee name=t "
-                f"t. ! {QUEUE(name='display_branch_q', leaky='downstream')} ! {display_branch} "
-                + " ".join(extra_branches)
-            )
+            if extra_branches:
+                # For file sources, the leaky queues after the tee prevent
+                # sink sync=true from applying backpressure, so filesrc
+                # decodes at full speed.  Insert identity sync=true before
+                # the tee to pace data at real-time rate.
+                sync_element = "identity sync=true ! " if self.source_type == "file" else ""
+                output_pipeline = (
+                    f"{sync_element}tee name=t "
+                    f"t. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_branch} "
+                    + " ".join(extra_branches)
+                )
+            else:
+                output_pipeline = primary_branch
 
-            pipeline_parts = [source_pipeline, tile_cropper_pipeline]
+            if skip_tiling:
+                # Direct pipeline: source → inference → callback → output
+                pipeline_parts = [source_pipeline, detection_pipeline]
+            else:
+                pipeline_parts = [source_pipeline, tile_cropper_pipeline]
             pipeline_parts.extend([user_callback_pipeline, output_pipeline])
 
             return ' ! '.join(pipeline_parts)
@@ -467,10 +899,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
+        reid_manager=reid_manager, reid_search_timeout=reid_search_timeout,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
         record_enabled=record_enabled, record_dir=record_dir,
     )
+    # Store video dimensions on user_data so the callback can extract
+    # frames for ReID cropping without needing a reference to the app.
+    user_data.video_width = app.video_width
+    user_data.video_height = app.video_height
     return app

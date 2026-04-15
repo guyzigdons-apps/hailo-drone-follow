@@ -21,6 +21,8 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
+- `--horizontal-mirror` / `--vertical-mirror` — Both default to off (camera right-side up). Pass both flags for 180° rotation if camera is mounted upside-down. The pipeline also passes `mirror_image=False` to `SOURCE_PIPELINE()`.
+
 ## Drone Connection
 
 ### USB Serial (real hardware)
@@ -28,6 +30,28 @@ The Cube Orange+ connects via USB as `/dev/ttyACM0`. Using `--serial` builds the
 
 ### UDP (simulation)
 Without `--serial`, defaults to `udpin://0.0.0.0:14540` for SITL/Gazebo.
+
+## Follow Modes
+
+The app has three follow modes:
+
+- **AUTO** (default) — Automatically follows the largest person in frame. No operator input needed. The drone starts in this mode on boot. ReID gallery is built so the target can be recovered after temporary occlusion.
+- **LOCKED** — Operator explicitly clicks a person in the UI to lock onto them. ReID gallery is also built for recovery.
+- **IDLE** — Drone holds position, ignores all detections. Entered via OpenHD ground station (`follow_id = -1`).
+
+### Auto mode behavior
+- Selects the person with the largest bounding box area each frame
+- ReID gallery is built while following, so the target can be recovered after occlusion
+- If ReID search times out, the gallery is cleared and the next biggest person is selected
+- Clicking "Clear Target" in the UI returns to auto mode
+
+### ReID search timeout
+When a locked target is lost, ReID searches for a configurable duration (`--reid-timeout`, default 20s). If the target is not re-identified within that time, the app returns to auto mode (not idle). The timeout applies both when other persons are visible (ReID compares embeddings each frame) and when no persons are visible (holding position).
+
+### OpenHD follow_id semantics
+- `-1` = IDLE (drone holds position)
+- `0` = AUTO (follow largest person)
+- `N` = LOCKED to person N
 
 ## PX4 Offboard Mode
 
@@ -47,8 +71,8 @@ By default (no `--takeoff-landing`), the app streams zero setpoints and waits fo
 ## Running
 
 ```bash
-# Real drone over USB (RPi):
-./run_drone.sh
+# Real drone with OpenHD (RPi — starts OpenHD air + drone-follow):
+scripts/start_air.sh
 
 # Dev machine with USB camera + flight controller:
 source setup_env.sh
@@ -61,7 +85,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 
 ## Virtual Environment
 
-All dependencies are in `venv/`. Always `source setup_env.sh` before running.
+All dependencies live in hailo-apps' venv (`hailo-apps/venv_hailo_apps/`). Always `source setup_env.sh` before running — it activates the hailo-apps venv and sets up paths.
 
 ## Development Machine Setup (x86_64)
 
@@ -76,11 +100,16 @@ This repo can also run on an x86_64 development machine instead of the RPi targe
 
 Prerequisites:
 - Ubuntu 22.04 with Python 3.10+
-- `hailort` and `hailo-tappas-core` deb packages installed (match your Hailo device)
+- HailoRT driver deb installed and device detected (`hailortcli fw-control identify`)
 - Node.js / npm (optional, for the web UI)
 
 ```bash
-# Run the installer (clones hailo-apps, creates venv, installs everything, builds UI)
+# 1. Install HailoRT driver first (download from Hailo Developer Zone):
+sudo dpkg -i hailort_<version>_<arch>.deb
+sudo reboot
+hailortcli fw-control identify  # verify device detected
+
+# 2. Run the installer (clones hailo-apps, runs hailo_installer.sh, creates venv, builds UI)
 ./install.sh
 
 # Options:
@@ -89,6 +118,8 @@ Prerequisites:
 #   --skip-ui              Skip UI npm install and build
 #   --skip-python          Skip Python dependency installation
 ```
+
+The installer auto-detects the Hailo device type (hailo8/hailo8l/hailo10h) and runs `hailo-apps/scripts/hailo_installer.sh` with the correct argument.
 
 Verify: `source setup_env.sh && drone-follow --help`
 
@@ -140,16 +171,15 @@ The Pi has two WiFi interfaces:
 - **wlan0 (built-in RPi WiFi)** — Connects to home/dev WiFi networks
 - **wlan1 (TP-Link USB adapter)** — Dedicated AP mode for field ops (5GHz, channel 36, better antenna/range)
 
-A udev rule (`system/71-usb-wifi.rules`) pins the TP-Link adapter to `wlan1` by MAC address. Both interfaces can operate simultaneously — e.g., SSH via home WiFi (wlan0) while phone connects to drone AP (wlan1).
-
-A boot-time systemd service (`drone-network-mode.service`) runs `system/drone-network-mode.sh`:
-
-1. Waits 30s for NM to connect to any saved WiFi on wlan0
-2. **Home mode** (WiFi found on wlan0): exits, drone app does not start
-3. **Field mode** (no WiFi on wlan0): activates `HailoDrone-AP` profile on wlan1 (SSID: `HailoDrone`, password: `hailodrone`, IP: `10.0.0.1/24`, 5GHz ch36), then starts `drone-follow.service` (user service)
-
-**Files:** `system/drone-network-mode.sh`, `system/drone-network-mode.service`, `system/install.sh`, `system/71-usb-wifi.rules`
-
-**Setup:** `system/install.sh` creates the NM AP profile on wlan1, installs the udev rule, symlinks to system paths, and enables the boot service.
+A udev rule pins the TP-Link adapter to `wlan1` by MAC address. Both interfaces can operate simultaneously — e.g., SSH via home WiFi (wlan0) while phone connects to drone AP (wlan1).
 
 **Known networks:** Any WiFi saved in NetworkManager. Add new ones with `nmcli device wifi connect <SSID> password <pass>`.
+
+## Boot Service
+
+A systemd service (`drone-follow-boot.service`) auto-starts drone-follow + OpenHD at boot, controlled by a desktop config file.
+
+- **Config:** `~/Desktop/drone-follow.conf` — set `ENABLED=true` or `ENABLED=false`
+- **Install:** `sudo scripts/boot/install.sh`
+- **Uninstall:** `sudo scripts/boot/uninstall.sh`
+- **Flow:** systemd → `drone-follow-boot.sh` → reads config → if enabled, runs `scripts/start_air.sh` as hailo user

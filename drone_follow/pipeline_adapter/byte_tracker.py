@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.stats import chi2
 from scipy.optimize import linear_sum_assignment
 
 class KalmanFilter:
@@ -327,6 +326,14 @@ class ByteTracker:
         self.det_thresh = track_thresh + 0.1
         self.track_buffer = track_buffer
         self.match_thresh = match_thresh  # Lower for turns: allows matching with lower IOU
+        self.kalman_filter = KalmanFilter()
+
+    def reset(self):
+        """Clear all tracking state (e.g. after resolution change)."""
+        self.tracked_stracks = []
+        self.lost_stracks = []
+        self.removed_stracks = []
+        self.frame_id = 0
         self.kalman_filter = KalmanFilter()
 
     def update(self, output_results, frame=None):

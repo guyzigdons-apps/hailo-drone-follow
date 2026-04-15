@@ -24,10 +24,9 @@ from drone_follow.follow_api.config import ControllerConfig
 from drone_follow.follow_api.controller import (
     compute_velocity_command,
     ForwardSmoother,
-    _effective_target_bbox_height,
 )
 
-LOGGER = logging.getLogger("drone_follow.control")
+LOGGER = logging.getLogger(__name__)
 
 
 def add_drone_args(parser) -> None:
@@ -152,7 +151,7 @@ class DetachedMavsdkServer:
             if host == "0.0.0.0":
                 host = "127.0.0.1"
             return f"grpc://{host}:{self.port}"
-        except Exception:
+        except (ValueError, AttributeError):
             return f"grpc://127.0.0.1:{self.port}"
 
     def __enter__(self):
@@ -163,7 +162,7 @@ class DetachedMavsdkServer:
         # Try to find mavsdk_server binary
         try:
             server_path = os.path.join(os.path.dirname(mavsdk.__file__), 'bin', 'mavsdk_server')
-        except Exception:
+        except (AttributeError, TypeError):
             server_path = None
 
         if not server_path or not os.path.exists(server_path):
@@ -178,7 +177,7 @@ class DetachedMavsdkServer:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
             )
             time.sleep(0.3)
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
         cmd = [server_path, "-p", str(self.port), self.connection_url]
@@ -227,7 +226,7 @@ async def _wait_for_offboard_mode(drone: System, shutdown: asyncio.Event) -> Non
         while not shutdown.is_set():
             try:
                 await drone.offboard.set_velocity_body(zero)
-            except Exception:
+            except (OffboardError, ConnectionError):
                 pass
             await asyncio.sleep(setpoint_period)
 
@@ -381,7 +380,7 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
 
 
 async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None,
-                            ui_state=None, telemetry_cache: Optional[dict] = None):
+                            ui_state=None, target_state=None, telemetry_cache: Optional[dict] = None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
@@ -428,6 +427,11 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 else:
                     last_detection_time = now
                     last_valid_detection = detection
+
+            # IDLE mode: ignore all detections and hold position indefinitely
+            if target_state is not None and target_state.is_paused():
+                detection = None
+                last_detection_time = now  # reset so search/land timers never advance
 
             # Check search timeout
             time_since_detection = now - last_detection_time
@@ -513,7 +517,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     except asyncio.CancelledError:
         try:
             await vel_api.send_zero()
-        except Exception:
+        except (OffboardError, ConnectionError):
             pass
         raise
 
@@ -603,7 +607,7 @@ async def _wait_for_connection(drone: System) -> bool:
 
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         config=None, ui_state=None):
+                         config=None, ui_state=None, target_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If config is provided, use it directly (allows live mutation from web UI).
@@ -675,6 +679,17 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
             telem_tasks.append(asyncio.create_task(
                 _telemetry_log_task(drone, {}, telemetry_cache, shutdown, ui_state=ui_state)))
 
+            async def _start_altitude_telemetry():
+                """Start altitude streaming and upgrade telem log task to include it."""
+                nonlocal alt_task
+                alt_cache: dict = {}
+                alt_task = asyncio.create_task(
+                    _telemetry_altitude_task(drone, alt_cache, shutdown))
+                await _cancel_task(telem_tasks[-1])
+                telem_tasks[-1] = asyncio.create_task(
+                    _telemetry_log_task(drone, alt_cache, telemetry_cache, shutdown, ui_state=ui_state))
+                return alt_cache
+
             if manage_takeoff_landing:
                 await drone.action.set_takeoff_altitude(args.target_altitude)
                 # Retry arm() — PX4 may need time to pass pre-arm checks
@@ -704,15 +719,10 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     return
                 await asyncio.sleep(3)
 
-                altitude_cache: dict = {}
-                alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
-                # Update telem log task to use altitude_cache
-                await _cancel_task(telem_tasks[-1])
-                telem_tasks[-1] = asyncio.create_task(
-                    _telemetry_log_task(drone, altitude_cache, telemetry_cache, shutdown, ui_state=ui_state))
+                altitude_cache = await _start_altitude_telemetry()
                 control_task = asyncio.create_task(
                     live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
-                                      ui_state=ui_state, telemetry_cache=telemetry_cache))
+                                      ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))
 
                 done, pending = await asyncio.wait(
                     [
@@ -755,12 +765,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                 # sees an offboard signal, then wait for the pilot to switch to
                 # OFFBOARD via GCS/RC.  The app must NEVER command the mode
                 # switch itself — only the pilot decides when to hand over.
-                altitude_cache: dict = {}
-                alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
-                # Update telem log task to use altitude_cache
-                await _cancel_task(telem_tasks[-1])
-                telem_tasks[-1] = asyncio.create_task(
-                    _telemetry_log_task(drone, altitude_cache, telemetry_cache, shutdown, ui_state=ui_state))
+                altitude_cache = await _start_altitude_telemetry()
 
                 while not shutdown.is_set():
                     await _wait_for_offboard_mode(drone, shutdown)
@@ -771,7 +776,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                     vel_api.reset_filter()
                     control_task = asyncio.create_task(
                         live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
-                                          ui_state=ui_state, telemetry_cache=telemetry_cache))
+                                          ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))
                     watch_task = asyncio.create_task(
                         _watch_offboard_mode(drone, shutdown, offboard_lost))
 
@@ -794,11 +799,11 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
 
                     try:
                         await vel_api.send_zero()
-                    except Exception:
+                    except (OffboardError, ConnectionError):
                         pass
                     try:
                         await drone.offboard.stop()
-                    except Exception:
+                    except (OffboardError, ConnectionError):
                         pass
 
                     if shutdown.is_set():
