@@ -263,7 +263,11 @@ class _WebHandler(BaseHTTPRequestHandler):
         "kp_backward": float,
         "max_forward": float,
         "max_backward": float,
+        "max_forward_accel": float,
+        "max_yawspeed": float,
+        "dead_zone_deg": float,
         "yaw_only": bool,
+        "auto_select": bool,
         "target_bbox_height": float,
         "target_center_y": float,
         "dead_zone_y_deg": float,
@@ -396,12 +400,51 @@ class _WebHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/config":
             self._handle_post_config()
+        elif self.path == "/api/config/save":
+            self._handle_config_save()
+        elif self.path == "/api/config/load":
+            self._handle_config_load()
         elif self.path == "/api/record/start":
             self._handle_record_start()
         elif self.path == "/api/record/stop":
             self._handle_record_stop()
         else:
             self.send_error(404, "Not Found")
+
+    def _handle_config_save(self):
+        """Dump the live ControllerConfig to df_config.json on the air unit."""
+        cfg = self.controller_config
+        if cfg is None:
+            self.send_error(404, "No controller config available")
+            return
+        from drone_follow.follow_api.config import DEFAULT_CONFIG_PATH
+        try:
+            cfg.save_json(DEFAULT_CONFIG_PATH)
+        except OSError as e:
+            self._send_json({"error": f"Save failed: {e}"}, status=500)
+            return
+        self._send_json({"saved": True, "path": DEFAULT_CONFIG_PATH})
+
+    def _handle_config_load(self):
+        """Live-reload ControllerConfig from df_config.json (in place)."""
+        cfg = self.controller_config
+        if cfg is None:
+            self.send_error(404, "No controller config available")
+            return
+        from drone_follow.follow_api.config import DEFAULT_CONFIG_PATH
+        try:
+            changed = cfg.load_from_file(DEFAULT_CONFIG_PATH)
+        except FileNotFoundError:
+            self._send_json({"error": f"No saved config at {DEFAULT_CONFIG_PATH}"}, status=404)
+            return
+        except ValueError as e:
+            self._send_json({"error": f"Invalid values in saved config: {e}"}, status=400)
+            return
+        except OSError as e:
+            self._send_json({"error": f"Load failed: {e}"}, status=500)
+            return
+        self._send_json({"loaded": True, "path": DEFAULT_CONFIG_PATH,
+                         "changed": changed})
 
     def _handle_record_start(self):
         if self.recording_ctl is None:

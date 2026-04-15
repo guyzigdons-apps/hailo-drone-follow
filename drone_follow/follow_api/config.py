@@ -2,7 +2,17 @@
 
 import argparse
 import json
+import os
 from dataclasses import dataclass, fields, asdict
+
+# Default path for live save/load from the web UI and QOpenHD triggers.
+# Lives at the repo root next to the schema `df_params.json` so the pair is
+# easy to find. .gitignored — the JSON holds the operator's tuning, not
+# something to be committed.
+DEFAULT_CONFIG_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "..", "..", "df_config.json")
+)
 
 
 @dataclass
@@ -21,6 +31,7 @@ class ControllerConfig:
     dead_zone_y_deg: float = 2.0        # dead zone in vertical degrees (like dead_zone_deg for yaw)
     max_forward: float = 1.0
     max_backward: float = 1.5
+    max_forward_accel: float = 1.5      # slew-rate cap on forward (m/s²); tilt-transient safety
     # --- Altitude (distance via height): bbox_height → down_m_s ---
     # Plain P: person too small → descend, too big → climb. Constrained to [min_alt, max_alt].
     kp_altitude: float = 3.0            # gain for bbox_height error → altitude speed
@@ -34,6 +45,7 @@ class ControllerConfig:
     max_bbox_height_safety: float = 0.8  # bbox > this → emergency climb + reverse
     # --- Modes ---
     yaw_only: bool = True
+    auto_select: bool = True          # when False: clear/loss → IDLE (hold position); no autonomous re-acquisition
     follow_mode: str = "follow"       # "follow" or "orbit"
     orbit_speed_m_s: float = 1.0      # lateral velocity for orbit (m/s)
     orbit_direction: int = 1          # +1 = clockwise, -1 = counter-clockwise
@@ -89,6 +101,37 @@ class ControllerConfig:
         filtered = {k: v for k, v in data.items() if k in valid_names}
         return cls(**filtered)
 
+    def load_from_file(self, path: str) -> list:
+        """Mutate this ControllerConfig in place from a JSON file.
+
+        Used for live reload from the web UI / QOpenHD trigger, where other
+        components (servers, control loop) hold a reference to the same object
+        and must see the new values. Existing fields not present in the file
+        are left alone. Unknown keys in the file are ignored.
+
+        Returns the list of field names that actually changed (useful for
+        logging / UI status). Raises on invalid JSON, missing file, or
+        post-load validation failure (in which case previous values are restored).
+        """
+        with open(path) as f:
+            data = json.load(f)
+        valid_names = {field.name for field in fields(self)}
+        updates = {k: v for k, v in data.items() if k in valid_names}
+        snapshot = {k: getattr(self, k) for k in updates}
+        changed = []
+        for k, v in updates.items():
+            if getattr(self, k) != v:
+                setattr(self, k, v)
+                changed.append(k)
+        try:
+            self.validate()
+        except ValueError:
+            # roll back on validation error
+            for k, old_val in snapshot.items():
+                setattr(self, k, old_val)
+            raise
+        return changed
+
     @staticmethod
     def add_args(parser: argparse.ArgumentParser) -> None:
         """Register controller-related CLI flags on *parser*."""
@@ -105,8 +148,11 @@ class ControllerConfig:
         group.add_argument("--hfov", type=float, default=defaults.hfov)
         group.add_argument("--vfov", type=float, default=defaults.vfov)
         group.add_argument("--target-bbox-height", type=float, default=None,
-                           help=f"Target bbox height (0-1) for altitude control "
-                                f"(default: {defaults.target_bbox_height})")
+                           help=f"Target bbox height (0-1) for altitude control. "
+                                f"Used as the pre-lock default; when a target is locked (manual click or AUTO "
+                                f"acquisition) the current bbox height is captured as the setpoint so the drone "
+                                f"holds its current distance. Operator can adjust via the UI slider at any time "
+                                f"(default: {defaults.target_bbox_height}).")
         group.add_argument("--target-center-y", type=float, default=defaults.target_center_y,
                            help=f"Desired vertical position in frame 0-1 (default: {defaults.target_center_y})")
         group.add_argument("--dead-zone-y-deg", type=float, default=defaults.dead_zone_y_deg,
@@ -134,6 +180,10 @@ class ControllerConfig:
         # Flight mode
         group.add_argument("--yaw-only", action=argparse.BooleanOptionalAction, default=defaults.yaw_only,
                            help="Yaw only mode: no forward/backward or altitude movement (default: True). Use --no-yaw-only for full follow.")
+        group.add_argument("--auto-select", action=argparse.BooleanOptionalAction, default=defaults.auto_select,
+                           help=f"When on, AUTO mode re-acquires the biggest person whenever the target is cleared or lost. "
+                                f"When off, the drone holds position on loss/clear — pilot-led workflow "
+                                f"(default: {defaults.auto_select}). Use --no-auto-select to disable.")
 
         # Search/follow behavior
         group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
@@ -162,6 +212,9 @@ class ControllerConfig:
                            help=f"Max forward speed in m/s (default: {defaults.max_forward})")
         group.add_argument("--max-backward", type=float, default=defaults.max_backward,
                            help=f"Max backward speed in m/s (default: {defaults.max_backward})")
+        group.add_argument("--max-forward-accel", type=float, default=defaults.max_forward_accel,
+                           help=f"Slew-rate cap on forward velocity in m/s² (tilt-transient safety). "
+                                f"Independent of EMA and of --max-forward (default: {defaults.max_forward_accel}).")
         group.add_argument("--max-bbox-height-safety", type=float, default=defaults.max_bbox_height_safety,
                            help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
 
@@ -213,11 +266,13 @@ class ControllerConfig:
             min_altitude=_arg("min_altitude", default=defaults.min_altitude),
             max_altitude=_arg("max_altitude", default=defaults.max_altitude),
             yaw_only=yaw_only,
+            auto_select=bool(_arg("auto_select", default=defaults.auto_select)),
             detection_timeout_s=_arg("detection_timeout", "detection_timeout_s", default=defaults.detection_timeout_s),
             search_enter_delay_s=_arg("search_enter_delay", "search_enter_delay_s", default=defaults.search_enter_delay_s),
             control_loop_hz=_arg("control_loop_hz", default=defaults.control_loop_hz),
             max_forward=_arg("max_forward", default=defaults.max_forward),
             max_backward=_arg("max_backward", default=defaults.max_backward),
+            max_forward_accel=_arg("max_forward_accel", default=defaults.max_forward_accel),
             max_bbox_height_safety=_arg("max_bbox_height_safety", default=defaults.max_bbox_height_safety),
             search_timeout_s=_arg("search_timeout", "search_timeout_s", default=defaults.search_timeout_s),
             search_vel_damp=_arg("search_vel_damp", default=defaults.search_vel_damp),

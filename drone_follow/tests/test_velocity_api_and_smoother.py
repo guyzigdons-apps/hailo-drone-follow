@@ -37,6 +37,7 @@ class TestVelocityCommandAPIClamping:
             max_orbit_speed=1.0,
             smooth_yaw=False, smooth_forward=False,
             smooth_right=False, smooth_down=False,
+            max_forward_accel=0,  # disable slew limiter to isolate clamp behavior
         )
         return VelocityCommandAPI(drone=None, config=cfg)
 
@@ -175,6 +176,7 @@ class TestForwardSmoothing:
             smooth_forward=True, forward_alpha=0.5,
             smooth_yaw=False, smooth_right=False, smooth_down=False,
             max_forward=5.0, max_backward=5.0,
+            max_forward_accel=0,  # disable slew limiter to isolate EMA behavior
         )
         defaults.update(overrides)
         return VelocityCommandAPI(drone=None, config=ControllerConfig(**defaults))
@@ -206,6 +208,51 @@ class TestForwardSmoothing:
         loop = asyncio.get_event_loop()
         r = loop.run_until_complete(api.send(VelocityCommand(2.0, 0.0, 0.0, 0.0)))
         assert r.forward_m_s == pytest.approx(2.0)
+
+
+class TestForwardSlewLimiter:
+    """Hard slew-rate cap on forward velocity (tilt-transient safety)."""
+
+    def _make_api(self, **overrides):
+        defaults = dict(
+            smooth_forward=False, smooth_yaw=False, smooth_right=False, smooth_down=False,
+            max_forward=5.0, max_backward=5.0,
+            max_forward_accel=1.0, control_loop_hz=10.0,  # → 0.1 m/s per tick
+        )
+        defaults.update(overrides)
+        return VelocityCommandAPI(drone=None, config=ControllerConfig(**defaults))
+
+    def test_step_input_ramps_at_max_step(self):
+        api = self._make_api()
+        loop = asyncio.get_event_loop()
+        for expected in (0.1, 0.2, 0.3):
+            r = loop.run_until_complete(api.send(VelocityCommand(2.0, 0.0, 0.0, 0.0)))
+            assert r.forward_m_s == pytest.approx(expected, abs=1e-6)
+
+    def test_disabled_when_zero(self):
+        api = self._make_api(max_forward_accel=0)
+        loop = asyncio.get_event_loop()
+        r = loop.run_until_complete(api.send(VelocityCommand(2.0, 0.0, 0.0, 0.0)))
+        assert r.forward_m_s == pytest.approx(2.0)
+
+    def test_decel_symmetric(self):
+        api = self._make_api()
+        loop = asyncio.get_event_loop()
+        # Ramp up to 0.5, then issue 0.0 — should step down 0.1 per tick
+        for _ in range(5):
+            loop.run_until_complete(api.send(VelocityCommand(2.0, 0.0, 0.0, 0.0)))
+        for expected in (0.4, 0.3, 0.2, 0.1, 0.0):
+            r = loop.run_until_complete(api.send(VelocityCommand(0.0, 0.0, 0.0, 0.0)))
+            assert r.forward_m_s == pytest.approx(expected, abs=1e-6)
+
+    def test_send_zero_resets_prev(self):
+        api = self._make_api()
+        loop = asyncio.get_event_loop()
+        for _ in range(5):
+            loop.run_until_complete(api.send(VelocityCommand(2.0, 0.0, 0.0, 0.0)))
+        assert api._prev_forward != 0.0
+        loop.run_until_complete(api.send_zero())
+        assert api._prev_forward == 0.0
 
 
 class TestRightSmoothing:

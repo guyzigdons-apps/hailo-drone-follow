@@ -79,6 +79,10 @@ class VelocityCommandAPI:
         self._filtered_forward: float = 0.0
         self._filtered_right: float = 0.0
         self._filtered_down: float = 0.0
+        # Slew-rate limiter state for the forward axis (tilt-transient safety).
+        # EMA bounds peak acceleration only as a function of step size; a hard
+        # m/s² cap is independent of max_forward and of the EMA filter.
+        self._prev_forward: float = 0.0
 
     @staticmethod
     def _ema(raw: float, prev: float, alpha: float) -> float:
@@ -125,6 +129,20 @@ class VelocityCommandAPI:
             self._filtered_yaw = yaw_raw
             yaw_out = yaw_raw
 
+        # Forward-axis slew-rate cap (after EMA): hard m/s² bound on |Δforward/Δt|.
+        # Tames PX4 pitch transients on target acquisition / abrupt distance changes.
+        # Independent of cfg.max_forward and of cfg.forward_alpha.
+        if cfg.max_forward_accel > 0 and cfg.control_loop_hz > 0:
+            max_step = cfg.max_forward_accel / cfg.control_loop_hz
+            delta = forward - self._prev_forward
+            if delta > max_step:
+                forward = self._prev_forward + max_step
+            elif delta < -max_step:
+                forward = self._prev_forward - max_step
+        self._prev_forward = forward
+        # Keep the EMA filter state in sync so it doesn't fight the slew limiter
+        self._filtered_forward = forward
+
         clamped = VelocityCommand(forward, right, down, yaw_out)
 
         if self._drone is not None:
@@ -138,6 +156,7 @@ class VelocityCommandAPI:
         self._filtered_forward = 0.0
         self._filtered_right = 0.0
         self._filtered_down = 0.0
+        self._prev_forward = 0.0
         zero = VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
         if self._drone is not None:
             await self._drone.offboard.set_velocity_body(zero)
@@ -153,6 +172,7 @@ class VelocityCommandAPI:
         self._filtered_forward = 0.0
         self._filtered_right = 0.0
         self._filtered_down = 0.0
+        self._prev_forward = 0.0
 
 
 # ---------------------------------------------------------------------------

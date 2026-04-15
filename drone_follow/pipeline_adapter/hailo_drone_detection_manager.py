@@ -114,6 +114,34 @@ def _find_biggest_person(person_by_id):
     return best_id, best_person
 
 
+# Clamp matches df_params.json target_bbox_height min/max
+_TGT_BH_MIN = 0.05
+_TGT_BH_MAX = 0.9
+
+
+def capture_bbox_setpoint_from_height(config, height: float, source: str = "lock") -> Optional[float]:
+    """At lock time, snap controller_config.target_bbox_height to the target's current bbox.
+
+    Centralised so both the AUTO acquisition path (detection manager) and the
+    operator-click path (follow_server) capture distance the same way.
+
+    Returns the clamped value actually written, or None if the config is missing.
+    """
+    if config is None:
+        return None
+    h = max(_TGT_BH_MIN, min(_TGT_BH_MAX, float(height)))
+    config.target_bbox_height = h
+    LOGGER.info("[LOCK %s] target_bbox_height set to %.3f from current bbox", source, h)
+    return h
+
+
+def _capture_bbox_setpoint(config, person):
+    """Convenience wrapper for the hailo-bound caller: pulls height off the bbox."""
+    if person is None:
+        return
+    capture_bbox_setpoint_from_height(config, person.get_bbox().height(), source="AUTO")
+
+
 # ---------------------------------------------------------------------------
 # Main app callback
 # ---------------------------------------------------------------------------
@@ -140,6 +168,8 @@ def _app_callback_inner(element, buffer, user_data):
 
     target_state = user_data.target_state
     ui_state = user_data.ui_state
+    config = user_data.controller_config
+    auto_select = bool(getattr(config, "auto_select", True)) if config is not None else True
 
     if not persons:
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
@@ -150,16 +180,23 @@ def _app_callback_inner(element, buffer, user_data):
                 # ReID gallery exists — check timeout
                 last_seen = target_state.get_last_seen()
                 if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
-                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
-                                user_data.reid_search_timeout)
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
+                                user_data.reid_search_timeout,
+                                "auto mode" if auto_select else "IDLE (auto-select off)")
                     target_state.enter_auto_mode()
                     reid_mgr.clear()
+                    if not auto_select:
+                        target_state.set_paused(True)
                 else:
                     LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
                                  target_state.get_target())
             else:
                 target_state.enter_auto_mode()
-                LOGGER.info("[AUTO] Target lost (no persons, no ReID gallery) — returning to auto mode")
+                if not auto_select:
+                    target_state.set_paused(True)
+                    LOGGER.info("[IDLE] Target lost (no persons) — auto-select off, holding position")
+                else:
+                    LOGGER.info("[AUTO] Target lost (no persons, no ReID gallery) — returning to auto mode")
         _paused = target_state.is_paused() if target_state else False
         _update_ui(ui_state, [], {}, None, paused=_paused)
         if target_state is None or target_state.get_target() is None:
@@ -204,11 +241,14 @@ def _app_callback_inner(element, buffer, user_data):
                 # ReID gallery exists — try re-identification
                 last_seen = target_state.get_last_seen()
                 if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
-                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
-                                user_data.reid_search_timeout)
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
+                                user_data.reid_search_timeout,
+                                "auto mode" if auto_select else "IDLE (auto-select off)")
                     target_state.enter_auto_mode()
                     reid_manager.clear()
-                    # Fall through to auto-select below
+                    if not auto_select:
+                        target_state.set_paused(True)
+                    # Fall through to auto-select below (gated on auto_select)
                 else:
                     frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
                     if frame_bgr is not None:
@@ -229,10 +269,15 @@ def _app_callback_inner(element, buffer, user_data):
                         _update_ui(ui_state, persons, person_to_id, None)
                         return
             else:
-                # No ReID gallery — return to auto mode
+                # No ReID gallery — return to auto mode (or IDLE if auto-select disabled)
                 target_state.enter_auto_mode()
-                LOGGER.info("[AUTO] Target ID %s lost — returning to auto mode. Available: %s",
-                            target_id, sorted(available_ids) if available_ids else "none")
+                if not auto_select:
+                    target_state.set_paused(True)
+                    LOGGER.info("[IDLE] Target ID %s lost — auto-select off, holding position. Available: %s",
+                                target_id, sorted(available_ids) if available_ids else "none")
+                else:
+                    LOGGER.info("[AUTO] Target ID %s lost — returning to auto mode. Available: %s",
+                                target_id, sorted(available_ids) if available_ids else "none")
 
     # Re-read target_id after possible enter_auto_mode() calls above
     target_id = target_state.get_target() if target_state is not None else None
@@ -245,11 +290,24 @@ def _app_callback_inner(element, buffer, user_data):
             LOGGER.debug("[IDLE] Paused. Available: %s",
                         sorted(available_ids) if available_ids else "none")
             return
+        if not auto_select:
+            # Auto-select disabled — pilot-led workflow. Hold position; wait for operator click.
+            user_data.shared_state.update(None, available_ids=available_ids)
+            _update_ui(ui_state, persons, person_to_id, None, paused=True)
+            LOGGER.debug("[IDLE] auto-select off — waiting for operator selection. Available: %s",
+                        sorted(available_ids) if available_ids else "none")
+            return
         # AUTO mode — select biggest person
         biggest_id, biggest_person = _find_biggest_person(person_by_id)
         if biggest_id is not None:
             target_state.set_target(biggest_id)
+            # Match manual-selection state: AUTO acquisition is treated as an explicit lock
+            # so OpenHD reports the real follow_id and the state machine is symmetric.
+            target_state.set_explicit_lock(True)
             target_state.update_last_seen()
+            # Capture current bbox as the distance setpoint so the drone holds the
+            # current distance instead of converging to a fixed target_bbox_height.
+            _capture_bbox_setpoint(config, biggest_person)
             best = biggest_person
             follow_mode = f"AUTO→ID {biggest_id}"
             LOGGER.debug("[AUTO] Selected biggest person ID %s. Available: %s",
@@ -403,7 +461,7 @@ def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, na
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None,
                record_enabled=False, record_dir=None, reid_manager=None,
-               reid_search_timeout: float = 20.0):
+               reid_search_timeout: float = 20.0, controller_config=None):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -438,7 +496,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     byte_tracker=None, reid_manager=None, reid_search_timeout=20.0):
+                     byte_tracker=None, reid_manager=None, reid_search_timeout=20.0,
+                     controller_config=None):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
@@ -446,6 +505,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self.byte_tracker = byte_tracker
             self.reid_manager = reid_manager
             self.reid_search_timeout = reid_search_timeout
+            self.controller_config = controller_config
             self.perf = PerfTracker()
             # Set after app creation so callback can extract frames for ReID
             self.video_width = 0
@@ -940,6 +1000,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
         reid_manager=reid_manager, reid_search_timeout=reid_search_timeout,
+        controller_config=controller_config,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,

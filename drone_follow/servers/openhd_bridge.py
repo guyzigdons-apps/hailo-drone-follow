@@ -43,17 +43,22 @@ _CONFIG_PARAMS = {
     "kp_backward":              ("DF_KP_BACK",    float),
     "max_forward":              ("DF_MAX_FWD",    float),
     "max_backward":             ("DF_MAX_BACK",   float),
+    "max_forward_accel":        ("DF_MAX_ACC",   float),
     "target_center_y":          ("DF_TGT_CY",    float),
     "dead_zone_y_deg":          ("DF_DZ_Y",      float),
+    "dead_zone_deg":            ("DF_DZ_YAW",    float),
     "kp_altitude":              ("DF_KP_ALT",    float),
+    "target_bbox_height":       ("DF_TGT_BH",    float),
     "dead_zone_bbox_percent":   ("DF_DZ_BH_PCT", float),
     "max_climb_speed":          ("DF_MAX_CLM",   float),
+    "max_yawspeed":             ("DF_MAX_YAW",   float),
     "min_altitude":             ("DF_MIN_ALT",   float),
     "max_altitude":             ("DF_MAX_ALT",   float),
     "yaw_alpha":                ("DF_YAW_ALPHA",  float),
     "forward_alpha":            ("DF_FWD_ALPHA",  float),
     "target_altitude":          ("DF_TGT_ALT",   float),
     "yaw_only":                 ("DF_YAW_ONLY",   bool),
+    "auto_select":              ("DF_AUTO_SEL",  bool),
     "smooth_yaw":               ("DF_SMTH_YAW",   bool),
     "smooth_forward":           ("DF_SMTH_FWD",   bool),
     "right_alpha":              ("DF_RT_ALPHA",   float),
@@ -70,6 +75,8 @@ _FOLLOW_ID_PARAM = "follow_id"
 _ACTIVE_ID_PARAM = "active_id"
 _BITRATE_PARAM = "bitrate_kbps"
 _RECORDING_PARAM = "recording"  # 1 = start, 0 = stop; routed to recording_ctl
+_SAVE_CONFIG_PARAM = "save_config"  # 1 = momentary trigger → save ControllerConfig to disk; echo 0 back
+_LOAD_CONFIG_PARAM = "load_config"  # 1 = momentary trigger → live-reload ControllerConfig from disk
 
 
 class OpenHDBridge:
@@ -165,6 +172,10 @@ class OpenHDBridge:
                 self._apply_bitrate(int(value))
             elif param_name == _RECORDING_PARAM:
                 self._apply_recording(int(value))
+            elif param_name == _SAVE_CONFIG_PARAM:
+                self._apply_save_config(int(value))
+            elif param_name == _LOAD_CONFIG_PARAM:
+                self._apply_load_config(int(value))
             elif param_name in _CONFIG_PARAMS:
                 self._apply_config_param(param_name, value)
             else:
@@ -252,6 +263,37 @@ class OpenHDBridge:
             LOGGER.info("[openhd_bridge] Recording stopped → %s", path)
         # Push state immediately so QOpenHD's button updates without
         # waiting for the next periodic report cycle.
+        self._send_immediate_report()
+
+    def _apply_save_config(self, value: int):
+        """Momentary trigger — on value=1, save ControllerConfig to DEFAULT_CONFIG_PATH.
+
+        QOpenHD's toggle returns to OFF automatically via the immediate report
+        (both `save_config` and `load_config` are always reported as 0).
+        """
+        if not value:
+            return
+        from drone_follow.follow_api.config import DEFAULT_CONFIG_PATH
+        try:
+            self._config.save_json(DEFAULT_CONFIG_PATH)
+            LOGGER.info("[openhd_bridge] Config saved → %s", DEFAULT_CONFIG_PATH)
+        except OSError as e:
+            LOGGER.error("[openhd_bridge] Config save failed: %s", e)
+        self._send_immediate_report()
+
+    def _apply_load_config(self, value: int):
+        """Momentary trigger — on value=1, live-reload ControllerConfig from disk."""
+        if not value:
+            return
+        from drone_follow.follow_api.config import DEFAULT_CONFIG_PATH
+        try:
+            changed = self._config.load_from_file(DEFAULT_CONFIG_PATH)
+            LOGGER.info("[openhd_bridge] Config loaded ← %s (%d changed)",
+                        DEFAULT_CONFIG_PATH, len(changed))
+        except FileNotFoundError:
+            LOGGER.warning("[openhd_bridge] No saved config at %s", DEFAULT_CONFIG_PATH)
+        except (OSError, ValueError) as e:
+            LOGGER.error("[openhd_bridge] Config load failed: %s", e)
         self._send_immediate_report()
 
     def _apply_config_param(self, param_name, value):
@@ -344,6 +386,11 @@ class OpenHDBridge:
                 params[_RECORDING_PARAM] = int(bool(self._recording_ctl.is_recording))
             except Exception:
                 pass
+
+        # save_config / load_config are momentary triggers — always reported as 0
+        # so QOpenHD's toggles return to rest after each trigger is processed.
+        params[_SAVE_CONFIG_PARAM] = 0
+        params[_LOAD_CONFIG_PARAM] = 0
 
         payload = {"params": params}
 

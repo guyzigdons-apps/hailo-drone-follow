@@ -237,6 +237,42 @@ export default function App() {
     }
   };
 
+  const [configStatus, setConfigStatus] = useState("");
+
+  const handleConfigSave = async () => {
+    try {
+      const res = await fetch("/api/config/save", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.saved) {
+        setConfigStatus(`Saved → ${data.path}`);
+      } else {
+        setConfigStatus(`Save failed: ${data.error || res.statusText}`);
+      }
+    } catch (e) {
+      setConfigStatus(`Save error: ${e}`);
+    }
+    setTimeout(() => setConfigStatus(""), 4000);
+  };
+
+  const handleConfigLoad = async () => {
+    try {
+      const res = await fetch("/api/config/load", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.loaded) {
+        // Refresh sliders from the live config after the reload
+        const r = await fetch("/api/config");
+        if (r.ok) setConfig(await r.json());
+        const n = Array.isArray(data.changed) ? data.changed.length : 0;
+        setConfigStatus(`Loaded → ${data.path} (${n} changed)`);
+      } else {
+        setConfigStatus(`Load failed: ${data.error || res.statusText}`);
+      }
+    } catch (e) {
+      setConfigStatus(`Load error: ${e}`);
+    }
+    setTimeout(() => setConfigStatus(""), 4000);
+  };
+
   // Debounced POST for config changes
   const postConfig = useCallback((updated) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -324,6 +360,13 @@ export default function App() {
         <button className="clear-btn" onClick={handleClear}>
           Clear Target
         </button>
+        <button className="clear-btn" onClick={handleConfigSave} title="Save current config to df_config.json on the air unit">
+          Save Config
+        </button>
+        <button className="clear-btn" onClick={handleConfigLoad} title="Live-reload config from df_config.json on the air unit">
+          Load Config
+        </button>
+        {configStatus && <span className="config-status">{configStatus}</span>}
       </div>
 
       <div className="main-layout">
@@ -420,6 +463,17 @@ export default function App() {
                   </div>
                 </label>
                 <label className="control-row">
+                  <span className="control-label">Auto Select</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.auto_select ? "toggle-on" : ""}`}
+                      onClick={() => onToggle("auto_select")}
+                    >
+                      {config.auto_select ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
+                <label className="control-row">
                   <span className="control-label">Mode</span>
                   <div className="toggle-wrapper">
                     <button
@@ -498,6 +552,30 @@ export default function App() {
                   />
                   <span className="control-value">{config.kp_yaw.toFixed(1)}</span>
                 </label>
+                <label className="control-row">
+                  <span className="control-label">Max Yaw Rate</span>
+                  <input
+                    type="range"
+                    min="10"
+                    max="360"
+                    step="5"
+                    value={config.max_yawspeed}
+                    onChange={(e) => onSlider("max_yawspeed", e.target.value)}
+                  />
+                  <span className="control-value">{config.max_yawspeed.toFixed(0)}°/s</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Dead Zone Yaw</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="15"
+                    step="0.5"
+                    value={config.dead_zone_deg}
+                    onChange={(e) => onSlider("dead_zone_deg", e.target.value)}
+                  />
+                  <span className="control-value">{config.dead_zone_deg.toFixed(1)}°</span>
+                </label>
                 <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
                   <span className="control-label">KP Forward</span>
                   <input
@@ -523,6 +601,19 @@ export default function App() {
                     onChange={(e) => onSlider("kp_backward", e.target.value)}
                   />
                   <span className="control-value">{config.kp_backward.toFixed(1)}</span>
+                </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">Max Fwd Accel</span>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="10"
+                    step="0.1"
+                    value={config.max_forward_accel}
+                    disabled={config.yaw_only}
+                    onChange={(e) => onSlider("max_forward_accel", e.target.value)}
+                  />
+                  <span className="control-value">{config.max_forward_accel.toFixed(1)} m/s²</span>
                 </label>
                 <label className="control-row">
                   <span className="control-label">Dead Zone Y</span>

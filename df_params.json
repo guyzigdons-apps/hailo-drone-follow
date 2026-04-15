@@ -9,7 +9,8 @@
     {"id": "lat",    "label": "LATERAL",                "order": 3},
     {"id": "track",  "label": "TRACKING",              "order": 7},
     {"id": "video",  "label": "VIDEO",                 "order": 8},
-    {"id": "rec",    "label": "RECORDING",              "order": 9}
+    {"id": "rec",    "label": "RECORDING",              "order": 9},
+    {"id": "config", "label": "CONFIG PERSIST",          "order": 10}
   ],
   "params": [
     {
@@ -60,6 +61,34 @@
       "order": 4,
       "label": "Yaw only (no forward)",
       "description": "Rotate towards the target but do not move forward/backward",
+      "read_only": false
+    },
+    {
+      "id": "max_yawspeed",
+      "mavlink_id": "DF_MAX_YAW",
+      "type": "float",
+      "default": 90.0,
+      "min": 10.0,
+      "max": 360.0,
+      "step": 5.0,
+      "group": "yaw",
+      "order": 5,
+      "label": "Max yaw rate (deg/s)",
+      "description": "Clamp on yaw angular velocity sent to MAVSDK",
+      "read_only": false
+    },
+    {
+      "id": "dead_zone_deg",
+      "mavlink_id": "DF_DZ_YAW",
+      "type": "float",
+      "default": 2.0,
+      "min": 0.0,
+      "max": 15.0,
+      "step": 0.5,
+      "group": "yaw",
+      "order": 6,
+      "label": "Dead-zone yaw (deg)",
+      "description": "Horizontal dead zone in degrees — target within this zone triggers no yaw",
       "read_only": false
     },
     {
@@ -129,7 +158,7 @@
       "group": "fwd",
       "order": 5,
       "label": "Forward smoothing (α)",
-      "description": "Low-pass filter coefficient for forward/backward commands",
+      "description": "Low-pass filter coefficient for forward/backward commands — lower = smoother, higher = more responsive",
       "read_only": false
     },
     {
@@ -144,6 +173,20 @@
       "read_only": false
     },
     {
+      "id": "max_forward_accel",
+      "mavlink_id": "DF_MAX_ACC",
+      "type": "float",
+      "default": 1.5,
+      "min": 0.1,
+      "max": 10.0,
+      "step": 0.1,
+      "group": "fwd",
+      "order": 7,
+      "label": "Max forward accel (m/s²)",
+      "description": "Slew-rate cap on forward velocity — hard m/s² bound independent of max-forward and of the EMA filter. Limits PX4 pitch transients that can push the subject out of frame.",
+      "read_only": false
+    },
+    {
       "id": "right_alpha",
       "mavlink_id": "DF_RT_ALPHA",
       "type": "float",
@@ -154,7 +197,7 @@
       "group": "lat",
       "order": 1,
       "label": "Lateral smoothing (α)",
-      "description": "Low-pass filter coefficient for lateral (orbit) commands",
+      "description": "Low-pass filter coefficient for lateral (orbit) commands — lower = smoother, higher = more responsive",
       "read_only": false
     },
     {
@@ -179,7 +222,7 @@
       "group": "lat",
       "order": 3,
       "label": "Altitude smoothing (α)",
-      "description": "Low-pass filter coefficient for altitude hold commands",
+      "description": "Low-pass filter coefficient for altitude hold commands — lower = smoother, higher = more responsive",
       "read_only": false
     },
     {
@@ -236,6 +279,20 @@
       "read_only": false
     },
     {
+      "id": "target_bbox_height",
+      "mavlink_id": "DF_TGT_BH",
+      "type": "float",
+      "default": 0.3,
+      "min": 0.05,
+      "max": 0.9,
+      "step": 0.01,
+      "group": "target",
+      "order": 1,
+      "label": "Target bbox height (0-1)",
+      "description": "Desired person height in frame (fraction). Drives altitude — smaller = drone flies higher, larger = flies lower. Captured from the target's current bbox at lock time so the drone holds the pilot-chosen distance; adjust here to move closer/further.",
+      "read_only": false
+    },
+    {
       "id": "dead_zone_bbox_percent",
       "mavlink_id": "DF_DZ_BH_PCT",
       "type": "float",
@@ -244,7 +301,7 @@
       "max": 50.0,
       "step": 1.0,
       "group": "target",
-      "order": 1,
+      "order": 2,
       "label": "Dead-zone bbox (%)",
       "description": "Forward/backward dead-zone as a percentage of target bbox height. Error within this zone triggers no forward movement.",
       "read_only": false
@@ -335,6 +392,17 @@
       "hidden": true
     },
     {
+      "id": "auto_select",
+      "mavlink_id": "DF_AUTO_SEL",
+      "type": "bool",
+      "default": true,
+      "group": "track",
+      "order": 3,
+      "label": "Auto-select on clear/loss",
+      "description": "When on, AUTO mode re-acquires the biggest visible person whenever the target is cleared or lost. When off, the drone holds position — pilot-led workflow where the operator explicitly picks targets.",
+      "read_only": false
+    },
+    {
       "id": "bitrate_kbps",
       "mavlink_id": "DF_BITRATE",
       "type": "int",
@@ -357,6 +425,28 @@
       "order": 1,
       "label": "Air-side recording",
       "description": "Toggle air-side recording (post-overlay frames → drone_follow/recordings/*.mp4 on the drone). Available whenever drone-follow runs with --openhd-stream. Air-side recordings have fewer compression artifacts than ground-side and survive RF dropouts.",
+      "read_only": false
+    },
+    {
+      "id": "save_config",
+      "mavlink_id": "DF_SAVE",
+      "type": "bool",
+      "default": false,
+      "group": "config",
+      "order": 1,
+      "label": "Save config (air)",
+      "description": "Momentary trigger — set to ON to save the current controller values to df_config.json on the air unit. The toggle returns to OFF automatically once the save completes. The saved JSON is persisted on the drone's SD card and can be loaded on next boot via `drone-follow --config <path>`.",
+      "read_only": false
+    },
+    {
+      "id": "load_config",
+      "mavlink_id": "DF_LOAD",
+      "type": "bool",
+      "default": false,
+      "group": "config",
+      "order": 2,
+      "label": "Load config (air)",
+      "description": "Momentary trigger — set to ON to live-reload controller values from df_config.json on the air unit into the running drone-follow. All sliders refresh from the reloaded values. Toggle returns to OFF when complete. Does nothing if no saved file exists.",
       "read_only": false
     }
   ]

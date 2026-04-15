@@ -201,6 +201,10 @@ def main():
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
 
+    # Make the live config visible to the detection callback so it can read auto_select
+    # and write target_bbox_height when a target is locked.
+    app.user_data.controller_config = controller_config
+
     # --save-config: dump effective config to JSON and exit
     save_path = getattr(args, "save_config", None)
     if save_path:
@@ -210,7 +214,8 @@ def main():
 
     # Start follow server (always available)
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port,
-                                 reid_manager=reid_manager)
+                                 reid_manager=reid_manager,
+                                 ui_state=ui_state, controller_config=controller_config)
     follow_server.start()
 
     # Start OpenHD parameter bridge (allows QOpenHD to control follow params,
