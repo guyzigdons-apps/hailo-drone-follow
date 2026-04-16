@@ -68,7 +68,7 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
     group.add_argument("--record", action="store_true",
-                       help="Record raw video + detections for the entire session")
+                       help="Auto-start recording on launch (recording is always available from the UI)")
 
     group.add_argument("--no-display", action="store_true",
                        help="Disable display window (headless mode)")
@@ -181,7 +181,7 @@ def main():
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
-                     record_enabled=ui_pre_args.record, record_dir=recordings_dir,
+                     record_enabled=ui_pre_args.record or ui_pre_args.ui, record_dir=recordings_dir,
                      reid_manager=reid_manager,
                      reid_search_timeout=reid_pre_args.reid_timeout)
     args = app.options_menu
