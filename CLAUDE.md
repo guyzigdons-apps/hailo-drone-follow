@@ -6,10 +6,13 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 
 ## Architecture
 
-- **`drone_follow/follow_api/`** — Pure domain logic (follow controller, geometry)
+- **`drone_follow/follow_api/`** — Pure domain logic (follow controller, geometry, shared state)
 - **`drone_follow/drone_api/mavsdk_drone.py`** — MAVSDK adapter; CLI args, connection, control loop
-- **`drone_follow/pipeline_adapter/`** — Hailo/GStreamer detection pipeline
+- **`drone_follow/pipeline_adapter/`** — Hailo/GStreamer detection pipeline, ByteTracker, ReID manager
+- **`drone_follow/servers/`** — HTTP servers (follow API, web UI + MJPEG, OpenHD bridge)
 - **`drone_follow/drone_follow_app.py`** — Main entry point (`main()`), wires everything together
+- **`reid_analysis/`** — ReID embedding extraction and gallery matching strategies
+- **`sim/`** — PX4 SITL simulation (Gazebo, video bridge, MAVLink relay, world files)
 
 ## Key CLI Flags
 
@@ -156,12 +159,27 @@ source setup_env.sh
 drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 ```
 
+### Remote Simulation (sim on one machine, drone-follow on another)
+
+```bash
+# Sim machine — starts PX4, Gazebo, video bridge + MAVLink relay targeting the remote IP:
+sim/start_sim.sh --remote <DRONE_APP_IP> --world 2_person_world
+
+# Drone-follow machine:
+source setup_env.sh
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+```
+
+`--remote <IP>` implies `--bridge` and also starts a MAVLink UDP relay (`sim/mavlink_relay.py`) so both video (5600) and MAVLink (14540) reach the remote machine.
+
 **Key ports:**
 - `14540/udp` — MAVLink (PX4 MAVSDK API, default `--connection`)
 - `5600/udp` — Video feed from Gazebo (via video bridge)
 
-**Bundled worlds** in `drone_follow/sdf_examples/`: `2_person_world`, `2_persons_diagonal`, `random_walk`
+**Bundled worlds** in `sim/worlds/`: `2_person_world`, `2_persons_diagonal`, `random_walk`
 Pass `--world NAME` to `start_sim.sh` to load a custom world (uses PX4's native `PX4_GZ_WORLD` env var).
+
+**Simulation configs** in `sim/configs/`: `simulation.json` (yaw-only, safe for SITL), `simulation_follow.json` (full follow with reduced speeds).
 
 **USB camera with sim:** If using `--input usb` instead of the Gazebo camera, always add `--yaw-only` — forward/altitude commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
 
