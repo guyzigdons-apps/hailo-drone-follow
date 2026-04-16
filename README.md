@@ -208,7 +208,19 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 
 **Key ports:** `14540/udp` (MAVLink), `5600/udp` (video from Gazebo)
 
-**Bundled worlds** in `drone_follow/sdf_examples/`: `2_person_world`, `2_persons_diagonal`, `random_walk`. Pass `--world NAME` to `start_sim.sh`.
+**Bundled worlds** in `sim/worlds/`: `2_person_world`, `2_persons_diagonal`, `random_walk`. Pass `--world NAME` to `start_sim.sh`.
+
+**Remote simulation** (sim on one machine, drone-follow on another):
+```bash
+# Sim machine:
+sim/start_sim.sh --remote <DRONE_APP_IP> --world 2_person_world
+
+# Drone-follow machine:
+source setup_env.sh
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+```
+
+**Simulation configs** in `sim/configs/`: `simulation.json` (yaw-only), `simulation_follow.json` (full follow with reduced speeds).
 
 **USB camera with sim:** Always add `--yaw-only` — forward/altitude commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
 
@@ -252,8 +264,6 @@ drone-follow --config configs/outdoor_follow.json --input rpi --serial --ui
 
 | Preset | Mode | Description |
 |---|---|---|
-| `simulation.json` | Yaw-only | Safe for SITL testing. Forward disabled, longer search timeout. |
-| `simulation_follow.json` | Full follow | SITL with reduced speeds for safe sim testing. |
 | `outdoor_follow.json` | Full follow | Real drone outdoor. 5m altitude, conservative speeds. |
 | `outdoor_yaw_only.json` | Yaw-only | Real drone, rotation only. Safe for first outdoor tests. |
 | `outdoor_orbit.json` | Orbit | Cinematic circling at 1.5 m/s, 5m altitude. |
@@ -341,14 +351,17 @@ drone_follow/
   follow_api/          Pure domain logic (no HW deps) — types, config, controller math, shared state
   drone_api/           MAVSDK flight controller adapter — offboard velocity commands, takeoff/landing
   pipeline_adapter/    Hailo/GStreamer pipeline, ByteTracker, ReID manager
-  servers/             HTTP/UDP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001), OpenHD parameter bridge (UDP 5510 inbound / 5511 outbound)
-  sdf_examples/        Gazebo world SDF files for simulation
+  servers/             HTTP/UDP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001), OpenHD parameter bridge (UDP 5510/5511)
   ui/                  React web dashboard
   drone_follow_app.py  Composition root and CLI entrypoint
 reid_analysis/         ReID embedding extraction and gallery matching strategies
+configs/               Real-drone controller presets (outdoor_follow, outdoor_orbit, etc.)
 sim/
   PX4-Autopilot/       PX4 git submodule (v1.14.0)
   bridge/              Gazebo camera -> UDP video bridge
+  configs/             Simulation parameter presets
+  worlds/              Gazebo world SDF files
+  mavlink_relay.py     UDP relay for remote simulation
   setup_sim.sh         One-time sim setup
   start_sim.sh         Launch PX4 SITL + Gazebo + bridge
 ```

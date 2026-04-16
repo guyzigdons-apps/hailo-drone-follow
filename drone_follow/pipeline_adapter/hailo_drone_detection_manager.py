@@ -761,9 +761,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 if self._recording:
                     LOGGER.warning("[record] Already recording")
                     return None
-                if not self._record_enabled:
-                    LOGGER.error("[record] Recording requires --record flag")
-                    return None
 
                 valve = self.pipeline.get_by_name("record_valve")
                 if valve is None:

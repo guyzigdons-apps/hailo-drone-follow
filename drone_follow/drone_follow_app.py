@@ -68,7 +68,7 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
     group.add_argument("--record", action="store_true",
-                       help="Record raw video + detections for the entire session")
+                       help="Auto-start recording on launch (recording is always available from the UI)")
 
     group.add_argument("--no-display", action="store_true",
                        help="Disable display window (headless mode)")
@@ -146,7 +146,7 @@ def main():
     # trigger it remotely (--openhd-stream brings QOpenHD's Record button into
     # play; --record means autostart). --record additionally drives autostart;
     # the branch alone has negligible cost when the valve stays closed.
-    record_branch_enabled = ui_pre_args.record or ui_pre_args.openhd_stream
+    record_branch_enabled = ui_pre_args.record or ui_pre_args.openhd_stream or ui_pre_args.ui
 
     # Always create SharedUIState — the OpenHD bridge needs it for bbox
     # messages even when the web UI is disabled.
@@ -239,10 +239,6 @@ def main():
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
         try:
-            if app.is_recording:
-                app.stop_recording()
-            else:
-                app.cleanup_recording_branch()
             app.loop.quit()
         except (AttributeError, RuntimeError):
             pass
