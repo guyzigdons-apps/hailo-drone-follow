@@ -133,7 +133,7 @@ class ReIDManager:
     def on_target_selected(self, track_id: int) -> None:
         """Called when operator selects a (possibly new) target. Resets gallery
         if the target changed."""
-        if track_id == self._tracking_id:
+        if track_id == self._tracking_id or track_id == self._original_id:
             return
         with self._lock:
             self._gallery = self._MultiEmbeddingStrategy(max_k=self._max_gallery_size)
@@ -204,7 +204,7 @@ class ReIDManager:
             return None
 
         LOGGER.info("[REID] Searching for lost target ID %d among %d visible persons (gallery: %d embeddings)",
-                    self._tracking_id, len(person_by_id), gallery_count)
+                    self._original_id, len(person_by_id), gallery_count)
 
         crops = []
         tids = []

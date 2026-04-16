@@ -183,6 +183,12 @@ def _app_callback_inner(element, buffer, user_data):
     if target_id is not None:
         best = person_by_id.get(target_id)
 
+        # If not found by target_id, check if ReID has remapped to a new tracker ID
+        if best is None and reid_manager is not None and reid_manager.tracking_id is not None:
+            remapped_tid = reid_manager.tracking_id
+            if remapped_tid != target_id:
+                best = person_by_id.get(remapped_tid)
+
         if best is not None:
             # Successfully tracking target
             target_state.update_last_seen()
@@ -199,8 +205,8 @@ def _app_callback_inner(element, buffer, user_data):
                             user_data.video_width, user_data.video_height)
         else:
             # Target lost by tracker
-            if reid_manager is not None and reid_manager.has_gallery and person_by_id:
-                # ReID gallery exists — try re-identification
+            if reid_manager is not None and reid_manager.has_gallery:
+                # ReID gallery exists — check timeout first
                 last_seen = target_state.get_last_seen()
                 if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
                     LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
@@ -208,15 +214,15 @@ def _app_callback_inner(element, buffer, user_data):
                     target_state.enter_auto_mode()
                     reid_manager.clear()
                     # Fall through to auto-select below
-                else:
+                elif person_by_id:
+                    # Visible persons available — try re-identification
                     frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
                     if frame_bgr is not None:
                         new_tid = reid_manager.try_reidentify(
                             frame_bgr, person_by_id,
                             user_data.video_width, user_data.video_height)
                         if new_tid is not None:
-                            # Re-identified — resume following with the new track ID
-                            target_state.set_target(new_tid)
+                            # Re-identified — resume following, keep original ID in target_state
                             reid_manager.on_reidentified(new_tid)
                             best = person_by_id[new_tid]
                             target_state.update_last_seen()
@@ -227,6 +233,11 @@ def _app_callback_inner(element, buffer, user_data):
                         user_data.shared_state.update(None, available_ids=available_ids)
                         _update_ui(ui_state, persons, person_to_id, None)
                         return
+                else:
+                    # No tracked persons this frame — hold position, wait for next frame
+                    user_data.shared_state.update(None, available_ids=available_ids)
+                    _update_ui(ui_state, persons, person_to_id, None)
+                    return
             else:
                 # No ReID gallery — return to auto mode
                 target_state.enter_auto_mode()
@@ -282,8 +293,8 @@ def _app_callback_inner(element, buffer, user_data):
     ui_person_to_id = person_to_id
     if reid_manager is not None and reid_manager.original_id is not None:
         orig = reid_manager.original_id
-        cur = target_state.get_target() if target_state else None
-        if orig != cur and cur is not None:
+        cur_tracker = reid_manager.tracking_id
+        if orig != cur_tracker and cur_tracker is not None:
             # Remap the followed detection's ID to the original so the
             # green highlight and "Following: ID X" both use it.
             ui_following_id = orig
