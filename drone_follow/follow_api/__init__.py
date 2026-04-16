@@ -7,11 +7,7 @@ only standard library + numpy/scipy.
 from .types import Detection, FollowMode, VelocityCommand
 from .config import ControllerConfig
 from .state import SharedDetectionState, FollowTargetState
-from .controller import (
-    compute_velocity_command,
-    _calculate_forward_speed,
-    _calculate_altitude_speed,
-)
+from .controller import compute_velocity_command
 
 __all__ = [
     "Detection",
@@ -21,6 +17,4 @@ __all__ = [
     "SharedDetectionState",
     "FollowTargetState",
     "compute_velocity_command",
-    "_calculate_forward_speed",
-    "_calculate_altitude_speed",
 ]
