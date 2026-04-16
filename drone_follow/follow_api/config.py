@@ -55,8 +55,6 @@ class ControllerConfig:
     search_enter_delay_s: float = 2.0
     search_timeout_s: float = 60.0
     search_yawspeed_slow: float = 10.0  # yaw speed during search (slower than tracking)
-    search_vel_damp: float = 0.3        # dampening factor for forward/backward speed during search
-    min_search_forward: float = 0.2     # minimum forward speed in search when last bbox was too small
     control_loop_hz: float = 10.0
     # --- Per-axis EMA smoothing ---
     smooth_yaw: bool = True
@@ -188,8 +186,6 @@ class ControllerConfig:
         # Search/follow behavior
         group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
                            help="Seconds without detection before active search starts (default: 2.0)")
-        group.add_argument("--search-vel-damp", type=float, default=defaults.search_vel_damp,
-                           help="Dampening factor for forward/backward speed during search based on last detection (default: 0.3)")
         group.add_argument("--search-timeout", type=float, default=defaults.search_timeout_s,
                            help="Seconds before landing if no person is found (default: 60.0)")
 
@@ -275,7 +271,6 @@ class ControllerConfig:
             max_forward_accel=_arg("max_forward_accel", default=defaults.max_forward_accel),
             max_bbox_height_safety=_arg("max_bbox_height_safety", default=defaults.max_bbox_height_safety),
             search_timeout_s=_arg("search_timeout", "search_timeout_s", default=defaults.search_timeout_s),
-            search_vel_damp=_arg("search_vel_damp", default=defaults.search_vel_damp),
             smooth_yaw=_arg("smooth_yaw", default=defaults.smooth_yaw),
             yaw_alpha=_arg("yaw_alpha", default=defaults.yaw_alpha),
             smooth_forward=_arg("smooth_forward", default=defaults.smooth_forward),
