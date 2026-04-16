@@ -381,7 +381,7 @@ export default function App() {
                   <input
                     type="range"
                     min="0.05"
-                    max="1.0"
+                    max="0.9"
                     step="0.01"
                     value={config.target_bbox_height}
                     disabled={config.yaw_only}
@@ -545,7 +545,7 @@ export default function App() {
                   <input
                     type="range"
                     min="0"
-                    max="10"
+                    max="20"
                     step="0.1"
                     value={config.kp_yaw}
                     onChange={(e) => onSlider("kp_yaw", e.target.value)}
@@ -581,7 +581,7 @@ export default function App() {
                   <input
                     type="range"
                     min="0"
-                    max="10"
+                    max="20"
                     step="0.1"
                     value={config.kp_forward}
                     disabled={config.yaw_only}
@@ -594,7 +594,7 @@ export default function App() {
                   <input
                     type="range"
                     min="0"
-                    max="10"
+                    max="20"
                     step="0.1"
                     value={config.kp_backward}
                     disabled={config.yaw_only}
@@ -655,9 +655,9 @@ export default function App() {
                   <span className="control-label">Yaw Alpha</span>
                   <input
                     type="range"
-                    min="0.05"
+                    min="0.01"
                     max="1.0"
-                    step="0.05"
+                    step="0.01"
                     value={config.yaw_alpha}
                     onChange={(e) => onSlider("yaw_alpha", e.target.value)}
                   />
@@ -679,9 +679,9 @@ export default function App() {
                   <span className="control-label">Fwd Alpha</span>
                   <input
                     type="range"
-                    min="0.05"
+                    min="0.01"
                     max="1.0"
-                    step="0.05"
+                    step="0.01"
                     value={config.forward_alpha}
                     disabled={config.yaw_only}
                     onChange={(e) => onSlider("forward_alpha", e.target.value)}
@@ -704,9 +704,9 @@ export default function App() {
                   <span className="control-label">Right Alpha</span>
                   <input
                     type="range"
-                    min="0.05"
+                    min="0.01"
                     max="1.0"
-                    step="0.05"
+                    step="0.01"
                     value={config.right_alpha}
                     disabled={config.yaw_only}
                     onChange={(e) => onSlider("right_alpha", e.target.value)}
@@ -728,9 +728,9 @@ export default function App() {
                   <span className="control-label">Down Alpha</span>
                   <input
                     type="range"
-                    min="0.05"
+                    min="0.01"
                     max="1.0"
-                    step="0.05"
+                    step="0.01"
                     value={config.down_alpha}
                     onChange={(e) => onSlider("down_alpha", e.target.value)}
                   />
