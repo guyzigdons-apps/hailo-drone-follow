@@ -86,6 +86,11 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--reid-timeout", type=float, default=20.0,
                        help="Seconds to search for a lost locked target via ReID before returning "
                             "to auto mode (default: 20.0)")
+    group.add_argument("--proactive-reid-interval", type=int, default=1,
+                       help="Run proactive ReID every N frames (1=every frame, default: 1)")
+    group.add_argument("--proactive-reid-threshold", type=float, default=0.75,
+                       help="Cosine similarity threshold for proactive ReID swap/recovery "
+                            "(0.0–1.0, default: 0.75)")
 
     # OpenHD integration
     group.add_argument("--openhd-stream", action="store_true",
@@ -165,6 +170,8 @@ def main():
     reid_pre.add_argument("--update-interval", type=int, default=30)
     reid_pre.add_argument("--reid-threshold", type=float, default=0.7)
     reid_pre.add_argument("--reid-timeout", type=float, default=20.0)
+    reid_pre.add_argument("--proactive-reid-interval", type=int, default=1)
+    reid_pre.add_argument("--proactive-reid-threshold", type=float, default=0.75)
     reid_pre_args, _ = reid_pre.parse_known_args()
 
     reid_manager = None
@@ -174,6 +181,8 @@ def main():
             hef_path=reid_pre_args.reid_model,
             update_interval=reid_pre_args.update_interval,
             reid_match_threshold=reid_pre_args.reid_threshold,
+            proactive_threshold=reid_pre_args.proactive_reid_threshold,
+            proactive_interval=reid_pre_args.proactive_reid_interval,
         )
 
     from drone_follow.pipeline_adapter import create_app

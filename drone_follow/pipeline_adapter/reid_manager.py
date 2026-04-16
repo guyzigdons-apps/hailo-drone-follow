@@ -4,6 +4,10 @@ Maintains a gallery of embeddings for the currently followed person.
 When the tracker loses the target, compares all visible detections
 against the gallery to re-identify and resume following.
 
+Proactive mode (default): runs ReID on all visible persons every frame
+to assist tracking — enables instant recovery on ID changes and
+detects tracker swaps.
+
 The Hailo VDevice for the ReID model is created lazily on first use
 so that the detection pipeline's VDevice is always created first.
 """
@@ -52,6 +56,23 @@ def _crop_person(
     return frame_bgr[y1:y2, x1:x2]
 
 
+class ProactiveReIDResult:
+    """Result of proactive ReID validation."""
+    __slots__ = ('current_id_valid', 'current_id_similarity',
+                 'best_match_id', 'best_match_similarity', 'swap_detected',
+                 'gallery_updated')
+
+    def __init__(self, current_id_valid, current_id_similarity,
+                 best_match_id, best_match_similarity, swap_detected,
+                 gallery_updated=False):
+        self.current_id_valid = current_id_valid
+        self.current_id_similarity = current_id_similarity
+        self.best_match_id = best_match_id
+        self.best_match_similarity = best_match_similarity
+        self.swap_detected = swap_detected
+        self.gallery_updated = gallery_updated
+
+
 class ReIDManager:
     """Manages ReID gallery and re-identification for a single followed target.
 
@@ -64,7 +85,9 @@ class ReIDManager:
     """
 
     def __init__(self, hef_path: str, update_interval: int = 30,
-                 max_gallery_size: int = 10, reid_match_threshold: float = 0.6):
+                 max_gallery_size: int = 10, reid_match_threshold: float = 0.6,
+                 proactive_threshold: float = 0.75,
+                 proactive_interval: int = 1):
         self._hef_path = hef_path
         self._max_gallery_size = max_gallery_size
         self._reid_match_threshold = reid_match_threshold
@@ -81,10 +104,20 @@ class ReIDManager:
         self._original_id = None  # ID shown in UI — stays constant through re-identifications
         self._frame_counter = 0
         self._lock = threading.Lock()
+
+        # Proactive ReID settings
+        self._proactive_threshold = proactive_threshold
+        self._proactive_interval = proactive_interval
+        self._proactive_frame_counter = 0
+        self._validity_floor = 0.4
+        self._consecutive_low_count = 0
+        self._consecutive_low_limit = 3
+
         LOGGER.info("[REID] Configured: model=%s, update_interval=%d, "
-                    "max_gallery=%d, threshold=%.2f",
+                    "max_gallery=%d, threshold=%.2f, proactive=%.2f/every %d frames",
                     os.path.basename(hef_path), update_interval,
-                    max_gallery_size, reid_match_threshold)
+                    max_gallery_size, reid_match_threshold,
+                    proactive_threshold, proactive_interval)
 
     # ------------------------------------------------------------------
     # Lazy extractor init
@@ -140,6 +173,8 @@ class ReIDManager:
             self._tracking_id = track_id
             self._original_id = track_id
             self._frame_counter = 0
+            self._proactive_frame_counter = 0
+            self._consecutive_low_count = 0
         LOGGER.info("[REID] New target ID %d — gallery reset", track_id)
 
     def should_update(self) -> bool:
@@ -177,7 +212,142 @@ class ReIDManager:
             LOGGER.warning("[REID] Gallery update failed: %s", e)
 
     # ------------------------------------------------------------------
-    # Re-identification
+    # Proactive ReID
+    # ------------------------------------------------------------------
+
+    def validate_and_identify(self, frame_bgr: np.ndarray, person_by_id: dict,
+                              current_tracking_id: Optional[int],
+                              video_width: int, video_height: int,
+                              ) -> Optional['ProactiveReIDResult']:
+        """Proactive ReID: validate current tracking and identify best match.
+
+        Runs every ``proactive_interval`` frames.  Extracts embeddings for ALL
+        visible persons in a single batch, compares against the gallery, and
+        returns a structured result indicating whether the current tracking is
+        valid, whether a better match exists, and whether a swap was detected.
+
+        Args:
+            frame_bgr: Current frame in BGR format.
+            person_by_id: {track_id: hailo_detection} of visible persons.
+            current_tracking_id: Track ID currently being followed (None if lost).
+            video_width, video_height: Frame dimensions for crop calculation.
+
+        Returns:
+            ProactiveReIDResult, or None if skipped (interval, no gallery, etc.).
+        """
+        self._proactive_frame_counter += 1
+        if self._proactive_frame_counter % self._proactive_interval != 0:
+            return None
+
+        if not self._ensure_extractor():
+            return None
+
+        with self._lock:
+            if self._gallery.size == 0:
+                return None
+
+        if not person_by_id:
+            return None
+
+        # Batch extract embeddings for all visible persons
+        crops = []
+        tids = []
+        for tid, person in person_by_id.items():
+            crop = _crop_person(frame_bgr, person.get_bbox(), video_width, video_height)
+            if crop is not None and crop.size > 0:
+                crops.append(crop)
+                tids.append(tid)
+
+        if not crops:
+            return None
+
+        try:
+            embeddings = self._extractor.extract_embeddings_batch(crops)
+        except Exception as e:
+            LOGGER.warning("[PROACTIVE REID] Batch extraction failed: %s", e)
+            return None
+
+        # Score all persons against gallery
+        current_sim = -1.0
+        best_tid = None
+        best_sim = -1.0
+        current_embedding = None
+
+        with self._lock:
+            for tid, emb in zip(tids, embeddings):
+                _, sim = self._gallery.match(emb, 0.0)
+
+                if tid == current_tracking_id:
+                    current_sim = sim
+                    current_embedding = emb
+
+                if sim > best_sim:
+                    best_sim = sim
+                    best_tid = tid
+
+        # Gallery update: store current target's embedding if valid
+        gallery_updated = False
+        if current_embedding is not None and current_sim >= self._validity_floor:
+            self._frame_counter += 1
+            if self._frame_counter == 1 or self._frame_counter % self._update_interval == 0:
+                name = str(self._original_id)
+                try:
+                    with self._lock:
+                        if self._gallery.size == 0:
+                            self._gallery.add_person(name, current_embedding)
+                            LOGGER.info("[REID] Gallery: first embedding stored for ID %d",
+                                        self._original_id)
+                        else:
+                            count_before = self._gallery.embedding_count(name)
+                            self._gallery.update(name, current_embedding, self._frame_counter)
+                            count = self._gallery.embedding_count(name)
+                            if count_before >= self._max_gallery_size:
+                                LOGGER.info("[REID] Gallery: replaced oldest embedding for ID %d "
+                                            "(%d/%d stored)", self._original_id, count,
+                                            self._max_gallery_size)
+                            else:
+                                LOGGER.info("[REID] Gallery: embedding added for ID %d (%d/%d stored)",
+                                            self._original_id, count, self._max_gallery_size)
+                    gallery_updated = True
+                except Exception as e:
+                    LOGGER.warning("[PROACTIVE REID] Gallery update failed: %s", e)
+
+        # Swap detection
+        swap_detected = False
+        if current_tracking_id is not None:
+            if current_sim < self._validity_floor:
+                self._consecutive_low_count += 1
+            else:
+                self._consecutive_low_count = 0
+
+            if (self._consecutive_low_count >= self._consecutive_low_limit
+                    and best_tid is not None
+                    and best_tid != current_tracking_id
+                    and best_sim >= self._proactive_threshold):
+                swap_detected = True
+                self._consecutive_low_count = 0
+
+        # Determine best_match_id based on context
+        result_match_id = None
+        if current_tracking_id is None:
+            # Target lost — instant recovery
+            if best_tid is not None and best_sim >= self._proactive_threshold:
+                result_match_id = best_tid
+        elif swap_detected:
+            # Tracker following wrong person
+            result_match_id = best_tid
+
+        return ProactiveReIDResult(
+            current_id_valid=(current_sim >= self._validity_floor),
+            current_id_similarity=current_sim,
+            best_match_id=result_match_id,
+            best_match_similarity=best_sim,
+            swap_detected=swap_detected,
+            gallery_updated=gallery_updated,
+        )
+
+    # ------------------------------------------------------------------
+    # Reactive re-identification (fallback)
     # ------------------------------------------------------------------
 
     def try_reidentify(self, frame_bgr: np.ndarray, person_by_id: dict,
@@ -265,6 +435,8 @@ class ReIDManager:
             self._tracking_id = None
             self._original_id = None
             self._frame_counter = 0
+            self._proactive_frame_counter = 0
+            self._consecutive_low_count = 0
 
     def release(self) -> None:
         """Release Hailo NPU resources."""

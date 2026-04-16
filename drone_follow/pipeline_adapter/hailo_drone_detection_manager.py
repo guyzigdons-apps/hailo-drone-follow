@@ -180,6 +180,9 @@ def _app_callback_inner(element, buffer, user_data):
 
     best = None
     follow_mode = ""
+    cached_frame_bgr = None
+    proactive_result = None
+
     if target_id is not None:
         best = person_by_id.get(target_id)
 
@@ -189,22 +192,53 @@ def _app_callback_inner(element, buffer, user_data):
             if remapped_tid != target_id:
                 best = person_by_id.get(remapped_tid)
 
+        # --- Proactive ReID: validate tracking / instant recovery / swap detection ---
+        if reid_manager is not None and reid_manager.has_gallery and person_by_id:
+            cached_frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
+            if cached_frame_bgr is not None:
+                active_tid = reid_manager.tracking_id if best is not None else None
+                proactive_result = reid_manager.validate_and_identify(
+                    cached_frame_bgr, person_by_id, active_tid,
+                    user_data.video_width, user_data.video_height)
+
+                if proactive_result is not None and proactive_result.best_match_id is not None:
+                    new_tid = proactive_result.best_match_id
+                    if best is not None and proactive_result.swap_detected:
+                        LOGGER.info("[PROACTIVE REID] Swap detected: tracker had ID %s (sim=%.3f), "
+                                    "switching to ID %d (sim=%.3f)",
+                                    active_tid, proactive_result.current_id_similarity,
+                                    new_tid, proactive_result.best_match_similarity)
+                        reid_manager.on_reidentified(new_tid)
+                        best = person_by_id[new_tid]
+                        follow_mode = f"REID_SWAP→ID {new_tid}"
+                    elif best is None:
+                        LOGGER.info("[PROACTIVE REID] Instant recovery: ID %d (sim=%.3f)",
+                                    new_tid, proactive_result.best_match_similarity)
+                        reid_manager.on_reidentified(new_tid)
+                        best = person_by_id[new_tid]
+                        follow_mode = f"PROACTIVE_REID→ID {new_tid}"
+
         if best is not None:
             # Successfully tracking target
             target_state.update_last_seen()
-            follow_mode = f"ID {target_id}"
+            if not follow_mode:
+                follow_mode = f"ID {target_id}"
 
             # ReID: build/update gallery while following (auto or locked)
             if reid_manager is not None:
                 reid_manager.on_target_selected(target_id)
-                if reid_manager.should_update():
-                    frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
-                    if frame_bgr is not None:
-                        reid_manager.update_gallery(
-                            frame_bgr, best.get_bbox(),
-                            user_data.video_width, user_data.video_height)
+                # Skip regular gallery update when proactive already handled it
+                if proactive_result is None:
+                    if reid_manager.should_update():
+                        if cached_frame_bgr is None:
+                            cached_frame_bgr = get_frame_bgr(
+                                buffer, user_data.video_width, user_data.video_height)
+                        if cached_frame_bgr is not None:
+                            reid_manager.update_gallery(
+                                cached_frame_bgr, best.get_bbox(),
+                                user_data.video_width, user_data.video_height)
         else:
-            # Target lost by tracker
+            # Target lost by tracker (and proactive didn't find a match)
             if reid_manager is not None and reid_manager.has_gallery:
                 # ReID gallery exists — check timeout first
                 last_seen = target_state.get_last_seen()
@@ -215,14 +249,15 @@ def _app_callback_inner(element, buffer, user_data):
                     reid_manager.clear()
                     # Fall through to auto-select below
                 elif person_by_id:
-                    # Visible persons available — try re-identification
-                    frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
-                    if frame_bgr is not None:
+                    # Reactive fallback: try re-identification with lower threshold
+                    if cached_frame_bgr is None:
+                        cached_frame_bgr = get_frame_bgr(
+                            buffer, user_data.video_width, user_data.video_height)
+                    if cached_frame_bgr is not None:
                         new_tid = reid_manager.try_reidentify(
-                            frame_bgr, person_by_id,
+                            cached_frame_bgr, person_by_id,
                             user_data.video_width, user_data.video_height)
                         if new_tid is not None:
-                            # Re-identified — resume following, keep original ID in target_state
                             reid_manager.on_reidentified(new_tid)
                             best = person_by_id[new_tid]
                             target_state.update_last_seen()
