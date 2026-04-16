@@ -353,14 +353,13 @@ class TestForwardLowPass:
             smooth_forward=True, smooth_yaw=False, smooth_right=False, smooth_down=False,
         )
         api = VelocityCommandAPI(drone=None, config=cfg)
-        loop = asyncio.get_event_loop()
         from drone_follow.follow_api import VelocityCommand
         # Step from 0 → 1.0 m/s; after one send, output should be alpha * step = 0.07
-        first = loop.run_until_complete(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
+        first = asyncio.run(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
         assert first.forward_m_s == pytest.approx(0.07, abs=1e-6)
         # After many sends, converges toward the target
         for _ in range(100):
-            result = loop.run_until_complete(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
+            result = asyncio.run(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
         assert result.forward_m_s == pytest.approx(1.0, abs=0.01)
 
     def test_direction_reversal_is_smooth(self):
@@ -371,16 +370,15 @@ class TestForwardLowPass:
             smooth_forward=True, smooth_yaw=False, smooth_right=False, smooth_down=False,
         )
         api = VelocityCommandAPI(drone=None, config=cfg)
-        loop = asyncio.get_event_loop()
         from drone_follow.follow_api import VelocityCommand
         # Settle at +1.0
         for _ in range(100):
-            loop.run_until_complete(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
+            asyncio.run(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
         # Abrupt flip to -1.0 — output must pass through zero, not jump
-        r = loop.run_until_complete(api.send(VelocityCommand(-1.0, 0.0, 0.0, 0.0)))
+        r = asyncio.run(api.send(VelocityCommand(-1.0, 0.0, 0.0, 0.0)))
         prev = r.forward_m_s
         for _ in range(10):
-            r = loop.run_until_complete(api.send(VelocityCommand(-1.0, 0.0, 0.0, 0.0)))
+            r = asyncio.run(api.send(VelocityCommand(-1.0, 0.0, 0.0, 0.0)))
             nxt = r.forward_m_s
             # Each step should move toward -1.0 monotonically (no overshoot)
             assert nxt <= prev + 1e-9
