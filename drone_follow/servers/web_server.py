@@ -318,6 +318,9 @@ class _WebHandler(BaseHTTPRequestHandler):
             self.send_error(404, "No controller config available")
             return
         length = int(self.headers.get("Content-Length", 0))
+        if length > 65536:  # 64 KB limit
+            self.send_error(413, "Payload too large")
+            return
         raw = self.rfile.read(length) if length else b"{}"
         try:
             payload = json.loads(raw)
@@ -354,11 +357,18 @@ class _WebHandler(BaseHTTPRequestHandler):
             self.send_error(404, "UI not built. Run: cd ui && npm install && npm run build")
             return
 
-        path = self.path.lstrip("/")
+        path = self.path.split("?")[0].split("#")[0]  # strip query/fragment
+        path = path.lstrip("/")
         if not path:
             path = "index.html"
 
-        file_path = os.path.join(self.static_dir, path)
+        file_path = os.path.normpath(os.path.join(self.static_dir, path))
+        # Prevent directory traversal
+        if not file_path.startswith(os.path.normpath(self.static_dir) + os.sep) and \
+           file_path != os.path.normpath(self.static_dir):
+            self.send_error(403, "Forbidden")
+            return
+
         if not os.path.isfile(file_path):
             file_path = os.path.join(self.static_dir, "index.html")
 
