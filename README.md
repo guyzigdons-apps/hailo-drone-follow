@@ -275,6 +275,7 @@ drone_follow/
   ui/                  React web dashboard
   drone_follow_app.py  Composition root and CLI entrypoint
 reid_analysis/         ReID embedding extraction and gallery matching strategies
+configs/               Real-drone controller presets (outdoor_follow, outdoor_orbit, etc.)
 sim/
   PX4-Autopilot/       PX4 git submodule (v1.14.0)
   bridge/              Gazebo camera -> UDP video bridge

@@ -8,8 +8,8 @@ Usage:
         ...
 
 World resolution (--world):
-    - Bare name without extension (e.g. ``2_person_world``) -> ``sdf_examples/<name>.sdf``
-    - Relative path with ``.sdf`` suffix -> tries ``sdf_examples/`` first, then CWD
+    - Bare name without extension (e.g. ``2_person_world``) -> ``sim/worlds/<name>.sdf``
+    - Relative path with ``.sdf`` suffix -> tries ``sim/worlds/`` first, then CWD
     - Absolute path -> used as-is
 
 Known limitation:
@@ -50,8 +50,8 @@ class WorldLoader:
         self._backup_sdf = self._default_sdf.with_suffix(".sdf.bak")
         self._restored = False
 
-        # Resolve world: bare name -> sdf_examples/<name>.sdf
-        # Relative path with suffix -> try sdf_examples/ first, then CWD
+        # Resolve world: bare name -> sim/worlds/<name>.sdf
+        # Relative path with suffix -> try sim/worlds/ first, then CWD
         # Absolute path -> use as-is
         world_path = Path(world)
         if not world_path.suffix:

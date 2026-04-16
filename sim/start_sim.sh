@@ -27,8 +27,13 @@ RELAY_SCRIPT="$SCRIPT_DIR/mavlink_relay.py"
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 NC='\033[0m'
+
+list_worlds() {
+    for f in "$SDF_WORLDS"/*.sdf; do
+        [ -f "$f" ] && echo "  $(basename "$f" .sdf)"
+    done
+}
 
 # Parse flags
 START_BRIDGE=false
@@ -48,7 +53,7 @@ while [[ $# -gt 0 ]]; do
             if [ -z "$2" ] || [[ "$2" == --* ]]; then
                 echo -e "${RED}Error: --world requires a world name${NC}"
                 echo "Available worlds:"
-                ls "$SDF_WORLDS"/*.sdf 2>/dev/null | xargs -I{} basename {} .sdf | sed 's/^/  /'
+                list_worlds
                 exit 1
             fi
             WORLD="$2"; shift 2 ;;
@@ -77,7 +82,7 @@ if [ -n "$WORLD" ]; then
     if [ ! -f "$WORLD_FILE" ]; then
         echo -e "${RED}Error: World not found: $WORLD_FILE${NC}"
         echo "Available worlds:"
-        ls "$SDF_WORLDS"/*.sdf 2>/dev/null | xargs -I{} basename {} .sdf | sed 's/^/  /'
+        list_worlds
         exit 1
     fi
     ln -sf "$WORLD_FILE" "$PX4_WORLDS_DIR/${WORLD}.sdf"

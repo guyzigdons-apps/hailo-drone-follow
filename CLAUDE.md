@@ -6,10 +6,13 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 
 ## Architecture
 
-- **`drone_follow/follow_api/`** — Pure domain logic (follow controller, geometry)
+- **`drone_follow/follow_api/`** — Pure domain logic (follow controller, geometry, shared state)
 - **`drone_follow/drone_api/mavsdk_drone.py`** — MAVSDK adapter; CLI args, connection, control loop
-- **`drone_follow/pipeline_adapter/`** — Hailo/GStreamer detection pipeline
+- **`drone_follow/pipeline_adapter/`** — Hailo/GStreamer detection pipeline, ByteTracker, ReID manager
+- **`drone_follow/servers/`** — HTTP servers (follow API, web UI + MJPEG, OpenHD bridge)
 - **`drone_follow/drone_follow_app.py`** — Main entry point (`main()`), wires everything together
+- **`reid_analysis/`** — ReID embedding extraction and gallery matching strategies
+- **`sim/`** — PX4 SITL simulation (Gazebo, video bridge, MAVLink relay, world files)
 
 ## Key CLI Flags
 

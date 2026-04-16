@@ -223,10 +223,6 @@ def main():
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
         try:
-            if app.is_recording:
-                app.stop_recording()
-            else:
-                app.cleanup_recording_branch()
             app.loop.quit()
         except (AttributeError, RuntimeError):
             pass
