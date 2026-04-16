@@ -60,6 +60,33 @@ def _resolve_serial_connection(args):
         LOGGER.info("[drone] Serial mode: connection = %s", args.connection)
 
 
+def _fix_udp_connection_url(args):
+    """Rewrite udpin:// to udp:// for H15's mavsdk_server which doesn't support udpin://."""
+    conn = getattr(args, "connection", "")
+    if conn.startswith("udpin://"):
+        fixed = conn.replace("udpin://", "udp://", 1)
+        # udpin://0.0.0.0:14540 → udp://:14540 (listen mode)
+        fixed = fixed.replace("udp://0.0.0.0:", "udp://:", 1)
+        args.connection = fixed
+        LOGGER.info("[drone] H15 UDP fix: connection = %s", args.connection)
+
+
+def _fix_mavsdk_server_path():
+    """Ensure mavsdk can find the server binary on H15 (Yocto installs to /usr/bin/)."""
+    import shutil
+    try:
+        import mavsdk
+        pip_path = os.path.join(os.path.dirname(mavsdk.__file__), 'bin', 'mavsdk_server')
+        if not os.path.exists(pip_path):
+            sys_path = shutil.which('mavsdk_server') or '/usr/bin/mavsdk_server'
+            if os.path.exists(sys_path):
+                os.makedirs(os.path.dirname(pip_path), exist_ok=True)
+                os.symlink(sys_path, pip_path)
+                LOGGER.info("[drone] Symlinked mavsdk_server: %s → %s", pip_path, sys_path)
+    except Exception as e:
+        LOGGER.warning("[drone] Could not fix mavsdk_server path: %s", e)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser for H15 (no hailo_apps dependency)."""
     parser = argparse.ArgumentParser(description="Drone Follow — Hailo15")
@@ -88,6 +115,8 @@ def main():
     args = parser.parse_args()
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
+    _fix_udp_connection_url(args)
+    _fix_mavsdk_server_path()
 
     shared_state = SharedDetectionState()
     shutdown = asyncio.Event()
@@ -163,6 +192,7 @@ def main():
         LOGGER.info("[app] Dry-run control loop started (no drone connection)")
     else:
         def run_drone():
+            LOGGER.info("[drone] Thread started, connection=%s", args.connection)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -173,6 +203,7 @@ def main():
                 LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.",
                                exc_info=True)
             finally:
+                LOGGER.info("[drone] Thread exiting")
                 loop.close()
 
         drone_thread = threading.Thread(target=run_drone, daemon=True)
