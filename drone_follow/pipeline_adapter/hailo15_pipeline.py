@@ -201,6 +201,7 @@ class Hailo15PipelineApp:
                 track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=15,
             )
 
+
         # pyhailort inference objects (initialized in _setup_inference)
         self._vdevice = None
         self._configured_model = None
@@ -518,22 +519,72 @@ class Hailo15PipelineApp:
         # Send detections to PC viewer overlay
         self._send_detections_udp(all_detections)
 
-        # Push detections to web UI
-        if self.ui_state is not None:
-            self.ui_state.update_detections([{
-                "id": i,
-                "bbox": [d.center_x - d.bbox_width / 2, d.center_y - d.bbox_height / 2,
-                         d.bbox_width, d.bbox_height],
-                "confidence": d.confidence,
-                "label": d.label,
-            } for i, d in enumerate(all_detections)])
+        # Run tracker for stable IDs
+        ui_dets = []
+        tracked_ids = set()
+        track_by_id = {}  # track_id -> Detection
 
-        # Update shared state with best detection
-        if all_detections:
-            best = max(all_detections, key=lambda d: d.bbox_height * d.confidence)
-            self.shared_state.update(best, available_ids=set())
+        if self._byte_tracker is not None and all_detections:
+            tracks = self._byte_tracker.update(
+                np.array([[d.center_x - d.bbox_width / 2,
+                           d.center_y - d.bbox_height / 2,
+                           d.center_x + d.bbox_width / 2,
+                           d.center_y + d.bbox_height / 2,
+                           d.confidence] for d in all_detections]),
+                (1, 1),
+            )
+            for t in tracks:
+                x1, y1, x2, y2 = t.tlbr
+                tid = int(t.track_id)
+                tracked_ids.add(tid)
+                det = Detection(
+                    label="person",
+                    confidence=float(t.score),
+                    center_x=(x1 + x2) / 2,
+                    center_y=(y1 + y2) / 2,
+                    bbox_height=y2 - y1,
+                    bbox_width=x2 - x1,
+                    timestamp=time.monotonic(),
+                )
+                track_by_id[tid] = det
+                ui_dets.append({
+                    "id": tid,
+                    "bbox": {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1},
+                    "confidence": float(t.score),
+                    "label": "person",
+                })
         else:
-            self.shared_state.update(None, available_ids=set())
+            for i, d in enumerate(all_detections):
+                tracked_ids.add(i)
+                track_by_id[i] = d
+                ui_dets.append({
+                    "id": i,
+                    "bbox": {
+                        "x": d.center_x - d.bbox_width / 2,
+                        "y": d.center_y - d.bbox_height / 2,
+                        "w": d.bbox_width,
+                        "h": d.bbox_height,
+                    },
+                    "confidence": d.confidence,
+                    "label": d.label,
+                })
+
+        # Pick the detection to follow: selected target > largest
+        target_id = self.target_state.get_target() if self.target_state else None
+        if target_id is not None and target_id in track_by_id:
+            follow_det = track_by_id[target_id]
+        elif track_by_id:
+            follow_det = max(track_by_id.values(),
+                             key=lambda d: d.bbox_height * d.confidence)
+        else:
+            follow_det = None
+
+        self.shared_state.update(follow_det, available_ids=tracked_ids)
+
+        # Push to web UI
+        if self.ui_state is not None:
+            following_id = self.target_state.get_target() if self.target_state else None
+            self.ui_state.update_detections(ui_dets, following_id=following_id)
 
         if self._frame_count % 30 == 0:
             LOGGER.info("[h15] frame=%d detections=%d", self._frame_count, len(all_detections))

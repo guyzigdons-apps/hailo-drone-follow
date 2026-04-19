@@ -1,5 +1,109 @@
 import numpy as np
-from scipy.optimize import linear_sum_assignment
+
+try:
+    from scipy.optimize import linear_sum_assignment
+except ImportError:
+    def linear_sum_assignment(cost_matrix):
+        """Hungarian algorithm in pure numpy (Munkres/Kuhn).
+
+        Drop-in replacement for scipy.optimize.linear_sum_assignment.
+        """
+        cost = np.array(cost_matrix, dtype=float)
+        n, m = cost.shape
+        if n > m:
+            # Transpose, solve, swap back
+            col, row = linear_sum_assignment(cost.T)
+            return row, col
+
+        # Pad to square if needed
+        size = max(n, m)
+        padded = np.full((size, size), cost.max() + 1, dtype=float)
+        padded[:n, :m] = cost
+
+        # Step 1: Subtract row and column minimums
+        padded -= padded.min(axis=1, keepdims=True)
+        padded -= padded.min(axis=0, keepdims=True)
+
+        # Iterative augmenting-path assignment
+        row_assign = np.full(size, -1, dtype=int)
+        col_assign = np.full(size, -1, dtype=int)
+
+        for i in range(size):
+            # BFS to find augmenting path from unassigned row i
+            u = np.full(size + 1, 0.0)
+            v = np.full(size + 1, 0.0)
+            # Recompute potentials using the Jonker-Volgenant shortest path method
+            pass
+
+        # Simpler Munkres implementation for small matrices
+        marked = np.zeros((size, size), dtype=int)  # 1=starred, 2=primed
+        row_covered = np.zeros(size, dtype=bool)
+        col_covered = np.zeros(size, dtype=bool)
+
+        # Step 1 already done (row/col reduction)
+        # Step 2: Star zeros
+        for i in range(size):
+            for j in range(size):
+                if padded[i, j] == 0 and not row_covered[i] and not col_covered[j]:
+                    marked[i, j] = 1
+                    row_covered[i] = True
+                    col_covered[j] = True
+        row_covered[:] = False
+        col_covered[:] = False
+
+        while True:
+            # Step 3: Cover columns with starred zeros
+            col_covered = np.any(marked == 1, axis=0)
+            if col_covered.sum() >= size:
+                break
+
+            # Step 4: Find uncovered zero and prime it
+            while True:
+                zeros = (padded == 0) & ~row_covered[:, None] & ~col_covered[None, :]
+                if not zeros.any():
+                    # Step 6: Adjust values
+                    uncovered = ~row_covered[:, None] & ~col_covered[None, :]
+                    min_val = padded[uncovered].min()
+                    padded[row_covered] += min_val
+                    padded[:, ~col_covered] -= min_val
+                    continue
+
+                r, c = np.argwhere(zeros)[0]
+                marked[r, c] = 2  # Prime it
+
+                star_col = np.where(marked[r] == 1)[0]
+                if len(star_col) > 0:
+                    # Cover this row, uncover the star's column
+                    row_covered[r] = True
+                    col_covered[star_col[0]] = False
+                else:
+                    # Step 5: Augmenting path from primed zero
+                    path = [(r, c)]
+                    while True:
+                        # Find starred zero in column
+                        star_row = np.where(marked[:, path[-1][1]] == 1)[0]
+                        if len(star_row) == 0:
+                            break
+                        path.append((star_row[0], path[-1][1]))
+                        # Find primed zero in row
+                        prime_col = np.where(marked[path[-1][0]] == 2)[0][0]
+                        path.append((path[-1][0], prime_col))
+
+                    # Toggle stars along path
+                    for r2, c2 in path:
+                        marked[r2, c2] = 1 if marked[r2, c2] == 2 else 0
+
+                    # Clear primes and covers
+                    marked[marked == 2] = 0
+                    row_covered[:] = False
+                    col_covered[:] = False
+                    break
+
+        # Extract assignment from starred zeros
+        rows, cols = np.where(marked == 1)
+        # Filter to original (non-padded) dimensions
+        mask = (rows < n) & (cols < m)
+        return rows[mask], cols[mask]
 
 class KalmanFilter:
     """

@@ -37,7 +37,7 @@ from drone_follow.follow_api.state import FollowTargetState
 from drone_follow.drone_api import run_live_drone
 from drone_follow.drone_api.mavsdk_drone import add_drone_args
 from drone_follow.servers import FollowServer
-from drone_follow.servers.web_server import SharedUIState, WebServer
+from drone_follow.servers.web_server import SharedUIState, WebServer, _WebHandler
 
 LOGGER = logging.getLogger("drone_follow.app")
 
@@ -149,13 +149,41 @@ def main():
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
     follow_server.start()
 
+    # Patch follow routes into the WebServer handler so everything goes through
+    # port 5001 (avoids needing a second SSH tunnel for the FollowServer port).
+    _orig_do_post = _WebHandler.do_POST
+
+    def _patched_do_post(self):
+        if self.path.startswith("/api/follow/") or self.path.startswith("/follow/"):
+            suffix = self.path.split("/follow/", 1)[1]
+            if suffix in ("clear", ""):
+                target_state.set_target(None)
+                self._send_json({"status": "success", "following_id": None})
+            else:
+                try:
+                    det_id = int(suffix)
+                except ValueError:
+                    self.send_error(400, f"Invalid detection ID: {suffix}")
+                    return
+                available = shared_state.get_available_ids()
+                if det_id not in available:
+                    self._send_json({"status": "error",
+                                     "available_ids": list(available)}, status=404)
+                    return
+                target_state.set_target(det_id)
+                self._send_json({"status": "success", "following_id": det_id})
+        else:
+            _orig_do_post(self)
+
+    _WebHandler.do_POST = _patched_do_post
+
     # Start web server (MJPEG + detections + config UI)
     ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
     LOGGER.info("[app] UI static dir: %s (exists=%s)", ui_dir, os.path.isdir(ui_dir))
     web_server = WebServer(
         ui_state, target_state=target_state, shared_state=shared_state,
         controller_config=controller_config, port=5001, static_dir=ui_dir,
-        follow_server_port=args.follow_server_port, recording_ctl=app)
+        follow_server_port=5001, recording_ctl=app)
     web_server.start()
     LOGGER.info("[app] Web UI at http://10.0.0.1:5001")
 
