@@ -23,7 +23,6 @@ from drone_follow.follow_api.types import VelocityCommand
 from drone_follow.follow_api.config import ControllerConfig
 from drone_follow.follow_api.controller import (
     compute_velocity_command,
-    ForwardSmoother,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -59,47 +58,90 @@ def _to_mavsdk(cmd: VelocityCommand) -> VelocityBodyYawspeed:
 
 class VelocityCommandAPI:
     """Wrapper around drone.offboard.set_velocity_body that enforces max
-    velocity limits and applies an exponential low-pass filter on the yaw axis.
+    velocity limits and applies per-axis exponential low-pass (EMA) filters.
 
     Usage:
         api = VelocityCommandAPI(drone, config)
         await api.send(cmd)          # clamped + filtered
-        await api.send_zero()        # immediate zero (bypasses filter)
+        await api.send_zero()        # immediate zero (resets all filters)
     """
 
-    def __init__(self, drone, config: ControllerConfig, yaw_alpha: Optional[float] = None):
+    def __init__(self, drone, config: ControllerConfig):
         """
         Args:
             drone: MAVSDK System (or None for print-only mode).
-            config: ControllerConfig used to read max_* limits.
-            yaw_alpha: Low-pass filter coefficient for yaw (0..1).
-                       Smaller = more smoothing, larger = faster response.
+            config: ControllerConfig used to read max_* limits and
+                    per-axis smooth_*/alpha settings.
         """
         self._drone = drone
         self._config = config
-        self._yaw_alpha = config.yaw_alpha if yaw_alpha is None else yaw_alpha
         self._filtered_yaw: float = 0.0
+        self._filtered_forward: float = 0.0
+        self._filtered_right: float = 0.0
+        self._filtered_down: float = 0.0
+        # Slew-rate limiter state for the forward axis (tilt-transient safety).
+        # EMA bounds peak acceleration only as a function of step size; a hard
+        # m/s² cap is independent of max_forward and of the EMA filter.
+        self._prev_forward: float = 0.0
+
+    @staticmethod
+    def _ema(raw: float, prev: float, alpha: float) -> float:
+        """First-order exponential moving average (low-pass filter)."""
+        return alpha * raw + (1.0 - alpha) * prev
 
     async def send(self, cmd: VelocityCommand) -> VelocityCommand:
-        """Clamp velocity components, apply yaw low-pass filter, and send.
+        """Clamp velocity components, apply per-axis low-pass filters, and send.
 
         Returns the command that was actually sent (after clamping/filtering).
         """
-        # Clamp each axis to configured maximums
-        forward = max(-self._config.max_backward, min(self._config.max_forward, cmd.forward_m_s))
-        max_lat = self._config.max_orbit_speed
-        right = max(-max_lat, min(max_lat, cmd.right_m_s))
-        down = max(-self._config.max_down_speed, min(self._config.max_down_speed, cmd.down_m_s))
-        yaw_raw = max(-self._config.max_yawspeed, min(self._config.max_yawspeed, cmd.yawspeed_deg_s))
+        cfg = self._config
 
-        if self._config.smooth_yaw:
-            # Low-pass filter on yaw: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
-            self._filtered_yaw = (self._yaw_alpha * yaw_raw
-                                  + (1.0 - self._yaw_alpha) * self._filtered_yaw)
+        # Clamp each axis to configured maximums
+        forward = max(-cfg.max_backward, min(cfg.max_forward, cmd.forward_m_s))
+        max_lat = cfg.max_orbit_speed
+        right = max(-max_lat, min(max_lat, cmd.right_m_s))
+        down = max(-cfg.max_down_speed, min(cfg.max_down_speed, cmd.down_m_s))
+        yaw_raw = max(-cfg.max_yawspeed, min(cfg.max_yawspeed, cmd.yawspeed_deg_s))
+
+        # Per-axis EMA filtering
+        if cfg.smooth_forward:
+            self._filtered_forward = self._ema(forward, self._filtered_forward, cfg.forward_alpha)
+            forward = self._filtered_forward
+        else:
+            self._filtered_forward = forward
+
+        if cfg.smooth_right:
+            self._filtered_right = self._ema(right, self._filtered_right, cfg.right_alpha)
+            right = self._filtered_right
+        else:
+            self._filtered_right = right
+
+        if cfg.smooth_down:
+            self._filtered_down = self._ema(down, self._filtered_down, cfg.down_alpha)
+            down = self._filtered_down
+        else:
+            self._filtered_down = down
+
+        if cfg.smooth_yaw:
+            self._filtered_yaw = self._ema(yaw_raw, self._filtered_yaw, cfg.yaw_alpha)
             yaw_out = self._filtered_yaw
         else:
             self._filtered_yaw = yaw_raw
             yaw_out = yaw_raw
+
+        # Forward-axis slew-rate cap (after EMA): hard m/s² bound on |Δforward/Δt|.
+        # Tames PX4 pitch transients on target acquisition / abrupt distance changes.
+        # Independent of cfg.max_forward and of cfg.forward_alpha.
+        if cfg.max_forward_accel > 0 and cfg.control_loop_hz > 0:
+            max_step = cfg.max_forward_accel / cfg.control_loop_hz
+            delta = forward - self._prev_forward
+            if delta > max_step:
+                forward = self._prev_forward + max_step
+            elif delta < -max_step:
+                forward = self._prev_forward - max_step
+        self._prev_forward = forward
+        # Keep the EMA filter state in sync so it doesn't fight the slew limiter
+        self._filtered_forward = forward
 
         clamped = VelocityCommand(forward, right, down, yaw_out)
 
@@ -109,8 +151,12 @@ class VelocityCommandAPI:
         return clamped
 
     async def send_zero(self) -> None:
-        """Send an immediate zero-velocity command and reset the yaw filter."""
+        """Send an immediate zero-velocity command and reset all filter states."""
         self._filtered_yaw = 0.0
+        self._filtered_forward = 0.0
+        self._filtered_right = 0.0
+        self._filtered_down = 0.0
+        self._prev_forward = 0.0
         zero = VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
         if self._drone is not None:
             await self._drone.offboard.set_velocity_body(zero)
@@ -120,9 +166,13 @@ class VelocityCommandAPI:
         if self._drone is not None:
             await self._drone.offboard.set_velocity_body(_to_mavsdk(cmd))
 
-    def reset_filter(self) -> None:
-        """Reset the yaw low-pass filter state."""
+    def reset_filters(self) -> None:
+        """Reset all per-axis low-pass filter states."""
         self._filtered_yaw = 0.0
+        self._filtered_forward = 0.0
+        self._filtered_right = 0.0
+        self._filtered_down = 0.0
+        self._prev_forward = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +413,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
-    When config.reference_altitude_m is set and altitude_cache is provided, target bbox height is scaled by altitude.
+    Altitude commands come from compute_velocity_command() (bbox_height driven);
+    this loop enforces min/max altitude floor/ceiling only.
     If ui_state is provided, logs are also pushed to the web UI.
     """
     if telemetry_cache is None:
@@ -382,11 +433,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     last_valid_detection: Optional[VelocityCommand] = None
     _prev_target_alt = config.target_altitude
     _prev_cmd: Optional[VelocityCommand] = None
-    _fwd_smoother = ForwardSmoother()
 
     # Constants
-    _ALT_HOLD_KP = 0.5
-    _ALT_HOLD_MAX_SPEED = 1.0
     _LOG_INTERVAL = 1.0
     _FWD_LOG_INTERVAL = 0.5
 
@@ -431,22 +479,24 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 hold_velocity=_prev_cmd,
             )
 
-            if config.smooth_forward and not config.yaw_only:
-                smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
-                cmd = VelocityCommand(smoothed_fwd, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
+            # Altitude limits: clamp bbox_height-driven altitude commands to
+            # [min_altitude, max_altitude].  compute_velocity_command() now
+            # produces the altitude command; we just enforce the floor/ceiling.
+            current_alt = altitude_cache.get("m")
+            if current_alt is not None:
+                down = cmd.down_m_s
+                if current_alt <= config.min_altitude and down > 0:
+                    down = 0.0  # at floor — don't descend further
+                elif current_alt >= config.max_altitude and down < 0:
+                    down = 0.0  # at ceiling — don't climb further
+                if down != cmd.down_m_s:
+                    cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down, cmd.yawspeed_deg_s)
 
-            # Fixed-altitude hold: proportional controller toward target_altitude
-            if config.fixed_altitude and altitude_cache.get("m") is not None:
-                alt_error = config.target_altitude - altitude_cache["m"]
-                if abs(alt_error) > 0.1:  # dead zone to avoid jitter
-                    down_speed = max(-_ALT_HOLD_MAX_SPEED, min(_ALT_HOLD_MAX_SPEED, -_ALT_HOLD_KP * alt_error))
-                    cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
-
-            # Forward-velocity log (throttled)
+            # Control-axes log (throttled)
             if now - _last_fwd_log_time >= _FWD_LOG_INTERVAL and detection is not None:
-                target_bh = config.target_bbox_height
-                _log(f"[FWD] target={target_bh:.2f} bbox={detection.bbox_height:.2f} "
-                     f"final={cmd.forward_m_s:+.2f}", level=logging.DEBUG)
+                _log(f"[CTRL] cy={detection.center_y:.2f} bh={detection.bbox_height:.2f} "
+                     f"fwd={cmd.forward_m_s:+.2f} down={cmd.down_m_s:+.2f}",
+                     level=logging.DEBUG)
                 _last_fwd_log_time = now
 
             cmd = await vel_api.send(cmd)
@@ -473,7 +523,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 # Build altitude + actual velocity string for all modes
                 alt_val = altitude_cache.get("m") if altitude_cache else None
                 alt_str = f" alt={alt_val:.2f}m" if alt_val is not None else ""
-                if alt_val is not None and config.fixed_altitude:
+                if alt_val is not None:
                     alt_err = config.target_altitude - alt_val
                     alt_str += f"(err={alt_err:+.2f})"
                 actual_vd = telemetry_cache.get("vel_down")
@@ -725,7 +775,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                         break
 
                     offboard_lost = asyncio.Event()
-                    vel_api.reset_filter()
+                    vel_api.reset_filters()
                     control_task = asyncio.create_task(
                         live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
                                           ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))

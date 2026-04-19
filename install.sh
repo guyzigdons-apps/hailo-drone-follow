@@ -2,10 +2,13 @@
 set -e
 
 # Install script for drone-follow
-# Installs: hailo-apps (base platform), drone-specific Python deps, and UI
+# Installs: drone-follow Python package (editable) with hailo-apps pulled from
+# GitHub, plus the web UI.
 #
-# Expects hailo-apps to be cloned inside the project directory (./hailo-apps).
-# Override with --hailo-apps-dir or HAILO_APPS_DIR env var.
+# Prerequisites (one-time system setup, NOT done by this script):
+#   - HailoRT and TAPPAS .deb + .whl packages installed (Hailo Developer Zone)
+#   - /usr/local/hailo/resources/ populated with HEF models and C++ postprocess
+#     modules (install via hailo-apps system installer or TAPPAS deb)
 #
 # Usage: ./install.sh [OPTIONS]
 
@@ -20,8 +23,6 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Defaults
-HAILO_APPS_DIR="${HAILO_APPS_DIR:-$SCRIPT_DIR/hailo-apps}"
-SKIP_HAILO_APPS=false
 SKIP_UI=false
 SKIP_PYTHON=false
 
@@ -29,21 +30,13 @@ usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --hailo-apps-dir DIR   Path to hailo-apps checkout (default: ./hailo-apps)"
-    echo "  --skip-hailo-apps      Skip hailo-apps installation (assume already installed)"
     echo "  --skip-ui              Skip UI npm install and build"
-    echo "  --skip-python          Skip Python dependency installation"
+    echo "  --skip-python          Skip Python venv + dependency installation"
     echo "  --help, -h             Show this help message"
-    echo ""
-    echo "Environment variables:"
-    echo "  HAILO_APPS_DIR         Same as --hailo-apps-dir"
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --hailo-apps-dir)   HAILO_APPS_DIR="$2"; shift 2 ;;
-        --hailo-apps-dir=*) HAILO_APPS_DIR="${1#*=}"; shift ;;
-        --skip-hailo-apps)  SKIP_HAILO_APPS=true; shift ;;
         --skip-ui)          SKIP_UI=true; shift ;;
         --skip-python)      SKIP_PYTHON=true; shift ;;
         --help|-h)          usage; exit 0 ;;
@@ -51,67 +44,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-HAILO_APPS_DIR="$(cd "$HAILO_APPS_DIR" 2>/dev/null && pwd || echo "$HAILO_APPS_DIR")"
-
 echo "========================================="
 echo "  drone-follow installer"
 echo "========================================="
 echo ""
 
-# ─── Step 1: Clone & install hailo-apps (full installer) ─────────────
-if ! $SKIP_HAILO_APPS; then
-    echo -e "${GREEN}[1/3] Installing hailo-apps base platform...${NC}"
-
-    if [ ! -d "$HAILO_APPS_DIR" ]; then
-        echo -e "${YELLOW}  hailo-apps not found at: $HAILO_APPS_DIR${NC}"
-        echo -e "  Cloning hailo-apps from github (branch: dev)..."
-        git clone -b dev https://github.com/hailocs/hailo-apps-internal.git "$HAILO_APPS_DIR"
-    fi
-
-    echo -e "  Using hailo-apps at: ${CYAN}$HAILO_APPS_DIR${NC}"
-
-    # ─── Run hailo_installer.sh (installs Hailo software stack) ──────
-    # Skip on RPi (aarch64) — Hailo packages are pre-installed by the OS
-    HAILO_INSTALLER="$HAILO_APPS_DIR/scripts/hailo_installer.sh"
-    if [[ "$(uname -m)" == "aarch64" ]]; then
-        echo -e "${YELLOW}  Skipping hailo_installer.sh on RPi (aarch64) — Hailo packages are pre-installed.${NC}"
-    elif [ -f "$HAILO_INSTALLER" ]; then
-        # Detect Hailo device type
-        HAILO_DEVICE=""
-        if hailortcli fw-control identify 2>/dev/null | grep -qi "hailo-8l\|hailo8l"; then
-            HAILO_DEVICE="hailo8l"
-        elif hailortcli fw-control identify 2>/dev/null | grep -qi "hailo-8\|hailo8"; then
-            HAILO_DEVICE="hailo8"
-        elif hailortcli fw-control identify 2>/dev/null | grep -qi "hailo-10\|hailo10"; then
-            HAILO_DEVICE="hailo10h"
-        fi
-
-        if [ -z "$HAILO_DEVICE" ]; then
-            echo -e "${YELLOW}  Could not auto-detect Hailo device type.${NC}"
-            echo -e "  Please specify your device (hailo8 / hailo8l / hailo10h):"
-            read -r HAILO_DEVICE
-        fi
-
-        if [[ "$HAILO_DEVICE" =~ ^(hailo8|hailo8l|hailo10h)$ ]]; then
-            echo -e "  Running hailo_installer.sh for ${CYAN}$HAILO_DEVICE${NC}..."
-            sudo bash "$HAILO_INSTALLER" "$HAILO_DEVICE"
-        else
-            echo -e "${RED}  Invalid device type '$HAILO_DEVICE'. Skipping hailo_installer.sh.${NC}"
-            echo -e "  Run manually: sudo $HAILO_INSTALLER <hailo8|hailo8l|hailo10h>"
-        fi
-    else
-        echo -e "${YELLOW}  hailo_installer.sh not found at $HAILO_INSTALLER${NC}"
-        echo -e "  Make sure hailo-apps is cloned. You can run it manually later:"
-        echo -e "    sudo $HAILO_INSTALLER <hailo8|hailo8l|hailo10h>"
-    fi
-
-    # Run hailo-apps' own installer (handles venv, python bindings,
-    # resources, and post-install — requires sudo)
-    echo -e "  Running hailo-apps install.sh..."
-    sudo "$HAILO_APPS_DIR/install.sh"
-else
-    echo -e "${YELLOW}[1/3] Skipping hailo-apps installation (--skip-hailo-apps)${NC}"
-fi
+# ─── Step 1: Build repo-owned venv and install Python deps ───────────
+REPO_VENV_DIR="$SCRIPT_DIR/venv"
 
 # ─── Download ReID HEF models ──────────────────────────────────────
 REID_MODELS_DIR="/usr/local/hailo/resources/models/hailo8"
@@ -121,7 +60,6 @@ REID_HEFS=(
 )
 REID_BASE_URL="https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v2.18.0/hailo8"
 
-# Check which HEFs are missing
 MISSING_HEFS=()
 for hef in "${REID_HEFS[@]}"; do
     if [ ! -f "$REID_MODELS_DIR/$hef" ]; then
@@ -146,35 +84,32 @@ else
     echo -e "${GREEN}ReID HEF models already present in $REID_MODELS_DIR${NC}"
 fi
 
-# Resolve hailo-apps venv path (name comes from hailo-apps config.yaml)
-HAILO_VENV_NAME="venv_hailo_apps"
-HAILO_VENV_DIR="$HAILO_APPS_DIR/$HAILO_VENV_NAME"
-
-# ─── Step 2: Install drone-follow into hailo-apps venv ───────────────
 if ! $SKIP_PYTHON; then
-    echo -e "${GREEN}[2/3] Installing drone-follow Python package...${NC}"
+    echo -e "${GREEN}[1/2] Setting up repo Python venv at ${CYAN}$REPO_VENV_DIR${NC}..."
 
-    if [ ! -d "$HAILO_VENV_DIR" ]; then
-        echo -e "${RED}  Error: hailo-apps venv not found at $HAILO_VENV_DIR${NC}"
-        echo -e "  Run without --skip-hailo-apps first, or check your hailo-apps installation."
-        exit 1
+    if [ ! -d "$REPO_VENV_DIR" ]; then
+        python3 -m venv --system-site-packages "$REPO_VENV_DIR"
+        echo -e "  Created venv (--system-site-packages so apt-installed Hailo bindings are visible)."
+    else
+        echo -e "  Reusing existing venv."
     fi
 
-    # Activate hailo-apps venv and install drone-follow into it
-    echo -e "  Activating hailo-apps venv at ${CYAN}$HAILO_VENV_DIR${NC}..."
-    source "$HAILO_VENV_DIR/bin/activate"
+    # shellcheck disable=SC1091
+    source "$REPO_VENV_DIR/bin/activate"
 
-    echo -e "  Installing drone-follow (editable)..."
-    pip install -e "$SCRIPT_DIR"
+    pip install --upgrade pip setuptools wheel
 
-    echo -e "${GREEN}  drone-follow installed into hailo-apps venv.${NC}"
+    echo -e "  Installing drone-follow + hailo-apps from GitHub..."
+    pip install -e ".[hailo]"
+
+    echo -e "${GREEN}  drone-follow + hailo-apps installed into $REPO_VENV_DIR.${NC}"
 else
-    echo -e "${YELLOW}[2/3] Skipping Python dependencies (--skip-python)${NC}"
+    echo -e "${YELLOW}[1/2] Skipping Python dependencies (--skip-python)${NC}"
 fi
 
-# ─── Step 3: Install and build UI ────────────────────────────────────
+# ─── Step 2: Install and build UI ────────────────────────────────────
 if ! $SKIP_UI; then
-    echo -e "${GREEN}[3/3] Installing and building UI...${NC}"
+    echo -e "${GREEN}[2/2] Installing and building UI...${NC}"
 
     UI_DIR="$SCRIPT_DIR/drone_follow/ui"
     if [ ! -f "$UI_DIR/package.json" ]; then
@@ -195,19 +130,50 @@ if ! $SKIP_UI; then
         echo -e "${GREEN}  UI built successfully.${NC}"
     fi
 else
-    echo -e "${YELLOW}[3/3] Skipping UI installation (--skip-ui)${NC}"
+    echo -e "${YELLOW}[2/2] Skipping UI installation (--skip-ui)${NC}"
 fi
 
-# Regenerate setup_env.sh (portable, using SCRIPT_DIR)
+# ─── Regenerate setup_env.sh ─────────────────────────────────────────
 cat > "$SCRIPT_DIR/setup_env.sh" << 'SETUP_EOF'
+#!/bin/bash
+# Auto-generated by install.sh. Activates the repo-owned venv, sets PYTHONPATH,
+# runs the RPi kernel-compatibility check, and loads /usr/local/hailo/resources/.env.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/venv"
+
+# RPi kernel-version check (mirrors hailo-apps/setup_env.sh)
+if uname -a | grep -q "Linux raspberrypi"; then
+    INVALID_KERNELS=("6.12.21" "6.12.22" "6.12.23" "6.12.24" "6.12.25")
+    CURRENT_VERSION=$(uname -r | cut -d '+' -f 1)
+    for k in "${INVALID_KERNELS[@]}"; do
+        if [ "$k" = "$CURRENT_VERSION" ]; then
+            echo "Error: Kernel $CURRENT_VERSION is incompatible." >&2
+            echo "See https://community.hailo.ai/t/raspberry-pi-kernel-compatibility-issue-temporary-fix/15322" >&2
+            return 1
+        fi
+    done
+fi
+
 export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
-# Source hailo-apps setup_env.sh (activates venv, sets PYTHONPATH, loads .env)
-# It uses $(pwd) to resolve paths, so we cd into hailo-apps first
-ORIG_DIR="$(pwd)"
-cd "$SCRIPT_DIR/hailo-apps"
-source "$SCRIPT_DIR/hailo-apps/setup_env.sh"
-cd "$ORIG_DIR"
+
+if [ -d "$VENV_DIR" ]; then
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+    echo "Activated venv at $VENV_DIR"
+else
+    echo "Error: venv not found at $VENV_DIR. Run ./install.sh first." >&2
+    return 1
+fi
+
+ENV_FILE="/usr/local/hailo/resources/.env"
+if [ -f "$ENV_FILE" ]; then
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" =~ ^# ]] && continue
+        export "$key=$value"
+        upper_key=$(echo "$key" | tr '[:lower:]' '[:upper:]')
+        export "$upper_key=$value"
+    done < "$ENV_FILE"
+fi
 SETUP_EOF
 chmod +x "$SCRIPT_DIR/setup_env.sh"
 

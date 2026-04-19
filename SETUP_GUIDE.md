@@ -300,7 +300,7 @@ sudo systemctl restart NetworkManager
 
 ## Camera Modes
 
-There are two integration modes. Both use the Hailo8 for AI detection.
+There are two integration modes. Both use the Hailo8 for AI detection. In both modes, drone-follow's controller parameters are reachable from QOpenHD via the OpenHD parameter bridge (UDP 5510/5511) and from the local web UI (`--ui`, port 5001). Both surfaces edit the same in-process `ControllerConfig` — see [PARAMETERS.md](PARAMETERS.md) for the bridge protocol.
 
 ### Mode A — Camera Type 5 (`X_CAM_TYPE_HAILO_AI`)
 
@@ -382,6 +382,8 @@ drone-follow --input shm:///tmp/openhd_raw_video --no-display \
 
 > Start drone-follow **after** OpenHD.
 
+> **Local debug UI alongside OpenHD:** add `--ui` to either invocation to expose the air-side web UI on port 5001 — useful when SSH'd into the drone for bench testing. Web UI sliders edit the same `ControllerConfig` as QOpenHD's sliders, so changes are visible in both places. See [PARAMETERS.md](PARAMETERS.md) for the bridge protocol.
+
 ### Step 3 — Ground: Start OpenHD
 
 ```bash
@@ -408,13 +410,39 @@ WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
 
 ---
 
-## Ground Recording & Offline Embedding
+## Recording
 
-QOpenHD can record the live video stream on the ground unit along with
-detection metadata and HUD overlay data. Embedding (compositing BBs and HUD
-onto the video) is done offline with a Python script.
+drone-follow supports two complementary capture mechanisms — one on the air unit, one on the ground unit. Pick based on what you care about:
 
-### Recording (in QOpenHD)
+| Aspect | Air-side (`--record`) | Ground-side (QOpenHD) |
+|---|---|---|
+| Stored on | Drone (RPi SD) | Ground unit (`~/Videos/`) |
+| Source | Post-overlay frames at the camera | Raw H.264 demuxed from WFB tee |
+| Compression artifacts | Single encode at the source — **lower artifacts** | Round-trip through WFB radio link |
+| Survives RF dropouts | ✅ | ❌ (loses frames during link loss) |
+| Requires offline embedding | No — bboxes already burned in | Yes — `embed_recording.py` composites `.jsonl` + `.osd` |
+| Triggered by | `--record` CLI flag, web UI Record button | QOpenHD Ground Recording panel |
+
+For archival captures, prefer **air-side** — it's higher quality and link-independent. For in-the-field review with selectable overlays, **ground-side** is more convenient.
+
+### Air-side recording
+
+Add `--record` to either Mode A or Mode B startup. The video is encoded by an ffmpeg subprocess (libx264, ultrafast preset, 5 Mbps) writing to `~/hailo-drone-follow/drone_follow/recordings/rec_<timestamp>.mp4`. Recording auto-starts ~1 s after the GStreamer pipeline reaches PLAYING; it can also be toggled at any time from the web UI's Record button (with `--ui`). On Ctrl-C / EOS / shutdown the file is finalised cleanly.
+
+```bash
+# Mode A + air-side recording:
+drone-follow --input rpi --openhd-stream --record \
+    --connection tcpout://127.0.0.1:5760 \
+    --tiles-x 1 --tiles-y 1
+```
+
+> **QOpenHD remote trigger:** in `--openhd-stream` mode the recording branch is built into the pipeline automatically, so QOpenHD's Record toggle (param `DF_RECORDING`) can start/stop air-side capture mid-flight even without `--record` at launch. `--record` is only required when you want recording to **auto-start** as soon as the pipeline reaches PLAYING. The OpenHD C++ side needs no recompile — `hailo_follow_bridge.cpp` is fully data-driven from `df_params.json`. Just redeploy the JSON to `/usr/local/share/openhd/` on both units and restart OpenHD (air) + QOpenHD (ground) + drone-follow.
+
+### Ground-side recording (QOpenHD) & offline embedding
+
+QOpenHD records the live video stream on the ground unit along with detection metadata and HUD overlay data. Embedding (compositing BBs and HUD onto the video) is done offline with a Python script.
+
+#### Recording (in QOpenHD)
 
 Open the **Ground Recording** sidebar panel (Panel 9). Controls:
 
@@ -431,7 +459,7 @@ deleted. Recordings are saved to `~/Videos/`:
 | `ground_YYYYMMDD_HHMMSS.jsonl` | Detection bounding boxes (one JSON line per frame) |
 | `ground_YYYYMMDD_HHMMSS.osd` | HUD overlay (OSD3 binary — sparse RGBA tiles) |
 
-### Embedding (offline Python script)
+#### Embedding (offline Python script)
 
 The embed tool composites detections and/or HUD overlay onto the recorded
 video. It runs on the Pi (when OpenHD is off) or on any machine with
