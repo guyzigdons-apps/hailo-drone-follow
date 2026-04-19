@@ -35,6 +35,8 @@ class FollowServerHandler(BaseHTTPRequestHandler):
     target_state: FollowTargetState = None
     shared_state: 'SharedDetectionState' = None
     reid_manager = None  # Optional ReIDManager
+    ui_state = None  # Optional SharedUIState — used to look up bbox at lock time
+    controller_config = None  # Optional ControllerConfig — receives target_bbox_height capture
 
     def log_message(self, format, *args):
         LOGGER.debug(format, *args)
@@ -57,6 +59,28 @@ class FollowServerHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self._cors_headers()
         self.end_headers()
+
+    def _capture_bbox_for_id(self, detection_id):
+        """Look up the detection's current bbox via UI state and write target_bbox_height.
+
+        Returns the value actually written, or None if either the UI state or controller
+        config is unavailable or the detection wasn't found in the latest UI snapshot.
+        """
+        if self.ui_state is None or self.controller_config is None:
+            return None
+        snapshot = self.ui_state.get_detections()
+        for det in snapshot.get("detections", []):
+            if det.get("id") == detection_id:
+                bbox = det.get("bbox") or {}
+                h = bbox.get("h")
+                if h is None:
+                    return None
+                # Avoid an import cycle: import locally
+                from drone_follow.pipeline_adapter.hailo_drone_detection_manager import (
+                    capture_bbox_setpoint_from_height,
+                )
+                return capture_bbox_setpoint_from_height(self.controller_config, h, source="CLICK")
+        return None
 
     def do_POST(self):
         if self.path in ("/follow/clear", "/follow/"):
@@ -90,8 +114,14 @@ class FollowServerHandler(BaseHTTPRequestHandler):
             self.target_state.set_paused(False)
             self.target_state.set_target(detection_id)
             self.target_state.set_explicit_lock(True)
-            self._send_json({"status": "success", "following_id": detection_id})
-            LOGGER.info("Now following detection ID: %d", detection_id)
+            # Capture the clicked person's current bbox as the distance setpoint so
+            # the drone holds its current distance instead of converging on a fixed value.
+            captured_h = self._capture_bbox_for_id(detection_id)
+            self._send_json({"status": "success", "following_id": detection_id,
+                             "target_bbox_height": captured_h})
+            LOGGER.info("Now following detection ID: %d (bbox height %s)",
+                        detection_id,
+                        f"{captured_h:.3f}" if captured_h is not None else "n/a")
         else:
             self.send_error(404, "Not Found")
 
@@ -109,12 +139,15 @@ class FollowServer:
     """HTTP server for follow target selection."""
 
     def __init__(self, target_state: FollowTargetState, shared_state: 'SharedDetectionState' = None,
-                 host: str = "0.0.0.0", port: int = 8080, reid_manager=None):
+                 host: str = "0.0.0.0", port: int = 8080, reid_manager=None,
+                 ui_state=None, controller_config=None):
         self.target_state = target_state
         self.shared_state = shared_state
         self.host = host
         self.port = port
         self.reid_manager = reid_manager
+        self.ui_state = ui_state
+        self.controller_config = controller_config
         self.server = None
         self.thread = None
 
@@ -123,6 +156,8 @@ class FollowServer:
         FollowServerHandler.target_state = self.target_state
         FollowServerHandler.shared_state = self.shared_state
         FollowServerHandler.reid_manager = self.reid_manager
+        FollowServerHandler.ui_state = self.ui_state
+        FollowServerHandler.controller_config = self.controller_config
 
         HTTPServer.allow_reuse_address = True
         self.server = HTTPServer((self.host, self.port), FollowServerHandler)

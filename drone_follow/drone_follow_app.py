@@ -68,7 +68,7 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
     group.add_argument("--record", action="store_true",
-                       help="Record raw video + detections for the entire session")
+                       help="Auto-start recording on launch (recording is always available from the UI)")
 
     group.add_argument("--no-display", action="store_true",
                        help="Disable display window (headless mode)")
@@ -130,13 +130,23 @@ def main():
     # Create target state for follow server
     target_state = FollowTargetState()
 
-    # Pre-parse --ui flag to set up web UI before create_app parses all args
+    # Pre-parse --ui flag to set up web UI before create_app parses all args.
+    # --openhd-stream is also pre-parsed because, in OpenHD mode, the recording
+    # branch must be present in the pipeline so QOpenHD's Record button (via the
+    # OpenHD bridge) can toggle capture even when --record wasn't passed at startup.
     ui_pre = argparse.ArgumentParser(add_help=False)
     ui_pre.add_argument("--ui", action="store_true")
     ui_pre.add_argument("--ui-port", type=int, default=5001)
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--record", action="store_true")
+    ui_pre.add_argument("--openhd-stream", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
+
+    # Build the recording branch whenever there is a control surface that can
+    # trigger it remotely (--openhd-stream brings QOpenHD's Record button into
+    # play; --record means autostart). --record additionally drives autostart;
+    # the branch alone has negligible cost when the valve stays closed.
+    record_branch_enabled = ui_pre_args.record or ui_pre_args.openhd_stream or ui_pre_args.ui
 
     # Always create SharedUIState — the OpenHD bridge needs it for bbox
     # messages even when the web UI is disabled.
@@ -181,7 +191,7 @@ def main():
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
-                     record_enabled=ui_pre_args.record, record_dir=recordings_dir,
+                     record_enabled=record_branch_enabled, record_dir=recordings_dir,
                      reid_manager=reid_manager,
                      reid_search_timeout=reid_pre_args.reid_timeout)
     args = app.options_menu
@@ -190,6 +200,10 @@ def main():
 
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
+
+    # Make the live config visible to the detection callback so it can read auto_select
+    # and write target_bbox_height when a target is locked.
+    app.user_data.controller_config = controller_config
 
     # --save-config: dump effective config to JSON and exit
     save_path = getattr(args, "save_config", None)
@@ -200,13 +214,15 @@ def main():
 
     # Start follow server (always available)
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port,
-                                 reid_manager=reid_manager)
+                                 reid_manager=reid_manager,
+                                 ui_state=ui_state, controller_config=controller_config)
     follow_server.start()
 
-    # Start OpenHD parameter bridge (allows QOpenHD to control follow params)
+    # Start OpenHD parameter bridge (allows QOpenHD to control follow params,
+    # bitrate, and air-side recording start/stop).
     openhd_bridge = OpenHDBridge(controller_config, target_state=target_state,
                                  detection_state=shared_state, ui_state=ui_state,
-                                 gst_app=app)
+                                 gst_app=app, recording_ctl=app)
     openhd_bridge.start()
 
     # Start web UI server
@@ -223,10 +239,6 @@ def main():
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
         try:
-            if app.is_recording:
-                app.stop_recording()
-            else:
-                app.cleanup_recording_branch()
             app.loop.quit()
         except (AttributeError, RuntimeError):
             pass

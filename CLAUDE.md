@@ -6,10 +6,13 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 
 ## Architecture
 
-- **`drone_follow/follow_api/`** — Pure domain logic (follow controller, geometry)
+- **`drone_follow/follow_api/`** — Pure domain logic (follow controller, geometry, shared state)
 - **`drone_follow/drone_api/mavsdk_drone.py`** — MAVSDK adapter; CLI args, connection, control loop
-- **`drone_follow/pipeline_adapter/`** — Hailo/GStreamer detection pipeline
+- **`drone_follow/pipeline_adapter/`** — Hailo/GStreamer detection pipeline, ByteTracker, ReID manager
+- **`drone_follow/servers/`** — HTTP servers (follow API, web UI + MJPEG, OpenHD bridge)
 - **`drone_follow/drone_follow_app.py`** — Main entry point (`main()`), wires everything together
+- **`reid_analysis/`** — ReID embedding extraction and gallery matching strategies
+- **`sim/`** — PX4 SITL simulation (Gazebo, video bridge, MAVLink relay, world files)
 
 ## Key CLI Flags
 
@@ -17,11 +20,15 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--serial-baud RATE` — Baud rate (default: 57600)
 - `--connection URL` — MAVSDK connection string (default: `udpin://0.0.0.0:14540` for simulation)
 - `--takeoff-landing` — Enable auto arm/takeoff/land (default: off — drone must already be airborne)
-- `--fixed-altitude` / `--no-fixed-altitude` — Keep altitude fixed (default: on)
-- `--target-altitude M` — Target altitude in metres (default: 3.0). Also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
+- `--target-altitude M` — Target altitude in metres (default: 3.0). Held by a fixed-altitude P loop; also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
 - `--horizontal-mirror` / `--vertical-mirror` — Both default to off (camera right-side up). Pass both flags for 180° rotation if camera is mounted upside-down. The pipeline also passes `mirror_image=False` to `SOURCE_PIPELINE()`.
+- `--ui` / `--ui-port` / `--ui-fps` — Enable the web UI (port 5001 default, 10 FPS MJPEG default). Live video, click-to-follow, and slider-based controller tuning.
+- `--record` — Capture post-overlay frames to `drone_follow/recordings/rec_<timestamp>.mp4` via an ffmpeg subprocess (libx264, 5 Mbps). Auto-starts ~1 s after PLAYING; can also be toggled mid-flight from the web UI's Record button. Saved on the drone — fewer compression artifacts than a ground-side capture, and survives RF dropouts.
+- `--openhd-stream` — Send overlay video to OpenHD via UDP RTP instead of an X11 display sink. Uses x264 software encode (the RPi5 has no HW H.264).
+- `--openhd-port` (default: 5500) / `--openhd-bitrate` (default: 3917 kbps) — OpenHD UDP destination and x264 starting bitrate. Bitrate is updated dynamically from QOpenHD's WFB link recommendation via the OpenHD bridge.
+- `--no-display` — Headless mode (no X11 window). Pair with `--openhd-stream` or SHM input for SSH/bench sessions.
 
 ## Drone Connection
 
@@ -73,6 +80,12 @@ By default (no `--takeoff-landing`), the app streams zero setpoints and waits fo
 ```bash
 # Real drone with OpenHD (RPi — starts OpenHD air + drone-follow):
 scripts/start_air.sh
+# (script invokes: drone-follow --input rpi --openhd-stream \
+#                                --connection tcpout://127.0.0.1:5760 --tiles-x 1 --tiles-y 1)
+
+# Manual OpenHD-mode invocation (e.g. with debug UI on the air unit):
+drone-follow --input rpi --openhd-stream --ui --no-display \
+    --connection tcpout://127.0.0.1:5760 --tiles-x 1 --tiles-y 1
 
 # Dev machine with USB camera + flight controller:
 source setup_env.sh
@@ -85,7 +98,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 
 ## Virtual Environment
 
-All dependencies live in hailo-apps' venv (`hailo-apps/venv_hailo_apps/`). Always `source setup_env.sh` before running — it activates the hailo-apps venv and sets up paths.
+This repo owns its own venv at `./venv/` (created with `--system-site-packages` so apt-installed Hailo bindings are visible). `drone-follow` is installed as an editable package, and `hailo-apps` is pip-installed from GitHub (the `[hailo]` extra in `pyproject.toml`). Always `source setup_env.sh` before running — it activates `./venv/`, exports `PYTHONPATH`, runs the RPi kernel-compatibility check, and loads `/usr/local/hailo/resources/.env`.
 
 ## Development Machine Setup (x86_64)
 
@@ -109,17 +122,15 @@ sudo dpkg -i hailort_<version>_<arch>.deb
 sudo reboot
 hailortcli fw-control identify  # verify device detected
 
-# 2. Run the installer (clones hailo-apps, runs hailo_installer.sh, creates venv, builds UI)
+# 2. Build the repo-owned venv with drone-follow + hailo-apps from GitHub:
 ./install.sh
 
 # Options:
-#   --hailo-apps-dir DIR   Use existing hailo-apps checkout (default: ./hailo-apps)
-#   --skip-hailo-apps      Skip hailo-apps clone and system deps (if already set up)
 #   --skip-ui              Skip UI npm install and build
 #   --skip-python          Skip Python dependency installation
 ```
 
-The installer auto-detects the Hailo device type (hailo8/hailo8l/hailo10h) and runs `hailo-apps/scripts/hailo_installer.sh` with the correct argument.
+`install.sh` creates `./venv/` (no sudo), installs `drone-follow` as editable, and pulls `hailo-apps` from GitHub via the `[hailo]` extra. Re-run after pulling drone-follow updates.
 
 Verify: `source setup_env.sh && drone-follow --help`
 
@@ -156,12 +167,27 @@ source setup_env.sh
 drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 ```
 
+### Remote Simulation (sim on one machine, drone-follow on another)
+
+```bash
+# Sim machine — starts PX4, Gazebo, video bridge + MAVLink relay targeting the remote IP:
+sim/start_sim.sh --remote <DRONE_APP_IP> --world 2_person_world
+
+# Drone-follow machine:
+source setup_env.sh
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+```
+
+`--remote <IP>` implies `--bridge` and also starts a MAVLink UDP relay (`sim/mavlink_relay.py`) so both video (5600) and MAVLink (14540) reach the remote machine.
+
 **Key ports:**
 - `14540/udp` — MAVLink (PX4 MAVSDK API, default `--connection`)
 - `5600/udp` — Video feed from Gazebo (via video bridge)
 
-**Bundled worlds** in `drone_follow/sdf_examples/`: `2_person_world`, `2_persons_diagonal`, `random_walk`
+**Bundled worlds** in `sim/worlds/`: `2_person_world`, `2_persons_diagonal`, `random_walk`
 Pass `--world NAME` to `start_sim.sh` to load a custom world (uses PX4's native `PX4_GZ_WORLD` env var).
+
+**Simulation configs** in `sim/configs/`: `simulation.json` (yaw-only, safe for SITL), `simulation_follow.json` (full follow with reduced speeds).
 
 **USB camera with sim:** If using `--input usb` instead of the Gazebo camera, always add `--yaw-only` — forward/altitude commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
 

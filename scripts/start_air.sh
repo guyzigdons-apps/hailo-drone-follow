@@ -19,7 +19,20 @@ sleep 3
 cd "$REPO_DIR"
 source "$REPO_DIR/setup_env.sh"
 export DISPLAY=:0
-drone-follow --input rpi --openhd-stream --connection tcpout://127.0.0.1:5760 --tiles-x 1 --tiles-y 1 &
+
+# Auto-load saved controller tuning if present (see PARAMETERS.md).
+# The file is gitignored and created via the web UI / QOpenHD "Save Config"
+# button or `drone-follow --save-config $REPO_DIR/df_config.json`.
+CONFIG_FILE="$REPO_DIR/df_config.json"
+CONFIG_ARG=()
+if [ -f "$CONFIG_FILE" ]; then
+    CONFIG_ARG=(--config "$CONFIG_FILE")
+    echo "Loading controller config: $CONFIG_FILE"
+else
+    echo "No df_config.json found at $CONFIG_FILE — using ControllerConfig defaults"
+fi
+
+drone-follow --input rpi --openhd-stream "${CONFIG_ARG[@]}" --connection tcpout://127.0.0.1:5760 --tiles-x 2 --tiles-y 2 &
 FOLLOW_PID=$!
 
 trap "kill $FOLLOW_PID 2>/dev/null; sudo kill $OPENHD_PID 2>/dev/null; wait" EXIT

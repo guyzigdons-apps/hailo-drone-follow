@@ -10,6 +10,7 @@ from drone_follow.follow_api import (
     ControllerConfig,
     compute_velocity_command,
 )
+from drone_follow.drone_api import VelocityCommandAPI
 
 
 def _det(cx=0.5, cy=0.5, bh=0.3):
@@ -92,77 +93,78 @@ class TestYaw:
         assert abs(ratio - (2.0 ** 0.5)) < 0.01
 
 
-# ---- Altitude (vertical centering) ----
-# Default config has fixed_altitude=True; tests below explicitly set False where needed.
+# ---- Altitude (bbox_height → down_m_s) ----
 
-class TestAltitude:
-    def test_centered_within_dead_zone(self, config):
-        cmd = compute_velocity_command(_det(cy=0.51), config)
-        assert cmd.down_m_s == 0.0
-
-    def test_target_below_positive_down(self):
-        """Target below center -> fly down (positive down_m_s)."""
-        config = ControllerConfig(fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        cmd = compute_velocity_command(_det(cy=0.75), config)
-        assert cmd.down_m_s > 0.0
-
-    def test_target_above_negative_down(self):
-        """Target above center -> fly up (negative down_m_s)."""
-        config = ControllerConfig(fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        cmd = compute_velocity_command(_det(cy=0.25), config)
-        assert cmd.down_m_s < 0.0
-
-    def test_altitude_saturation(self):
-        config = ControllerConfig(fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        cmd = compute_velocity_command(_det(cy=1.0), config)
-        assert abs(cmd.down_m_s) <= config.max_down_speed + 0.01
-
-    def test_vfov_scaling(self):
-        """Wider vertical FOV -> larger altitude command for same pixel offset."""
-        narrow = ControllerConfig(vfov=30.0, fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        wide = ControllerConfig(vfov=90.0, fixed_altitude=False, target_distance_m=None, yaw_only=False)
-        det = _det(cy=0.7)
-        cmd_narrow = compute_velocity_command(det, narrow)
-        cmd_wide = compute_velocity_command(det, wide)
-        assert abs(cmd_wide.down_m_s) > abs(cmd_narrow.down_m_s)
-
-
-# ---- Forward/backward (distance via bbox height) ----
-
-class TestForward:
-    def test_at_target_height_in_dead_zone(self, config):
-        """Bbox height == target -> no forward movement (dead zone)."""
+class TestAltitudeFromBbox:
+    def test_at_target_bbox_zero_altitude(self, config):
+        """Bbox at target height -> down_m_s == 0.0."""
         cmd = compute_velocity_command(
             _det(bh=config.target_bbox_height), config
         )
+        assert cmd.down_m_s == 0.0
+
+    def test_small_bbox_descend(self, config):
+        """Small bbox (person far / too high) -> descend (positive down_m_s)."""
+        cmd = compute_velocity_command(_det(bh=0.1), config)
+        assert cmd.down_m_s > 0.0
+
+    def test_large_bbox_climb(self, config):
+        """Large bbox (person close / too low) -> climb (negative down_m_s)."""
+        cmd = compute_velocity_command(_det(bh=0.6), config)
+        assert cmd.down_m_s < 0.0
+
+    def test_emergency_bbox_climb_and_reverse(self, config):
+        """Bbox > max_bbox_height_safety -> emergency max climb + max backward."""
+        cmd = compute_velocity_command(_det(bh=0.9), config)
+        assert cmd.down_m_s == -config.max_climb_speed
+        assert cmd.forward_m_s == -config.max_backward
+
+    def test_yaw_only_zero_altitude(self):
+        """Yaw-only mode -> down_m_s is always 0."""
+        cfg = ControllerConfig(yaw_only=True)
+        for bh in (0.1, 0.3, 0.6):
+            cmd = compute_velocity_command(_det(bh=bh), cfg)
+            assert cmd.down_m_s == 0.0, (
+                f"yaw_only should produce zero altitude (bh={bh})"
+            )
+
+
+# ---- Forward/backward (center_y → forward_m_s) ----
+
+class TestForward:
+    def test_centered_zero_forward(self, config):
+        """Person vertically centered (cy=0.5) -> no forward movement."""
+        cmd = compute_velocity_command(
+            _det(cy=config.target_center_y), config
+        )
         assert cmd.forward_m_s == 0.0
 
-    def test_small_bbox_forward(self, config):
-        """Small bbox (far away) -> fly forward."""
-        cmd = compute_velocity_command(_det(bh=0.1), config)
+    def test_above_center_approach(self, config):
+        """Person above center (cy=0.2) -> approach (positive forward)."""
+        cmd = compute_velocity_command(_det(cy=0.2), config)
         assert cmd.forward_m_s > 0.0
 
-    def test_large_bbox_backward(self, config):
-        """Large bbox (too close) -> fly backward."""
-        cmd = compute_velocity_command(_det(bh=0.6), config)
+    def test_below_center_retreat(self, config):
+        """Person below center (cy=0.8) -> retreat (negative forward)."""
+        cmd = compute_velocity_command(_det(cy=0.8), config)
         assert cmd.forward_m_s < 0.0
 
     def test_forward_saturation(self, config):
-        """Very small bbox -> clamped to max_forward."""
-        cmd = compute_velocity_command(_det(bh=0.01), config)
+        """Very far above center (cy=0.01) -> clamped to max_forward."""
+        cmd = compute_velocity_command(_det(cy=0.01), config)
         assert cmd.forward_m_s <= config.max_forward + 0.01
 
     def test_backward_saturation(self, config):
-        """Very large bbox -> clamped to max_backward."""
-        cmd = compute_velocity_command(_det(bh=0.95), config)
+        """Very far below center (cy=0.99) -> clamped to -max_backward."""
+        cmd = compute_velocity_command(_det(cy=0.99), config)
         assert cmd.forward_m_s >= -config.max_backward - 0.01
 
-    def test_height_dead_zone(self, config):
-        """Bbox slightly off target but within dead zone -> zero forward."""
-        dead_zone = (config.dead_zone_height_percent / 100.0) * config.target_bbox_height
-        small_offset = dead_zone * 0.5
+    def test_dead_zone(self, config):
+        """Small vertical offset within dead_zone_y_deg -> zero forward."""
+        # dead_zone_y_deg=2.0 on vfov=41.0 means normalized offset < 2/41 ≈ 0.049
+        small_offset = 0.01  # 0.01 * 41.0 = 0.41 deg < 2.0 deg dead zone
         cmd = compute_velocity_command(
-            _det(bh=config.target_bbox_height + small_offset), config
+            _det(cy=config.target_center_y + small_offset), config
         )
         assert cmd.forward_m_s == 0.0
 
@@ -171,7 +173,7 @@ class TestForward:
         config.follow_mode = "follow"
         for cx in [0.1, 0.5, 0.9]:
             for cy in [0.1, 0.5, 0.9]:
-                for bh in [0.1, 0.3, 0.8]:
+                for bh in [0.1, 0.3, 0.6]:
                     cmd = compute_velocity_command(_det(cx=cx, cy=cy, bh=bh), config)
                     assert cmd.right_m_s == 0.0
 
@@ -179,8 +181,8 @@ class TestForward:
 # ---- Combined scenarios ----
 
 class TestCombined:
-    def test_perfectly_centered_at_target_distance(self, config):
-        """Target perfectly centered and at desired distance -> all zeros."""
+    def test_perfectly_centered_at_target(self, config):
+        """Target perfectly centered (cy=0.5) and at desired bbox height -> all zeros."""
         cmd = compute_velocity_command(
             _det(cx=0.5, cy=0.5, bh=config.target_bbox_height), config
         )
@@ -189,100 +191,53 @@ class TestCombined:
         assert cmd.down_m_s == 0.0
         assert cmd.yawspeed_deg_s == 0.0
 
-    def test_all_axes_active(self):
-        """Target off-center in all axes simultaneously."""
-        config = ControllerConfig(dead_zone_deg=0.0, dead_zone_height_percent=0.0,
-                                  fixed_altitude=False, target_distance_m=None, yaw_only=False)
+    def test_yaw_and_forward_active_together(self):
+        """Target off-center horizontally and vertically -> both yaw and forward active."""
+        config = ControllerConfig(dead_zone_deg=0.0, dead_zone_y_deg=0.0,
+                                  yaw_only=False)
         cmd = compute_velocity_command(
-            _det(cx=0.7, cy=0.3, bh=0.15), config
+            _det(cx=0.7, cy=0.2, bh=0.3), config
         )
         assert cmd.yawspeed_deg_s > 0.0    # right -> positive yaw
-        assert cmd.down_m_s < 0.0           # above center -> fly up
-        assert cmd.forward_m_s > 0.0        # small bbox -> approach
+        assert cmd.forward_m_s > 0.0       # above center -> approach
 
     def test_custom_gains(self):
         """Custom gain values should scale the output proportionally."""
         cfg_low = ControllerConfig(
-            kp_yaw=1.0, kp_down=0.04, kp_forward=1.5,
-            dead_zone_deg=0.0, dead_zone_height_percent=0.0,
-            fixed_altitude=False, target_distance_m=None, yaw_only=False,
-            max_yawspeed=9999.0, max_down_speed=9999.0,
+            kp_yaw=1.0, kp_forward=1.5,
+            dead_zone_deg=0.0, dead_zone_y_deg=0.0,
+            yaw_only=False,
+            max_yawspeed=9999.0,
             max_forward=9999.0, max_backward=9999.0,
         )
         cfg_high = ControllerConfig(
-            kp_yaw=2.0, kp_down=0.08, kp_forward=3.0,
-            dead_zone_deg=0.0, dead_zone_height_percent=0.0,
-            fixed_altitude=False, target_distance_m=None, yaw_only=False,
-            max_yawspeed=9999.0, max_down_speed=9999.0,
+            kp_yaw=2.0, kp_forward=3.0,
+            dead_zone_deg=0.0, dead_zone_y_deg=0.0,
+            yaw_only=False,
+            max_yawspeed=9999.0,
             max_forward=9999.0, max_backward=9999.0,
         )
-        # Keep bbox away from bottom-of-frame safety path so kp_forward scaling is isolated.
-        det = _det(cx=0.65, cy=0.6, bh=0.15)
+        # cy=0.3 -> above center -> positive forward (approach)
+        det = _det(cx=0.65, cy=0.3, bh=0.3)
         cmd_low = compute_velocity_command(det, cfg_low)
         cmd_high = compute_velocity_command(det, cfg_high)
 
         assert abs(cmd_high.yawspeed_deg_s / cmd_low.yawspeed_deg_s - 2.0) < 0.01
-        assert abs(cmd_high.down_m_s / cmd_low.down_m_s - 2.0) < 0.01
         assert abs(cmd_high.forward_m_s / cmd_low.forward_m_s - 2.0) < 0.01
 
 
 class TestSafetyAndFollowing:
-    def test_safety_retreat_overrides_forward_logic(self):
-        """Over safety bbox threshold should force max backward retreat."""
-        cfg = ControllerConfig(
-            target_bbox_height=0.3,
-            max_bbox_height_safety=0.6,
-            dead_zone_height_percent=50.0,
-            yaw_only=False,
-        )
-        cmd = compute_velocity_command(_det(bh=0.75), cfg)
-        assert cmd.forward_m_s == -cfg.max_backward
-
-    def test_bottom_of_frame_triggers_backward(self):
-        """When bbox bottom edge exceeds bottom_y_threshold, drone should retreat."""
-        cfg = ControllerConfig(
-            target_bbox_height=0.3,
-            dead_zone_height_percent=30.0,
-            bottom_y_threshold=0.7,
-            yaw_only=False,
-        )
-        # cy=0.8, bh=0.3 -> bbox_bottom = 0.95, well above 0.7 threshold
-        cmd = compute_velocity_command(_det(cy=0.8, bh=0.3), cfg)
-        assert cmd.forward_m_s < 0.0
-
-    def test_bottom_of_frame_no_retreat_when_above_threshold(self):
-        """When bbox bottom edge is above threshold, normal forward logic applies."""
-        cfg = ControllerConfig(
-            target_bbox_height=0.3,
-            dead_zone_height_percent=30.0,
-            bottom_y_threshold=0.7,
-            yaw_only=False,
-        )
-        # cy=0.4, bh=0.3 -> bbox_bottom = 0.55, below 0.7 threshold
-        # bh matches target within dead zone -> forward = 0
-        cmd = compute_velocity_command(_det(cy=0.4, bh=0.3), cfg)
-        assert cmd.forward_m_s == 0.0
-
-    def test_bottom_of_frame_ignored_in_yaw_only(self):
-        """Yaw-only mode should not trigger bottom-of-frame backward."""
-        cfg = ControllerConfig(
-            bottom_y_threshold=0.7,
-            yaw_only=True,
-        )
-        # bbox_bottom = 0.95, but yaw_only -> forward stays 0
-        cmd = compute_velocity_command(_det(cy=0.8, bh=0.3), cfg)
-        assert cmd.forward_m_s == 0.0
-
-    def test_yaw_only_keeps_yaw_and_disables_altitude_and_forward(self):
-        """Yaw-only mode still tracks yaw but zeroes forward/down commands."""
-        cfg = ControllerConfig(yaw_only=True, fixed_altitude=False, target_distance_m=None, dead_zone_deg=0.0)
+    def test_yaw_only_keeps_yaw_and_disables_forward_and_down(self):
+        """Yaw-only mode still tracks yaw but zeroes forward and down commands."""
+        cfg = ControllerConfig(yaw_only=True, dead_zone_deg=0.0)
         cmd = compute_velocity_command(_det(cx=0.8, cy=0.2, bh=0.1), cfg)
         assert cmd.yawspeed_deg_s > 0.0
         assert cmd.forward_m_s == 0.0
         assert cmd.down_m_s == 0.0
 
     def test_search_spins_toward_last_seen_side(self):
-        """When target is lost, search yaw direction should follow last known side."""
+        """When target is lost, search yaw direction should follow last known side.
+        Forward should be zero during search."""
         cfg = ControllerConfig()
         last_right = _det(cx=0.8, bh=0.2)
         last_left = _det(cx=0.2, bh=0.2)
@@ -290,11 +245,14 @@ class TestSafetyAndFollowing:
         cmd_left = compute_velocity_command(None, cfg, last_detection=last_left)
         assert cmd_right.yawspeed_deg_s > 0.0
         assert cmd_left.yawspeed_deg_s < 0.0
+        # Search mode: no forward correction
+        assert cmd_right.forward_m_s == 0.0
+        assert cmd_left.forward_m_s == 0.0
 
     def test_search_wait_holds_previous_velocity(self):
         """Before active search, controller should hold last velocity."""
-        cfg = ControllerConfig()
-        hold = compute_velocity_command(_det(cx=0.7, cy=0.5, bh=0.3), cfg)
+        cfg = ControllerConfig(yaw_only=False)
+        hold = compute_velocity_command(_det(cx=0.7, cy=0.3, bh=0.3), cfg)
         cmd = compute_velocity_command(
             None,
             cfg,
@@ -316,61 +274,116 @@ class TestConfigArgs:
         assert cfg.log_verbosity == "debug"
 
 
-# ---- Validation: target_distance_m vs fixed_altitude / target_bbox_height ----
+# ---- Config validation ----
 
 class TestConfigValidation:
     def test_default_config_is_valid(self):
-        """Default config (ysing target-bbox-height + variable altitude) should pass validation."""
-        cfg = ControllerConfig()
-        cfg.validate()
+        """Default config should pass validation."""
+        ControllerConfig().validate()
 
-    def test_distance_with_fixed_altitude_is_valid(self):
-        cfg = ControllerConfig(target_distance_m=10.0, fixed_altitude=True)
-        cfg.validate()
+    def test_min_altitude_must_be_less_than_max(self):
+        """min_altitude >= max_altitude should raise ValueError."""
+        with pytest.raises(ValueError, match="min_altitude"):
+            ControllerConfig(min_altitude=25.0, max_altitude=20.0)
 
-    def test_bbox_height_mode_with_variable_altitude_is_valid(self):
-        cfg = ControllerConfig(target_distance_m=None, fixed_altitude=False)
-        cfg.validate()
+    def test_min_altitude_equals_max_is_invalid(self):
+        with pytest.raises(ValueError, match="min_altitude"):
+            ControllerConfig(min_altitude=10.0, max_altitude=10.0)
 
-    def test_distance_without_fixed_altitude_raises(self):
-        with pytest.raises(ValueError, match="target_distance_m requires fixed_altitude"):
-            ControllerConfig(target_distance_m=8.0, fixed_altitude=False)
+    def test_valid_altitude_range(self):
+        """A valid altitude range should not raise."""
+        ControllerConfig(min_altitude=1.0, max_altitude=50.0).validate()
 
-    def test_validate_catches_invalid_after_mutation(self):
-        cfg = ControllerConfig(target_distance_m=8.0, fixed_altitude=True)
-        cfg.fixed_altitude = False
-        with pytest.raises(ValueError, match="target_distance_m requires fixed_altitude"):
-            cfg.validate()
+    def test_target_center_y_must_be_in_0_1(self):
+        """target_center_y outside (0, 1) should raise ValueError."""
+        with pytest.raises(ValueError, match="target_center_y"):
+            ControllerConfig(target_center_y=0.0)
+        with pytest.raises(ValueError, match="target_center_y"):
+            ControllerConfig(target_center_y=1.0)
+        with pytest.raises(ValueError, match="target_center_y"):
+            ControllerConfig(target_center_y=-0.1)
+
+    def test_target_center_y_valid(self):
+        ControllerConfig(target_center_y=0.5).validate()
+        ControllerConfig(target_center_y=0.3).validate()
 
 
-class TestConfigFromArgsMutualExclusivity:
-    def test_defaults_use_bbox_height_mode(self):
-        """No explicit args -> defaults to target_distance_m=None, fixed_altitude=True."""
-        cfg = ControllerConfig.from_args(SimpleNamespace())
-        assert cfg.target_distance_m is None
-        assert cfg.fixed_altitude is True
+class TestForwardLowPass:
+    """Tests for the center_y-based forward controller and the first-order
+    low-pass (EMA) that attenuates pitch-induced oscillation."""
 
-    def test_explicit_bbox_height_disables_distance(self):
-        """Passing --target-bbox-height should set target_distance_m=None."""
-        cfg = ControllerConfig.from_args(SimpleNamespace(target_bbox_height=0.4))
-        assert cfg.target_distance_m is None
-        assert cfg.target_bbox_height == 0.4
+    def test_dead_zone_holds_zero(self):
+        """Error smaller than dead_zone_y_deg keeps forward at 0."""
+        cfg = ControllerConfig(
+            yaw_only=False, dead_zone_y_deg=5.0, target_center_y=0.5,
+        )
+        # Small offset: 0.02 * 41.0 = 0.82 deg < 5.0 deg dead zone
+        cmd = compute_velocity_command(_det(cy=0.52), cfg)
+        assert cmd.forward_m_s == 0.0
 
-    def test_explicit_distance_without_fixed_altitude_raises(self):
-        """--target-distance with --no-fixed-altitude raises (invalid combination)."""
-        with pytest.raises(ValueError, match="--target-distance requires --fixed-altitude"):
-            ControllerConfig.from_args(SimpleNamespace(target_distance=12.0, fixed_altitude=False))
+    def test_breaks_out_of_dead_zone(self):
+        """Error larger than dead zone produces signed P command."""
+        cfg = ControllerConfig(
+            yaw_only=False, dead_zone_y_deg=2.0, target_center_y=0.5,
+        )
+        # Person above center (cy=0.2) → approach (positive forward)
+        cmd_far = compute_velocity_command(_det(cy=0.2), cfg)
+        assert cmd_far.forward_m_s > 0.0
 
-    def test_explicit_distance_with_fixed_altitude_keeps_distance_mode(self):
-        cfg = ControllerConfig.from_args(SimpleNamespace(target_distance=12.0, fixed_altitude=True))
-        assert cfg.target_distance_m == 12.0
-        assert cfg.fixed_altitude is True
+        # Person below center (cy=0.8) → retreat (negative forward)
+        cmd_close = compute_velocity_command(_det(cy=0.8), cfg)
+        assert cmd_close.forward_m_s < 0.0
 
-    def test_both_distance_and_bbox_raises(self):
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            ControllerConfig.from_args(SimpleNamespace(
-                target_distance=8.0, target_bbox_height=0.3,
-            ))
+    def test_p_command_clamped_to_max(self):
+        """Large errors saturate at max_forward / max_backward."""
+        cfg = ControllerConfig(
+            yaw_only=False, dead_zone_y_deg=0.0, target_center_y=0.5,
+            kp_forward=100.0, kp_backward=100.0, max_forward=1.0, max_backward=1.5,
+        )
+        cmd_approach = compute_velocity_command(_det(cy=0.01), cfg)   # far above center
+        assert cmd_approach.forward_m_s == pytest.approx(1.0, abs=0.01)
+        cmd_retreat = compute_velocity_command(_det(cy=0.99), cfg)    # far below center
+        assert cmd_retreat.forward_m_s == pytest.approx(-1.5, abs=0.01)
+
+    def test_ema_attenuates_step_input(self):
+        """Low alpha produces slow convergence to a step input (via VelocityCommandAPI)."""
+        import asyncio
+        cfg = ControllerConfig(
+            forward_alpha=0.07, max_forward=5.0, max_backward=5.0,
+            smooth_forward=True, smooth_yaw=False, smooth_right=False, smooth_down=False,
+        )
+        api = VelocityCommandAPI(drone=None, config=cfg)
+        from drone_follow.follow_api import VelocityCommand
+        # Step from 0 → 1.0 m/s; after one send, output should be alpha * step = 0.07
+        first = asyncio.run(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
+        assert first.forward_m_s == pytest.approx(0.07, abs=1e-6)
+        # After many sends, converges toward the target
+        for _ in range(100):
+            result = asyncio.run(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
+        assert result.forward_m_s == pytest.approx(1.0, abs=0.01)
+
+    def test_direction_reversal_is_smooth(self):
+        """When input flips sign, EMA transitions through zero smoothly (via VelocityCommandAPI)."""
+        import asyncio
+        cfg = ControllerConfig(
+            forward_alpha=0.2, max_forward=5.0, max_backward=5.0,
+            smooth_forward=True, smooth_yaw=False, smooth_right=False, smooth_down=False,
+        )
+        api = VelocityCommandAPI(drone=None, config=cfg)
+        from drone_follow.follow_api import VelocityCommand
+        # Settle at +1.0
+        for _ in range(100):
+            asyncio.run(api.send(VelocityCommand(1.0, 0.0, 0.0, 0.0)))
+        # Abrupt flip to -1.0 — output must pass through zero, not jump
+        r = asyncio.run(api.send(VelocityCommand(-1.0, 0.0, 0.0, 0.0)))
+        prev = r.forward_m_s
+        for _ in range(10):
+            r = asyncio.run(api.send(VelocityCommand(-1.0, 0.0, 0.0, 0.0)))
+            nxt = r.forward_m_s
+            # Each step should move toward -1.0 monotonically (no overshoot)
+            assert nxt <= prev + 1e-9
+            prev = nxt
+        assert prev < 0.0  # crossed zero, now negative
 
 
 class TestOrbitMode:
@@ -401,8 +414,8 @@ class TestOrbitMode:
     def test_orbit_preserves_yaw_and_forward(self):
         """Orbit mode should still compute yaw and forward normally."""
         cfg = ControllerConfig(follow_mode="orbit", orbit_speed_m_s=1.0,
-                               dead_zone_deg=0.0, dead_zone_height_percent=0.0, yaw_only=False)
-        cmd = compute_velocity_command(_det(cx=0.7, cy=0.5, bh=0.15), cfg)
+                               dead_zone_deg=0.0, dead_zone_y_deg=0.0, yaw_only=False)
+        cmd = compute_velocity_command(_det(cx=0.7, cy=0.2, bh=0.3), cfg)
         assert cmd.yawspeed_deg_s > 0.0  # target right of center
-        assert cmd.forward_m_s > 0.0     # small bbox -> approach
+        assert cmd.forward_m_s > 0.0     # above center -> approach
         assert cmd.right_m_s == 1.0      # lateral orbit velocity

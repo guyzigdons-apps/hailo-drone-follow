@@ -1,6 +1,5 @@
 {
   "yaw_only": true,
-  "fixed_altitude": true,
   "target_altitude": 5.0,
   "kp_yaw": 5.0,
   "smooth_yaw": true,

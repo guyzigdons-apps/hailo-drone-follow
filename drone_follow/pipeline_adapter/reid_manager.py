@@ -81,7 +81,7 @@ class ReIDManager:
         self._original_id = None  # ID shown in UI — stays constant through re-identifications
         self._frame_counter = 0
         self._lock = threading.Lock()
-        LOGGER.info("[REID] Configured: model=%s, update_interval=%d, "
+        LOGGER.debug("[REID] Configured: model=%s, update_interval=%d, "
                     "max_gallery=%d, threshold=%.2f",
                     os.path.basename(hef_path), update_interval,
                     max_gallery_size, reid_match_threshold)
@@ -100,7 +100,7 @@ class ReIDManager:
             try:
                 from reid_analysis.reid_embedding_extractor import HailoReIDExtractor
                 self._extractor = HailoReIDExtractor(self._hef_path)
-                LOGGER.info("[REID] Extractor loaded: %s (dim=%d)",
+                LOGGER.debug("[REID] Extractor loaded: %s (dim=%d)",
                             self._extractor.model_name, self._extractor.embedding_dim)
                 return True
             except Exception as e:
@@ -140,7 +140,7 @@ class ReIDManager:
             self._tracking_id = track_id
             self._original_id = track_id
             self._frame_counter = 0
-        LOGGER.info("[REID] New target ID %d — gallery reset", track_id)
+        LOGGER.debug("[REID] New target ID %d — gallery reset", track_id)
 
     def should_update(self) -> bool:
         """Increment frame counter and return True when it's time to sample."""
@@ -162,16 +162,16 @@ class ReIDManager:
             with self._lock:
                 if self._gallery.size == 0:
                     self._gallery.add_person(name, emb)
-                    LOGGER.info("[REID] Gallery: first embedding stored for ID %d", self._original_id)
+                    LOGGER.debug("[REID] Gallery: first embedding stored for ID %d", self._original_id)
                 else:
                     count_before = self._gallery.embedding_count(name)
                     self._gallery.update(name, emb, self._frame_counter)
                     count = self._gallery.embedding_count(name)
                     if count_before >= self._max_gallery_size:
-                        LOGGER.info("[REID] Gallery: replaced oldest embedding for ID %d (%d/%d stored)",
+                        LOGGER.debug("[REID] Gallery: replaced oldest embedding for ID %d (%d/%d stored)",
                                     self._original_id, count, self._max_gallery_size)
                     else:
-                        LOGGER.info("[REID] Gallery: embedding added for ID %d (%d/%d stored)",
+                        LOGGER.debug("[REID] Gallery: embedding added for ID %d (%d/%d stored)",
                                     self._original_id, count, self._max_gallery_size)
         except Exception as e:
             LOGGER.warning("[REID] Gallery update failed: %s", e)
@@ -203,7 +203,7 @@ class ReIDManager:
         if not person_by_id:
             return None
 
-        LOGGER.info("[REID] Searching for lost target ID %d among %d visible persons (gallery: %d embeddings)",
+        LOGGER.debug("[REID] Searching for lost target ID %d among %d visible persons (gallery: %d embeddings)",
                     self._tracking_id, len(person_by_id), gallery_count)
 
         crops = []
@@ -236,13 +236,13 @@ class ReIDManager:
 
         for tid, sim in sims_log:
             match_str = " << MATCH" if tid == best_tid else ""
-            LOGGER.info("[REID]   ID %d  sim=%.3f  (threshold=%.2f)%s",
+            LOGGER.debug("[REID]   ID %d  sim=%.3f  (threshold=%.2f)%s",
                         tid, sim, self._reid_match_threshold, match_str)
 
         if best_tid is not None:
-            LOGGER.info("[REID] Re-identified target as track ID %d (sim=%.3f)", best_tid, best_sim)
+            LOGGER.debug("[REID] Re-identified target as track ID %d (sim=%.3f)", best_tid, best_sim)
         else:
-            LOGGER.info("[REID] No match found (best sim=%.3f, threshold=%.2f)",
+            LOGGER.debug("[REID] No match found (best sim=%.3f, threshold=%.2f)",
                         max(s for _, s in sims_log) if sims_log else 0.0,
                         self._reid_match_threshold)
         return best_tid
@@ -252,7 +252,7 @@ class ReIDManager:
         self._tracking_id = new_track_id
         # Reset frame counter so we immediately capture a fresh embedding
         self._frame_counter = 0
-        LOGGER.info("[REID] Tracking resumed with new ID %d", new_track_id)
+        LOGGER.debug("[REID] Tracking resumed with new ID %d", new_track_id)
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -272,6 +272,6 @@ class ReIDManager:
             return
         try:
             self._extractor.release()
-            LOGGER.info("[REID] Extractor released")
+            LOGGER.debug("[REID] Extractor released")
         except Exception as e:
             LOGGER.warning("[REID] Failed to release extractor: %s", e)

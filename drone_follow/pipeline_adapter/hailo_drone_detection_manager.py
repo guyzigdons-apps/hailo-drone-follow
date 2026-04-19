@@ -7,6 +7,7 @@ No other module needs to import hailo or gi.repository.
 import argparse
 import logging
 import os
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -113,6 +114,34 @@ def _find_biggest_person(person_by_id):
     return best_id, best_person
 
 
+# Clamp matches df_params.json target_bbox_height min/max
+_TGT_BH_MIN = 0.05
+_TGT_BH_MAX = 0.9
+
+
+def capture_bbox_setpoint_from_height(config, height: float, source: str = "lock") -> Optional[float]:
+    """At lock time, snap controller_config.target_bbox_height to the target's current bbox.
+
+    Centralised so both the AUTO acquisition path (detection manager) and the
+    operator-click path (follow_server) capture distance the same way.
+
+    Returns the clamped value actually written, or None if the config is missing.
+    """
+    if config is None:
+        return None
+    h = max(_TGT_BH_MIN, min(_TGT_BH_MAX, float(height)))
+    config.target_bbox_height = h
+    LOGGER.info("[LOCK %s] target_bbox_height set to %.3f from current bbox", source, h)
+    return h
+
+
+def _capture_bbox_setpoint(config, person):
+    """Convenience wrapper for the hailo-bound caller: pulls height off the bbox."""
+    if person is None:
+        return
+    capture_bbox_setpoint_from_height(config, person.get_bbox().height(), source="AUTO")
+
+
 # ---------------------------------------------------------------------------
 # Main app callback
 # ---------------------------------------------------------------------------
@@ -139,6 +168,8 @@ def _app_callback_inner(element, buffer, user_data):
 
     target_state = user_data.target_state
     ui_state = user_data.ui_state
+    config = user_data.controller_config
+    auto_select = bool(getattr(config, "auto_select", True)) if config is not None else True
 
     if not persons:
         user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
@@ -149,16 +180,23 @@ def _app_callback_inner(element, buffer, user_data):
                 # ReID gallery exists — check timeout
                 last_seen = target_state.get_last_seen()
                 if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
-                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
-                                user_data.reid_search_timeout)
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
+                                user_data.reid_search_timeout,
+                                "auto mode" if auto_select else "IDLE (auto-select off)")
                     target_state.enter_auto_mode()
                     reid_mgr.clear()
+                    if not auto_select:
+                        target_state.set_paused(True)
                 else:
                     LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
                                  target_state.get_target())
             else:
                 target_state.enter_auto_mode()
-                LOGGER.info("[AUTO] Target lost (no persons, no ReID gallery) — returning to auto mode")
+                if not auto_select:
+                    target_state.set_paused(True)
+                    LOGGER.info("[IDLE] Target lost (no persons) — auto-select off, holding position")
+                else:
+                    LOGGER.info("[AUTO] Target lost (no persons, no ReID gallery) — returning to auto mode")
         _paused = target_state.is_paused() if target_state else False
         _update_ui(ui_state, [], {}, None, paused=_paused)
         if target_state is None or target_state.get_target() is None:
@@ -203,11 +241,14 @@ def _app_callback_inner(element, buffer, user_data):
                 # ReID gallery exists — try re-identification
                 last_seen = target_state.get_last_seen()
                 if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
-                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to auto mode",
-                                user_data.reid_search_timeout)
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
+                                user_data.reid_search_timeout,
+                                "auto mode" if auto_select else "IDLE (auto-select off)")
                     target_state.enter_auto_mode()
                     reid_manager.clear()
-                    # Fall through to auto-select below
+                    if not auto_select:
+                        target_state.set_paused(True)
+                    # Fall through to auto-select below (gated on auto_select)
                 else:
                     frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
                     if frame_bgr is not None:
@@ -228,10 +269,15 @@ def _app_callback_inner(element, buffer, user_data):
                         _update_ui(ui_state, persons, person_to_id, None)
                         return
             else:
-                # No ReID gallery — return to auto mode
+                # No ReID gallery — return to auto mode (or IDLE if auto-select disabled)
                 target_state.enter_auto_mode()
-                LOGGER.info("[AUTO] Target ID %s lost — returning to auto mode. Available: %s",
-                            target_id, sorted(available_ids) if available_ids else "none")
+                if not auto_select:
+                    target_state.set_paused(True)
+                    LOGGER.info("[IDLE] Target ID %s lost — auto-select off, holding position. Available: %s",
+                                target_id, sorted(available_ids) if available_ids else "none")
+                else:
+                    LOGGER.info("[AUTO] Target ID %s lost — returning to auto mode. Available: %s",
+                                target_id, sorted(available_ids) if available_ids else "none")
 
     # Re-read target_id after possible enter_auto_mode() calls above
     target_id = target_state.get_target() if target_state is not None else None
@@ -244,11 +290,24 @@ def _app_callback_inner(element, buffer, user_data):
             LOGGER.debug("[IDLE] Paused. Available: %s",
                         sorted(available_ids) if available_ids else "none")
             return
+        if not auto_select:
+            # Auto-select disabled — pilot-led workflow. Hold position; wait for operator click.
+            user_data.shared_state.update(None, available_ids=available_ids)
+            _update_ui(ui_state, persons, person_to_id, None, paused=True)
+            LOGGER.debug("[IDLE] auto-select off — waiting for operator selection. Available: %s",
+                        sorted(available_ids) if available_ids else "none")
+            return
         # AUTO mode — select biggest person
         biggest_id, biggest_person = _find_biggest_person(person_by_id)
         if biggest_id is not None:
             target_state.set_target(biggest_id)
+            # Match manual-selection state: AUTO acquisition is treated as an explicit lock
+            # so OpenHD reports the real follow_id and the state machine is symmetric.
+            target_state.set_explicit_lock(True)
             target_state.update_last_seen()
+            # Capture current bbox as the distance setpoint so the drone holds the
+            # current distance instead of converging to a fixed target_bbox_height.
+            _capture_bbox_setpoint(config, biggest_person)
             best = biggest_person
             follow_mode = f"AUTO→ID {biggest_id}"
             LOGGER.debug("[AUTO] Selected biggest person ID %s. Available: %s",
@@ -402,7 +461,7 @@ def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, na
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None,
                record_enabled=False, record_dir=None, reid_manager=None,
-               reid_search_timeout: float = 20.0):
+               reid_search_timeout: float = 20.0, controller_config=None):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -427,9 +486,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
     from hailo_apps.python.core.common.core import get_pipeline_parser
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
-        QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
+        QUEUE,
         INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-        TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
+        TILE_CROPPER_PIPELINE, SOURCE_PIPELINE, OVERLAY_PIPELINE,
     )
 
     if parser is None:
@@ -437,7 +496,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
-                     byte_tracker=None, reid_manager=None, reid_search_timeout=20.0):
+                     byte_tracker=None, reid_manager=None, reid_search_timeout=20.0,
+                     controller_config=None):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
@@ -445,6 +505,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self.byte_tracker = byte_tracker
             self.reid_manager = reid_manager
             self.reid_search_timeout = reid_search_timeout
+            self.controller_config = controller_config
             self.perf = PerfTracker()
             # Set after app creation so callback can extract frames for ReID
             self.video_width = 0
@@ -465,6 +526,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
             self._record_lock = threading.Lock()
             self._shm_rebuild_pending = False
+            self._ffmpeg_proc = None
 
             # Pre-detect SHM resolution BEFORE super().__init__() so that
             # the tiling configuration (tile grid, overlap, batch size) is
@@ -502,11 +564,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 self._connect_mjpeg_sink()
 
         def _connect_mjpeg_sink(self):
-            """Connect the MJPEG appsink's new-sample signal."""
+            """Connect the MJPEG appsink and record appsink new-sample signals."""
             self._Gst = _get_gst()
             mjpeg_sink = self.pipeline.get_by_name("mjpeg_sink")
             if mjpeg_sink:
                 mjpeg_sink.connect("new-sample", self._on_mjpeg_sample)
+            record_sink = self.pipeline.get_by_name("record_appsink")
+            if record_sink:
+                record_sink.connect("new-sample", self._on_record_sample)
 
         def _on_mjpeg_sample(self, appsink):
             """appsink callback: extract pre-encoded JPEG bytes."""
@@ -518,6 +583,21 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 if success:
                     self._ui_state.update_frame(bytes(map_info.data))
                     buf.unmap(map_info)
+            return Gst.FlowReturn.OK
+
+        def _on_record_sample(self, appsink):
+            """appsink callback: pipe raw RGB frames to ffmpeg subprocess."""
+            Gst = self._Gst
+            sample = appsink.emit("pull-sample")
+            if sample and self._recording and self._ffmpeg_proc:
+                buf = sample.get_buffer()
+                ok, mapinfo = buf.map(Gst.MapFlags.READ)
+                if ok:
+                    try:
+                        self._ffmpeg_proc.stdin.write(mapinfo.data)
+                    except (BrokenPipeError, OSError):
+                        pass
+                    buf.unmap(mapinfo)
             return Gst.FlowReturn.OK
 
         def bus_call(self, bus, message, loop):
@@ -676,36 +756,36 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             return os.path.join(self._record_dir, f"rec_{ts}.mp4")
 
         def start_recording(self, path=None):
-            """Start GStreamer-native recording. Returns the output file path."""
-            Gst = _get_gst()
-
+            """Spawn ffmpeg subprocess and open valve. Returns the output file path."""
             with self._record_lock:
                 if self._recording:
                     LOGGER.warning("[record] Already recording")
                     return None
-                if not self._record_enabled:
-                    LOGGER.error("[record] Recording requires --record flag")
-                    return None
 
                 valve = self.pipeline.get_by_name("record_valve")
-                encoder = self.pipeline.get_by_name("record_enc")
-                muxer = self.pipeline.get_by_name("record_mux")
-                filesink = self.pipeline.get_by_name("record_sink")
-                if valve is None or filesink is None:
-                    LOGGER.error("[record] Recording elements not found in pipeline")
+                if valve is None:
+                    LOGGER.error("[record] record_valve not found in pipeline")
                     return None
 
                 record_path = path or self._generate_record_path()
+                width, height = self.video_width, self.video_height
+                # --frame-rate has no parser default in hailo-apps, so
+                # self.frame_rate can be None when the user doesn't pass -f.
+                # ffmpeg requires an integer for -r, so fall back to the
+                # documented 30 FPS default.
+                fps = self.frame_rate or 30
+                LOGGER.info("[record] Spawning ffmpeg: %sx%s @ %s fps → %s",
+                            width, height, fps, record_path)
 
-                # Cycle encoder, muxer, and filesink through NULL to clear
-                # any leftover EOS state from a previous recording session
-                for el in (filesink, muxer, encoder):
-                    if el is not None:
-                        el.set_state(Gst.State.NULL)
-                filesink.set_property("location", record_path)
-                for el in (encoder, muxer, filesink):
-                    if el is not None:
-                        el.sync_state_with_parent()
+                self._ffmpeg_proc = subprocess.Popen([
+                    "ffmpeg", "-y", "-nostdin",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24",
+                    "-s", f"{width}x{height}", "-r", str(fps),
+                    "-i", "pipe:0",
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-tune", "zerolatency", "-b:v", "5000k",
+                    record_path,
+                ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 valve.set_property("drop", False)
                 self._recording = True
@@ -714,33 +794,31 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return record_path
 
         def stop_recording(self):
-            """Stop recording and finalize the file."""
-            Gst = _get_gst()
-
+            """Close valve and finalize ffmpeg in background. Non-blocking."""
             with self._record_lock:
                 if not self._recording:
                     return None
 
                 valve = self.pipeline.get_by_name("record_valve")
-                encoder = self.pipeline.get_by_name("record_enc")
-                muxer = self.pipeline.get_by_name("record_mux")
-                filesink = self.pipeline.get_by_name("record_sink")
-                if valve is None:
-                    self._recording = False
-                    return None
+                if valve:
+                    valve.set_property("drop", True)
 
                 self._recording = False
-                path = getattr(self, "_current_record_path", None)
+                path = self._current_record_path
+                proc = self._ffmpeg_proc
+                self._ffmpeg_proc = None
 
-                # Close the valve first to stop new buffers entering
-                valve.set_property("drop", True)
+                def _finalize():
+                    try:
+                        if proc and proc.stdin:
+                            proc.stdin.close()
+                        if proc:
+                            proc.wait(timeout=5)
+                    except Exception:
+                        LOGGER.exception("[record] ffmpeg finalize error")
+                    LOGGER.info("[record] Finalized: %s", path)
 
-                # Transition encoder → muxer → filesink to NULL.
-                # matroskamux finalises the file (writes Cues/SeekHead/duration)
-                # during its state change — no EOS needed.
-                for el in (encoder, muxer, filesink):
-                    if el is not None:
-                        el.set_state(Gst.State.NULL)
+                threading.Thread(target=_finalize, daemon=True).start()
 
                 LOGGER.info("[record] Stopped recording: %s", path)
                 return path
@@ -751,7 +829,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 return
             Gst = _get_gst()
             with self._record_lock:
-                for name in ("record_enc", "record_mux", "record_sink"):
+                for name in ("record_valve", "record_appsink"):
                     el = self.pipeline.get_by_name(name)
                     if el is not None:
                         el.set_state(Gst.State.NULL)
@@ -765,6 +843,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             if not self._ui_enabled and not self._record_enabled and not openhd_stream and not is_shm and not no_display:
                 return super().get_pipeline_string()
 
+            # Build pipeline with tee: one branch for display, one for MJPEG appsink,
+            # and (if recording is enabled) one raw-RGB appsink for ffmpeg subprocess.
             if is_shm:
                 source_pipeline = _shm_source_pipeline(
                     self.video_source, self.video_width, self.video_height,
@@ -777,7 +857,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     video_height=self.video_height,
                     frame_rate=self.frame_rate,
                     sync=self.sync,
-                    horizontal_mirror=False,
                 )
 
             detection_pipeline = INFERENCE_PIPELINE(
@@ -827,24 +906,25 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-            # Primary output branch: OpenHD stream, display, or fakesink
+            # Primary output sink (WITHOUT overlay — overlay is shared upstream)
             if openhd_stream:
                 openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
                 openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 3917)
-                primary_branch = (
-                    f"{OVERLAY_PIPELINE(name='openhd_overlay')} ! " +
-                    _openhd_stream_pipeline(port=openhd_port, bitrate=openhd_bitrate)
-                )
+                primary_sink = _openhd_stream_pipeline(port=openhd_port, bitrate=openhd_bitrate)
             elif no_display:
-                primary_branch = f"fakesink sync={self.sync}"
+                primary_sink = f"fakesink sync={self.sync}"
             else:
-                primary_branch = DISPLAY_PIPELINE(
-                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                # Inline display pipeline without overlay (DISPLAY_PIPELINE has overlay built in)
+                primary_sink = (
+                    f"{QUEUE(name='hailo_display_videoconvert_q')} ! "
+                    f"videoconvert name=hailo_display_videoconvert n-threads=2 qos=false ! "
+                    f"{QUEUE(name='hailo_display_q')} ! "
+                    f"fpsdisplaysink name=hailo_display video-sink={self.video_sink} "
+                    f"sync={self.sync} text-overlay={self.show_fps} signal-fps-measurements=true "
                 )
 
-            # Build extra branches beyond primary
-            extra_branches = []
-
+            # MJPEG branch for web UI (no overlay — browser draws interactive SVG)
+            mjpeg_branch = None
             if self._ui_enabled:
                 mjpeg_branch = (
                     f"videoconvert n-threads=2 ! "
@@ -853,35 +933,52 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     f"jpegenc quality=70 ! "
                     f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
                 )
-                extra_branches.append(
-                    f"t. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch}"
-                )
 
+            # Recording branch (no overlay — shares overlayed frames from t_post)
+            record_branch = None
             if self._record_enabled:
                 record_branch = (
                     f"valve name=record_valve drop=true ! "
-                    f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
-                    f"videoconvert n-threads=2 ! "
-                    f"x264enc name=record_enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
-                    f"mp4mux name=record_mux faststart=true ! filesink name=record_sink async=false location=/dev/null"
-                )
-                extra_branches.append(
-                    f"t. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
+                    f"videoconvert n-threads=2 ! video/x-raw,format=RGB ! "
+                    f"appsink name=record_appsink emit-signals=true drop=true "
+                    f"sync=false async=false max-buffers=1"
                 )
 
-            if extra_branches:
-                # For file sources, the leaky queues after the tee prevent
-                # sink sync=true from applying backpressure, so filesrc
-                # decodes at full speed.  Insert identity sync=true before
-                # the tee to pace data at real-time rate.
-                sync_element = "identity sync=true ! " if self.source_type == "file" else ""
+            # Assemble output pipeline with two-stage tee:
+            #   t_pre (before overlay) — MJPEG taps clean frames here
+            #   t_post (after overlay) — primary + recording tap overlayed frames
+            has_mjpeg = mjpeg_branch is not None
+            has_record = record_branch is not None
+
+            if has_mjpeg and has_record:
+                # Two-stage tee: t_pre feeds MJPEG (clean) and overlay path;
+                # t_post feeds primary + recording (overlayed)
                 output_pipeline = (
-                    f"{sync_element}tee name=t "
-                    f"t. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_branch} "
-                    + " ".join(extra_branches)
+                    f"tee name=t_pre "
+                    f"t_pre. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
+                    f"t_pre. ! {QUEUE(name='overlay_q', leaky='downstream')} ! "
+                    f"{OVERLAY_PIPELINE(name='hailo_overlay')} ! tee name=t_post "
+                    f"t_post. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_sink} "
+                    f"t_post. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
+                )
+            elif has_mjpeg:
+                # MJPEG only: t_pre feeds MJPEG (clean) and overlay → primary
+                output_pipeline = (
+                    f"tee name=t_pre "
+                    f"t_pre. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
+                    f"t_pre. ! {QUEUE(name='overlay_q', leaky='downstream')} ! "
+                    f"{OVERLAY_PIPELINE(name='hailo_overlay')} ! {primary_sink}"
+                )
+            elif has_record:
+                # Recording only: overlay → t_post feeds primary + recording
+                output_pipeline = (
+                    f"{OVERLAY_PIPELINE(name='hailo_overlay')} ! tee name=t_post "
+                    f"t_post. ! {QUEUE(name='primary_branch_q', leaky='downstream')} ! {primary_sink} "
+                    f"t_post. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
                 )
             else:
-                output_pipeline = primary_branch
+                # No extra branches: overlay → primary
+                output_pipeline = f"{OVERLAY_PIPELINE(name='hailo_overlay')} ! {primary_sink}"
 
             if skip_tiling:
                 # Direct pipeline: source → inference → callback → output
@@ -900,6 +997,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
         reid_manager=reid_manager, reid_search_timeout=reid_search_timeout,
+        controller_config=controller_config,
     )
     app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,
