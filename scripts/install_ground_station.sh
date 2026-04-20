@@ -61,6 +61,22 @@ echo "=========================================="
 echo " Step 2/5: Install OpenHD dependencies"
 echo "=========================================="
 cd "$HOME_DIR/OpenHD"
+
+# Pin the OpenHD branch so the build matches the protocol drone-follow expects
+# (HailoFollowBridge + df_params.json sync live on feature/hailo-apps-integration).
+# Override with OPENHD_BRANCH=<name> to build a different branch.
+OPENHD_BRANCH="${OPENHD_BRANCH:-feature/hailo-apps-integration}"
+RUN_AS_USER="${SUDO_USER:-$USER}"
+if [ -n "$(sudo -u "$RUN_AS_USER" git status --porcelain)" ]; then
+    echo "ERROR: $HOME_DIR/OpenHD has uncommitted changes."
+    echo "       Commit or stash them, then re-run this script."
+    exit 1
+fi
+echo "Fetching origin and checking out $OPENHD_BRANCH..."
+sudo -u "$RUN_AS_USER" git fetch origin --tags
+sudo -u "$RUN_AS_USER" git checkout "$OPENHD_BRANCH"
+sudo -u "$RUN_AS_USER" git pull --ff-only origin "$OPENHD_BRANCH"
+
 ./install_build_dep.sh "$PLATFORM"
 
 echo ""
@@ -74,10 +90,24 @@ echo "=========================================="
 echo " Step 4/5: Install & build QOpenHD"
 echo "=========================================="
 cd "$HOME_DIR/qopenHD"
+
+# Pin the QOpenHD branch for the same reason as OpenHD above — protocol fields
+# (e.g. DF_TGT_ALT) live on the Hailo fork. Override with QOPENHD_BRANCH=<name>.
+QOPENHD_BRANCH="${QOPENHD_BRANCH:-fix/rpi4-hw-decode}"
+if [ -n "$(sudo -u "$RUN_AS_USER" git status --porcelain)" ]; then
+    echo "ERROR: $HOME_DIR/qopenHD has uncommitted changes."
+    echo "       Commit or stash them, then re-run this script."
+    exit 1
+fi
+echo "Fetching origin and checking out $QOPENHD_BRANCH..."
+sudo -u "$RUN_AS_USER" git fetch origin --tags
+sudo -u "$RUN_AS_USER" git checkout "$QOPENHD_BRANCH"
+sudo -u "$RUN_AS_USER" git pull --ff-only origin "$QOPENHD_BRANCH"
+
 ./install_build_dep.sh "$PLATFORM"
 
 # Init submodules if not already done
-git submodule update --init --recursive
+sudo -u "$RUN_AS_USER" git submodule update --init --recursive
 
 # Compile Qt translation files (required before build)
 sudo -u "${SUDO_USER:-$USER}" lrelease translations/*.ts
