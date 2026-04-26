@@ -276,6 +276,29 @@ fi
 
 normalize_wb_frequency
 
+# Force OpenHD into Mode A (X_CAM_TYPE_HAILO_AI = 5). With the default
+# (31 = IMX219) OpenHD acquires the CSI camera itself at startup, which
+# starves drone-follow's Picamera2 with "Device or resource busy". In Mode A
+# drone-follow owns the camera and pushes RTP to OpenHD via --openhd-stream
+# (the layout scripts/start_air.sh uses). Idempotent: only writes if the
+# value differs. See CLAUDE.md "OpenHD Camera Modes" for context.
+CAM_CONFIG="/usr/local/share/openhd/video/air_camera_generic.json"
+if [ -f "$CAM_CONFIG" ]; then
+    python3 - "$CAM_CONFIG" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+if data.get("primary_camera_type") != 5:
+    data["primary_camera_type"] = 5
+    path.write_text(json.dumps(data, indent=4) + "\n")
+    print(f"Set primary_camera_type=5 (Mode A / HAILO_AI) in {path}")
+else:
+    print(f"primary_camera_type already 5 in {path}")
+PY
+else
+    echo "WARNING: $CAM_CONFIG not found — set camera type 5 manually after the first OpenHD start."
+fi
+
 # txrx.key must be IDENTICAL on air and ground for the WFB radio link to work.
 # See install_ground_station.sh for the full reasoning behind --generate-key.
 KEY_PATH="/usr/local/share/openhd/txrx.key"

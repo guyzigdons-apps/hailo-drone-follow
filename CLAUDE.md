@@ -96,6 +96,23 @@ source setup_env.sh
 drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
 ```
 
+## OpenHD Camera Modes (Air Unit)
+
+`scripts/start_air.sh` runs **Mode A**: drone-follow owns the CSI camera (`--input rpi`), runs Hailo inference, encodes the overlay with x264, and pushes RTP to OpenHD on UDP 5500 (`--openhd-stream`). OpenHD relays that stream over the WFB radio link.
+
+For Mode A to work, OpenHD's primary camera type must be **5** (`X_CAM_TYPE_HAILO_AI`). Any other value (e.g. `31` = IMX219, the OpenHD default after a fresh build) makes OpenHD acquire the CSI camera itself at startup, and drone-follow's Picamera2 then fails with `Device or resource busy`.
+
+Two ways to set it:
+
+- **From QOpenHD (ground station):** Settings → Camera → Primary Camera Type = `5`. QOpenHD pushes the change via MAVLink and OpenHD persists it to the JSON below. Requires a paired radio link.
+- **Locally on the air unit:** edit `/usr/local/share/openhd/video/air_camera_generic.json` and set `"primary_camera_type": 5`. `scripts/install_air.sh` does this automatically on a fresh install (Step 7); only needed manually on units that pre-date that patch.
+
+Either way, OpenHD must be fully restarted after the change — the camera handle is opened once at OpenHD startup.
+
+**Mode B** (legacy, not used by `start_air.sh`): OpenHD owns the camera and tees raw NV12 frames to a SHM socket. drone-follow reads from SHM (`--input shm:///tmp/openhd_raw_video`) and does AI only — no encoding, no overlay baked into the radio stream. To enable: keep `primary_camera_type` at the libcamera value matching your sensor (31 = IMX219, 32 = IMX708, etc.) and `sudo touch /boot/openhd/hailo.txt`.
+
+See `OpenHD/HAILO_INTEGRATION.md` for the full architecture, parameter list, and the binary detection payload format.
+
 ## Virtual Environment
 
 This repo owns its own venv at `./venv/` (created with `--system-site-packages` so apt-installed Hailo bindings are visible). `drone-follow` is installed as an editable package, and `hailo-apps` is pip-installed from GitHub (the `[hailo]` extra in `pyproject.toml`). Always `source setup_env.sh` before running — it activates `./venv/`, exports `PYTHONPATH`, runs the RPi kernel-compatibility check, and loads `/usr/local/hailo/resources/.env`.
