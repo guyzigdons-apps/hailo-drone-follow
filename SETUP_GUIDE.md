@@ -22,10 +22,15 @@ Both: Raspberry Pi OS Bookworm 64-bit.
 
 | Repo | Branch | Where |
 |------|--------|-------|
-| [OpenHD](https://github.com/barakbk-hailo/OpenHD.git) | `feature/hailo-apps-integration` | Air + Ground |
-| [OpenHD-SysUtils](https://github.com/barakbk-hailo/OpenHD-SysUtils.git) | `main` | Air + Ground |
-| [QOpenHD](https://github.com/barakbk-hailo/qopenHD.git) | `fix/rpi4-hw-decode` | Ground |
+| [OpenHD](https://github.com/giladnah/OpenHD.git) | `feature/hailo-apps-integration` | Air + Ground |
+| [OpenHD-SysUtils](https://github.com/giladnah/OpenHD-SysUtils.git) | `main` | Air + Ground |
+| [QOpenHD](https://github.com/giladnah/qopenHD.git) | `fix/rpi4-hw-decode` | Ground |
 | [hailo-drone-follow](git@github.com:guyzigdons-apps/hailo-drone-follow.git) | `feature/openhd-integration-new` | Air |
+
+> **Clone layout:** The OpenHD/QOpenHD repos are cloned **inside the
+> drone-follow repo root** (alongside `scripts/`, `drone_follow/`, etc.) — not
+> in `$HOME`. They're listed in `.gitignore`. `scripts/install_ground_station.sh`
+> handles cloning automatically.
 
 ---
 
@@ -51,19 +56,24 @@ sudo chmod 644 /usr/local/hailo/resources/json/*.json
 
 ### 2. Clone
 
+Clone drone-follow into `~/`, then clone the OpenHD repos **into the
+drone-follow repo root** (the install script will also do this for you, but
+the manual layout is shown here for reference):
+
 ```bash
 cd ~
-git clone --recurse-submodules -b feature/hailo-apps-integration \
-    https://github.com/barakbk-hailo/OpenHD.git
-git clone -b main https://github.com/barakbk-hailo/OpenHD-SysUtils.git
 git clone -b feature/openhd-integration-new \
     git@github.com:guyzigdons-apps/hailo-drone-follow.git
+cd ~/hailo-drone-follow
+git clone --recurse-submodules -b feature/hailo-apps-integration \
+    https://github.com/giladnah/OpenHD.git
+git clone -b main https://github.com/giladnah/OpenHD-SysUtils.git
 ```
 
 ### 3. Build OpenHD
 
 ```bash
-cd ~/OpenHD && sudo ./build_native.sh all
+cd ~/hailo-drone-follow/OpenHD && sudo ./build_native.sh all
 ```
 
 > **Important — WiFi driver & reboot:** The `all` target builds the WiFi
@@ -71,13 +81,13 @@ cd ~/OpenHD && sudo ./build_native.sh all
 > reboot can overwrite the driver module. If Wi-Fi stops working after a
 > reboot, rebuild **only** the driver:
 > ```bash
-> cd ~/OpenHD && sudo ./build_native.sh driver
+> cd ~/hailo-drone-follow/OpenHD && sudo ./build_native.sh driver
 > sudo reboot
 > ```
 
 Rebuilding after code changes only:
 ```bash
-cd ~/OpenHD/OpenHD
+cd ~/hailo-drone-follow/OpenHD/OpenHD
 sudo cmake --build build_release -j$(nproc)
 sudo cp build_release/openhd /usr/local/bin/openhd
 ```
@@ -115,36 +125,39 @@ sudo apt install -y dkms
 
 ### 2. Clone
 
+Clone the OpenHD repos into the drone-follow repo root (matches what
+`scripts/install_ground_station.sh` does automatically):
+
 ```bash
-cd ~
+cd ~/hailo-drone-follow
 git clone --recurse-submodules -b feature/hailo-apps-integration \
-    https://github.com/barakbk-hailo/OpenHD.git
-git clone -b main https://github.com/barakbk-hailo/OpenHD-SysUtils.git
-git clone -b fix/rpi4-hw-decode https://github.com/barakbk-hailo/qopenHD.git
+    https://github.com/giladnah/OpenHD.git
+git clone -b main https://github.com/giladnah/OpenHD-SysUtils.git
+git clone -b fix/rpi4-hw-decode https://github.com/giladnah/qopenHD.git
 ```
 
 ### 3. Build OpenHD
 
 ```bash
-cd ~/OpenHD && sudo ./build_native.sh all
+cd ~/hailo-drone-follow/OpenHD && sudo ./build_native.sh all
 ```
 
 > **Important — WiFi driver & reboot:** Same caveat as the air unit.
 > If Wi-Fi breaks after a reboot, rebuild the driver alone:
 > ```bash
-> cd ~/OpenHD && sudo ./build_native.sh driver
+> cd ~/hailo-drone-follow/OpenHD && sudo ./build_native.sh driver
 > sudo reboot
 > ```
 
 ### 4. Build QOpenHD
 
 ```bash
-cd ~/qopenHD && sudo ./install_build_dep.sh rpi
+cd ~/hailo-drone-follow/qopenHD && sudo ./install_build_dep.sh rpi
 mkdir -p build/release && cd build/release
 qmake ../.. && make -j$(nproc)
 ```
 
-Binary: `~/qopenHD/build/release/QOpenHD`
+Binary: `~/hailo-drone-follow/qopenHD/build/release/QOpenHD`
 
 ### 5. Deploy df_params.json & encryption key
 
@@ -182,24 +195,26 @@ define).
 
 ### 1. Clone
 
-Same as the RPi ground unit, but clone QOpenHD **with submodules**:
+Same layout as the RPi ground unit — clone into the drone-follow repo root
+(skip this step if you plan to run the automated installer in §2; it clones
+on its own). Use `--recurse-submodules` for QOpenHD on x86_64:
 ```bash
-cd ~
+cd ~/hailo-drone-follow
 git clone --recurse-submodules -b feature/hailo-apps-integration \
-    https://github.com/barakbk-hailo/OpenHD.git
-git clone -b main https://github.com/barakbk-hailo/OpenHD-SysUtils.git
+    https://github.com/giladnah/OpenHD.git
+git clone -b main https://github.com/giladnah/OpenHD-SysUtils.git
 git clone --recurse-submodules -b fix/rpi4-hw-decode \
-    https://github.com/barakbk-hailo/qopenHD.git
+    https://github.com/giladnah/qopenHD.git
 ```
 
 > If you forgot `--recurse-submodules` on qopenHD:
 > ```bash
-> cd ~/qopenHD && git submodule update --init --recursive
+> cd ~/hailo-drone-follow/qopenHD && git submodule update --init --recursive
 > ```
 
 ### 2. Automated install (recommended)
 
-A bundled script in this repo handles deps, builds, and config deployment in one step.
+A bundled script in this repo handles cloning, deps, builds, and config deployment in one step.
 It auto-detects the platform (x86_64 / RPi5 / RPi4), or you can override with `--platform`:
 ```bash
 cd ~/hailo-drone-follow
@@ -207,13 +222,22 @@ sudo ./scripts/install_ground_station.sh
 # Or explicitly: sudo ./scripts/install_ground_station.sh --platform ubuntu-x86
 ```
 
+> **Encryption key (`txrx.key`):** The WFB radio link requires the **same** key
+> on air and ground. The script will not generate one silently:
+> - **First unit being set up?** Pass `--generate-key`, then `scp` the file
+>   from `/usr/local/share/openhd/txrx.key` to the other unit.
+> - **Second unit?** Copy the existing key first
+>   (`sudo scp <first-unit>:/usr/local/share/openhd/txrx.key /tmp/txrx.key &&
+>   sudo install -m 644 /tmp/txrx.key /usr/local/share/openhd/txrx.key`),
+>   then run the install script normally — it will keep the existing key.
+
 ### 3. Manual install (step-by-step)
 
 If you prefer to run each step yourself:
 
 **Install OpenHD dependencies + build:**
 ```bash
-cd ~/OpenHD
+cd ~/hailo-drone-follow/OpenHD
 sudo ./install_build_dep.sh ubuntu-x86
 sudo ./build_native.sh build        # builds SysUtils + OpenHD, installs to /usr/local/bin/
 ```
@@ -228,7 +252,7 @@ sudo ./build_native.sh build        # builds SysUtils + OpenHD, installs to /usr
 
 **Install QOpenHD dependencies + build:**
 ```bash
-cd ~/qopenHD
+cd ~/hailo-drone-follow/qopenHD
 sudo ./install_build_dep.sh ubuntu-x86
 
 # Compile Qt translation files (required before build):
@@ -243,8 +267,8 @@ qmake ../.. && make -j$(nproc)
 > `t64`-suffixed Qt packages. The patched version in this repo auto-detects
 > the correct package names for your Ubuntu version.
 
-Binary location: `~/qopenHD/build/release/release/QOpenHD` (note the double
-`release` — qmake puts the output one level deeper on Linux).
+Binary location: `~/hailo-drone-follow/qopenHD/build/release/release/QOpenHD`
+(note the double `release` — qmake puts the output one level deeper on Linux).
 
 **Deploy config files:**
 ```bash
@@ -270,10 +294,10 @@ sudo /usr/local/bin/openhd --ground
 
 # Terminal 2 — QOpenHD (Wayland):
 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
-    ~/qopenHD/build/release/release/QOpenHD -platform wayland
+    ~/hailo-drone-follow/qopenHD/build/release/release/QOpenHD -platform wayland
 
 # Or under X11:
-~/qopenHD/build/release/release/QOpenHD
+~/hailo-drone-follow/qopenHD/build/release/release/QOpenHD
 ```
 
 > **Differences from RPi ground:**
@@ -394,10 +418,10 @@ sudo /usr/local/bin/openhd --ground
 
 **CLI-only (EGLFS)**:
 ```bash
-cd ~/qopenHD
+cd ~/hailo-drone-follow/qopenHD
 sudo env -u DISPLAY -u WAYLAND_DISPLAY \
     QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_KMS_ATOMIC=1 \
-    QT_QPA_EGLFS_KMS_CONFIG=$HOME/qopenHD/rpi_qt_eglfs_kms_config.json \
+    QT_QPA_EGLFS_KMS_CONFIG=$HOME/hailo-drone-follow/qopenHD/rpi_qt_eglfs_kms_config.json \
     XDG_RUNTIME_DIR=/tmp/runtime-root \
     ./build/release/QOpenHD_hailo_dynamic -platform eglfs
 ```
@@ -465,7 +489,7 @@ The embed tool composites detections and/or HUD overlay onto the recorded
 video. It runs on the Pi (when OpenHD is off) or on any machine with
 `ffmpeg`, `numpy`, and `Pillow`.
 
-**Location:** `~/qopenHD/tools/embed_recording.py`
+**Location:** `~/hailo-drone-follow/qopenHD/tools/embed_recording.py`
 
 **Install dependencies** (if not already available):
 ```bash
@@ -475,18 +499,18 @@ pip install numpy Pillow
 **Basic usage:**
 ```bash
 # Embed latest recording — detections + HUD at 1080p (defaults):
-python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4
+python3 ~/hailo-drone-follow/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4
 
 # Detections only, keep original resolution:
-python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4 \
+python3 ~/hailo-drone-follow/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4 \
     --no-hud -r original
 
 # HUD only, no bounding boxes:
-python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4 \
+python3 ~/hailo-drone-follow/qopenHD/tools/embed_recording.py ~/Videos/ground_20260324_165522.mp4 \
     --no-detections
 
 # Process all recordings in a directory:
-python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ --all
+python3 ~/hailo-drone-follow/qopenHD/tools/embed_recording.py ~/Videos/ --all
 ```
 
 **CLI flags:**
@@ -510,7 +534,7 @@ python3 ~/qopenHD/tools/embed_recording.py ~/Videos/ --all
 
 | Component | Command |
 |-----------|---------|
-| OpenHD (C++) | `cd ~/OpenHD/OpenHD && sudo cmake --build build_release -j$(nproc) && sudo cp build_release/openhd /usr/local/bin/openhd` |
-| QOpenHD (C++/QML) | `cd ~/qopenHD/build/release && make -j$(nproc)` |
+| OpenHD (C++) | `cd ~/hailo-drone-follow/OpenHD/OpenHD && sudo cmake --build build_release -j$(nproc) && sudo cp build_release/openhd /usr/local/bin/openhd` |
+| QOpenHD (C++/QML) | `cd ~/hailo-drone-follow/qopenHD/build/release && make -j$(nproc)` |
 | drone-follow (Python) | No build — just restart the process |
 | df_params.json | `sudo cp ~/hailo-drone-follow/df_params.json /usr/local/share/openhd/df_params.json` — redeploy on **both** air and ground units after any parameter changes |

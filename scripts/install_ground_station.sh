@@ -3,11 +3,17 @@
 # Ground Station — Full Install Script
 #
 # Installs OpenHD + OpenHD-SysUtils + QOpenHD on an x86_64 or RPi machine.
-# Repos must already be cloned to ~/ (OpenHD, OpenHD-SysUtils, qopenHD).
+# Clones (or updates) the three OpenHD repos into the drone-follow repo root —
+# no cloning into the home directory.
 #
-# Usage:  sudo ./install_ground_station.sh [--platform <rpi|rpi5|ubuntu-x86>]
+# Usage:
+#   sudo ./install_ground_station.sh [--platform <rpi|rpi5|ubuntu-x86>] \
+#                                    [--generate-key]
 #
 # If --platform is not given, auto-detects from /proc/cpuinfo and uname.
+# Pass --generate-key on the FIRST unit to create /usr/local/share/openhd/txrx.key;
+# on the second unit, copy that key over instead (the radio link needs matching
+# keys on both ends).
 ################################################################################
 
 set -e
@@ -17,16 +23,40 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-HOME_DIR="$(eval echo ~${SUDO_USER:-$USER})"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
+RUN_AS_USER="${SUDO_USER:-$USER}"
+
+# OpenHD repo locations — cloned alongside drone-follow (not in $HOME).
+OPENHD_GIT="https://github.com/giladnah/OpenHD.git"
+OPENHD_SYSUTILS_GIT="https://github.com/giladnah/OpenHD-SysUtils.git"
+QOPENHD_GIT="https://github.com/giladnah/qopenHD.git"
+
+OPENHD_DIR="$REPO_DIR/OpenHD"
+OPENHD_SYSUTILS_DIR="$REPO_DIR/OpenHD-SysUtils"
+QOPENHD_DIR="$REPO_DIR/qopenHD"
 
 # Parse args
 PLATFORM=""
+GENERATE_KEY=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --platform) PLATFORM="$2"; shift 2 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        --generate-key) GENERATE_KEY=true; shift ;;
+        --help|-h)
+            cat <<EOF
+Usage: sudo $0 [--platform <rpi|rpi5|ubuntu-x86>] [--generate-key]
+
+  --platform       Override auto-detected platform.
+  --generate-key   Generate a fresh /usr/local/share/openhd/txrx.key if one is
+                   missing. WITHOUT this flag the script will not create a key
+                   — air and ground must share the same key, so on the second
+                   unit you should copy the key from the first instead. See
+                   the printed instructions when no key is found.
+EOF
+            exit 0
+            ;;
+        *) echo "Unknown option: $1 (try --help)"; exit 1 ;;
     esac
 done
 
@@ -50,77 +80,109 @@ fi
 
 echo "Platform: $PLATFORM"
 
-echo ""
-echo "=========================================="
-echo " Step 1/5: Install system prerequisites"
-echo "=========================================="
-apt-get install -y dkms iw
-
-echo ""
-echo "=========================================="
-echo " Step 2/5: Install OpenHD dependencies"
-echo "=========================================="
-cd "$HOME_DIR/OpenHD"
-
 # Pin the OpenHD branch so the build matches the protocol drone-follow expects
 # (HailoFollowBridge + df_params.json sync live on feature/hailo-apps-integration).
 # Override with OPENHD_BRANCH=<name> to build a different branch.
 OPENHD_BRANCH="${OPENHD_BRANCH:-feature/hailo-apps-integration}"
-RUN_AS_USER="${SUDO_USER:-$USER}"
-if [ -n "$(sudo -u "$RUN_AS_USER" git status --porcelain)" ]; then
-    echo "ERROR: $HOME_DIR/OpenHD has uncommitted changes."
-    echo "       Commit or stash them, then re-run this script."
-    exit 1
-fi
-echo "Fetching origin and checking out $OPENHD_BRANCH..."
-sudo -u "$RUN_AS_USER" git fetch origin --tags
-sudo -u "$RUN_AS_USER" git checkout "$OPENHD_BRANCH"
-sudo -u "$RUN_AS_USER" git pull --ff-only origin "$OPENHD_BRANCH"
+# Pin the QOpenHD branch for the same reason — protocol fields (e.g. DF_TGT_ALT)
+# live on the Hailo fork. Override with QOPENHD_BRANCH=<name>.
+QOPENHD_BRANCH="${QOPENHD_BRANCH:-fix/rpi4-hw-decode}"
 
+# Restore ownership of a path tree to RUN_AS_USER.
+# build_native.sh and qmake/make run as root (this script is sudo'd) and may
+# leave root-owned files in the user's clone. On a re-run, that breaks user
+# git operations, so we rebalance ownership at the end.
+chown_back() {
+    local dir="$1"
+    [ -d "$dir" ] || return 0
+    chown -R "$RUN_AS_USER:$RUN_AS_USER" "$dir"
+}
+
+# Clone-or-pin a repo at $1 from $2 onto branch $3, with optional --recurse-submodules.
+clone_or_pin() {
+    local dir="$1" url="$2" branch="$3" recurse="${4:-}"
+    if [ ! -d "$dir/.git" ]; then
+        echo "Cloning $url into $dir (branch: $branch)..."
+        local extra=()
+        [ "$recurse" = "recurse" ] && extra+=(--recurse-submodules)
+        sudo -u "$RUN_AS_USER" git clone "${extra[@]}" -b "$branch" "$url" "$dir"
+        return
+    fi
+    echo "Updating existing repo $dir on branch $branch..."
+    # Mark the dir as safe even if a previous run left mixed ownership — git
+    # otherwise refuses to operate on a repo whose .git is owned by a different
+    # uid than the caller.
+    sudo -u "$RUN_AS_USER" git config --global --add safe.directory "$dir" >/dev/null 2>&1 || true
+    # --untracked-files=no: ignore build artifacts (they may not all be in the
+    # repo's .gitignore, and a previous run may have created them as root).
+    if [ -n "$(cd "$dir" && sudo -u "$RUN_AS_USER" git status --porcelain --untracked-files=no)" ]; then
+        echo "ERROR: $dir has uncommitted changes to tracked files."
+        echo "       Commit or stash them, then re-run this script."
+        exit 1
+    fi
+    (
+        cd "$dir"
+        sudo -u "$RUN_AS_USER" git fetch origin --tags
+        sudo -u "$RUN_AS_USER" git checkout "$branch"
+        sudo -u "$RUN_AS_USER" git pull --ff-only origin "$branch"
+    )
+}
+
+echo ""
+echo "=========================================="
+echo " Step 1/6: Install system prerequisites"
+echo "=========================================="
+apt-get install -y dkms iw git
+
+echo ""
+echo "=========================================="
+echo " Step 2/6: Clone / update OpenHD repos"
+echo "=========================================="
+clone_or_pin "$OPENHD_DIR"          "$OPENHD_GIT"          "$OPENHD_BRANCH"  recurse
+clone_or_pin "$OPENHD_SYSUTILS_DIR" "$OPENHD_SYSUTILS_GIT" "main"
+clone_or_pin "$QOPENHD_DIR"         "$QOPENHD_GIT"         "$QOPENHD_BRANCH" recurse
+
+echo ""
+echo "=========================================="
+echo " Step 3/6: Install OpenHD dependencies"
+echo "=========================================="
+cd "$OPENHD_DIR"
 ./install_build_dep.sh "$PLATFORM"
 
 echo ""
 echo "=========================================="
-echo " Step 3/5: Build OpenHD + SysUtils + WiFi driver"
+echo " Step 4/6: Build OpenHD + SysUtils + WiFi driver"
 echo "=========================================="
 ./build_native.sh all
 
 echo ""
 echo "=========================================="
-echo " Step 4/5: Install & build QOpenHD"
+echo " Step 5/6: Install & build QOpenHD"
 echo "=========================================="
-cd "$HOME_DIR/qopenHD"
-
-# Pin the QOpenHD branch for the same reason as OpenHD above — protocol fields
-# (e.g. DF_TGT_ALT) live on the Hailo fork. Override with QOPENHD_BRANCH=<name>.
-QOPENHD_BRANCH="${QOPENHD_BRANCH:-fix/rpi4-hw-decode}"
-if [ -n "$(sudo -u "$RUN_AS_USER" git status --porcelain)" ]; then
-    echo "ERROR: $HOME_DIR/qopenHD has uncommitted changes."
-    echo "       Commit or stash them, then re-run this script."
-    exit 1
-fi
-echo "Fetching origin and checking out $QOPENHD_BRANCH..."
-sudo -u "$RUN_AS_USER" git fetch origin --tags
-sudo -u "$RUN_AS_USER" git checkout "$QOPENHD_BRANCH"
-sudo -u "$RUN_AS_USER" git pull --ff-only origin "$QOPENHD_BRANCH"
-
+cd "$QOPENHD_DIR"
 ./install_build_dep.sh "$PLATFORM"
 
-# Init submodules if not already done
+# Submodules may have been added after the initial clone — refresh just in case.
 sudo -u "$RUN_AS_USER" git submodule update --init --recursive
 
 # Compile Qt translation files (required before build)
-sudo -u "${SUDO_USER:-$USER}" lrelease translations/*.ts
-sudo -u "${SUDO_USER:-$USER}" cp translations/*.qm qml/
+sudo -u "$RUN_AS_USER" lrelease translations/*.ts
+sudo -u "$RUN_AS_USER" cp translations/*.qm qml/
 
 mkdir -p build/release
 cd build/release
 qmake ../..
 make -j$(nproc)
 
+# Restore user ownership of the OpenHD/QOpenHD trees so subsequent re-runs of
+# this script — and the user's own `git pull` — work without permission errors.
+chown_back "$OPENHD_DIR"
+chown_back "$OPENHD_SYSUTILS_DIR"
+chown_back "$QOPENHD_DIR"
+
 echo ""
 echo "=========================================="
-echo " Step 5/5: Deploy config files"
+echo " Step 6/6: Deploy config files"
 echo "=========================================="
 mkdir -p /usr/local/share/openhd
 if [ -f "$REPO_DIR/df_params.json" ]; then
@@ -130,10 +192,39 @@ else
     echo "WARNING: $REPO_DIR/df_params.json not found, skipping."
 fi
 
-if [ ! -f /usr/local/share/openhd/txrx.key ]; then
-    echo "No txrx.key found — generating new one."
-    echo "IMPORTANT: Copy this key to the air unit, or copy the air unit's key here."
-    dd if=/dev/urandom of=/usr/local/share/openhd/txrx.key bs=32 count=1 2>/dev/null
+# txrx.key must be IDENTICAL on air and ground for the WFB radio link to work.
+# Auto-generating silently is dangerous: if you install the second unit before
+# copying the first unit's key, you'd end up with two mismatched keys and a
+# silent link failure. So:
+#   - If a key exists, keep it.
+#   - If --generate-key was passed, generate a fresh one (first install).
+#   - Otherwise, print clear instructions and leave it absent.
+KEY_PATH="/usr/local/share/openhd/txrx.key"
+if [ -f "$KEY_PATH" ]; then
+    echo "txrx.key already present at $KEY_PATH — keeping existing key."
+elif [ "$GENERATE_KEY" = "true" ]; then
+    echo "Generating fresh txrx.key at $KEY_PATH (first-install mode)."
+    echo "IMPORTANT: Copy this key to the OTHER unit before flying:"
+    echo "    sudo scp $KEY_PATH <other-unit>:$KEY_PATH"
+    dd if=/dev/urandom of="$KEY_PATH" bs=32 count=1 2>/dev/null
+    chmod 644 "$KEY_PATH"
+else
+    cat <<EOF
+
+WARNING: $KEY_PATH is missing.
+         The radio link requires the SAME txrx.key on both air and ground.
+         Choose one of:
+
+           (a) Copy the existing key from the other unit:
+                 sudo scp <other-unit>:$KEY_PATH /tmp/txrx.key
+                 sudo install -m 644 /tmp/txrx.key $KEY_PATH
+
+           (b) If this is the FIRST unit being installed (no key exists
+               anywhere yet), re-run this script with --generate-key to
+               create one, then scp it to the other unit afterwards.
+
+         Skipping key step.
+EOF
 fi
 
 echo ""
@@ -145,7 +236,7 @@ echo "Platform:  $PLATFORM"
 echo "Binaries:"
 echo "  OpenHD:        /usr/local/bin/openhd"
 echo "  SysUtils:      /usr/local/bin/openhd_sys_utils"
-echo "  QOpenHD:       $HOME_DIR/qopenHD/build/release/release/QOpenHD"
+echo "  QOpenHD:       $QOPENHD_DIR/build/release/release/QOpenHD"
 echo ""
 echo "Run:"
 echo "  scripts/start_ground.sh"
