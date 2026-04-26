@@ -243,6 +243,13 @@ sudo ./scripts/install_ground_station.sh
 >   sudo install -m 644 /tmp/txrx.key /usr/local/share/openhd/txrx.key`),
 >   then run the install script normally — it will keep the existing key.
 
+> **Radio channel (`wb_frequency`):** The installer normalises both units to
+> **5180 MHz (channel 36, UNII-1)** — the only 5 GHz channel that's allowed in
+> every regulatory domain (including country 00) and is non-DFS. Override per
+> install with `WB_DEFAULT_FREQUENCY=<MHz> sudo ./scripts/install_ground_station.sh`.
+> The persistent regulatory-domain config files (`/etc/default/crda`,
+> `/etc/modprobe.d/{cfg80211,openhd}-regdomain.conf`) are written automatically.
+
 ### 3. Manual install (step-by-step)
 
 If you prefer to run each step yourself:
@@ -275,9 +282,10 @@ mkdir -p build/release && cd build/release
 qmake ../.. && make -j$(nproc)
 ```
 
-> **Note:** On Ubuntu 22.04 the `install_build_dep.sh` script may fail on
-> `t64`-suffixed Qt packages. The patched version in this repo auto-detects
-> the correct package names for your Ubuntu version.
+> **Note:** Older `install_build_dep.sh` scripts hardcoded the noble/trixie
+> `libqt5*5t64` package names, which fail on jammy/bookworm. The patched
+> version in `giladnah/qopenHD` (`fix/rpi4-hw-decode`) detects the Ubuntu /
+> Debian codename and rewrites to the correct names automatically.
 
 Binary location: `~/hailo-drone-follow/qopenHD/build/release/release/QOpenHD`
 (note the double `release` — qmake puts the output one level deeper on Linux).
