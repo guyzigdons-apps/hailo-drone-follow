@@ -32,7 +32,7 @@ RUN_AS_GROUP="$(id -gn "$RUN_AS_USER")"
 # OpenHD repo locations — cloned alongside drone-follow (not in $HOME).
 OPENHD_GIT="https://github.com/giladnah/OpenHD.git"
 OPENHD_SYSUTILS_GIT="https://github.com/giladnah/OpenHD-SysUtils.git"
-QOPENHD_GIT="https://github.com/giladnah/qopenHD.git"
+QOPENHD_GIT="https://github.com/giladnah/QOpenHD.git"
 
 OPENHD_DIR="$REPO_DIR/OpenHD"
 OPENHD_SYSUTILS_DIR="$REPO_DIR/OpenHD-SysUtils"

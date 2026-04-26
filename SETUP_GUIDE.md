@@ -24,7 +24,7 @@ Both: Raspberry Pi OS Bookworm 64-bit.
 |------|--------|-------|
 | [OpenHD](https://github.com/giladnah/OpenHD.git) | `feature/hailo-apps-integration` | Air + Ground |
 | [OpenHD-SysUtils](https://github.com/giladnah/OpenHD-SysUtils.git) | `main` | Air + Ground |
-| [QOpenHD](https://github.com/giladnah/qopenHD.git) | `fix/rpi4-hw-decode` | Ground |
+| [QOpenHD](https://github.com/giladnah/QOpenHD.git) | `fix/rpi4-hw-decode` | Ground |
 | [hailo-drone-follow](git@github.com:guyzigdons-apps/hailo-drone-follow.git) | `feature/openhd-integration-new` | Air |
 
 > **Clone layout:** The OpenHD/QOpenHD repos are cloned **inside the
@@ -145,7 +145,7 @@ cd ~/hailo-drone-follow
 git clone --recurse-submodules -b feature/hailo-apps-integration \
     https://github.com/giladnah/OpenHD.git
 git clone -b main https://github.com/giladnah/OpenHD-SysUtils.git
-git clone -b fix/rpi4-hw-decode https://github.com/giladnah/qopenHD.git
+git clone -b fix/rpi4-hw-decode https://github.com/giladnah/QOpenHD.git
 ```
 
 ### 3. Build OpenHD
@@ -216,7 +216,7 @@ git clone --recurse-submodules -b feature/hailo-apps-integration \
     https://github.com/giladnah/OpenHD.git
 git clone -b main https://github.com/giladnah/OpenHD-SysUtils.git
 git clone --recurse-submodules -b fix/rpi4-hw-decode \
-    https://github.com/giladnah/qopenHD.git
+    https://github.com/giladnah/QOpenHD.git
 ```
 
 > If you forgot `--recurse-submodules` on qopenHD:
@@ -284,7 +284,7 @@ qmake ../.. && make -j$(nproc)
 
 > **Note:** Older `install_build_dep.sh` scripts hardcoded the noble/trixie
 > `libqt5*5t64` package names, which fail on jammy/bookworm. The patched
-> version in `giladnah/qopenHD` (`fix/rpi4-hw-decode`) detects the Ubuntu /
+> version in `giladnah/QOpenHD` (`fix/rpi4-hw-decode`) detects the Ubuntu /
 > Debian codename and rewrites to the correct names automatically.
 
 Binary location: `~/hailo-drone-follow/qopenHD/build/release/release/QOpenHD`
