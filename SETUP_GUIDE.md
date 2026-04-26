@@ -36,42 +36,58 @@ Both: Raspberry Pi OS Bookworm 64-bit.
 
 ## Air Unit Setup
 
-### 1. Install Hailo Prerequisites
-
-```bash
-sudo apt update
-sudo apt install -y dkms
-sudo apt install -y hailo-all
-```
-
-After installation, verify the Hailo device is detected:
-```bash
-hailortcli fw-control identify
-```
-
-Fix permissions on Hailo resource files (required for the pipeline to read JSON configs):
-```bash
-sudo chmod 644 /usr/local/hailo/resources/json/*.json
-```
-
-### 2. Clone
-
-Clone drone-follow into `~/`, then clone the OpenHD repos **into the
-drone-follow repo root** (the install script will also do this for you, but
-the manual layout is shown here for reference):
+### 1. Clone drone-follow
 
 ```bash
 cd ~
 git clone -b feature/openhd-integration-new \
     git@github.com:guyzigdons-apps/hailo-drone-follow.git
+```
+
+### 2. Automated install (recommended)
+
+`scripts/install_air.sh` installs `hailo-all`, clones OpenHD + OpenHD-SysUtils
+into the drone-follow repo root, builds OpenHD (with the WiFi driver), runs
+`./install.sh` to set up the venv + UI, and deploys `df_params.json`:
+
+```bash
+cd ~/hailo-drone-follow
+sudo ./scripts/install_air.sh
+```
+
+> **Encryption key (`txrx.key`):** The WFB radio link requires the **same** key
+> on air and ground.
+> - **First unit being set up?** Pass `--generate-key`, then `scp` the key from
+>   `/usr/local/share/openhd/txrx.key` to the other unit.
+> - **Ground was set up first?** Copy the existing key first
+>   (`sudo scp <ground>:/usr/local/share/openhd/txrx.key /tmp/txrx.key &&
+>   sudo install -m 644 /tmp/txrx.key /usr/local/share/openhd/txrx.key`),
+>   then run the install script normally — it will keep the existing key.
+
+> **Reboot after fresh `hailo-all`:** If `hailortcli fw-control identify` fails
+> after install, reboot once and re-run `scripts/start_air.sh`.
+
+### 3. Manual install (step-by-step)
+
+If you'd rather drive each step yourself:
+
+**Install Hailo prerequisites:**
+```bash
+sudo apt update
+sudo apt install -y dkms hailo-all
+hailortcli fw-control identify
+sudo chmod 644 /usr/local/hailo/resources/json/*.json
+```
+
+**Clone OpenHD into the drone-follow repo root:**
+```bash
 cd ~/hailo-drone-follow
 git clone --recurse-submodules -b feature/hailo-apps-integration \
     https://github.com/giladnah/OpenHD.git
 git clone -b main https://github.com/giladnah/OpenHD-SysUtils.git
 ```
 
-### 3. Build OpenHD
-
+**Build OpenHD:**
 ```bash
 cd ~/hailo-drone-follow/OpenHD && sudo ./build_native.sh all
 ```
@@ -92,23 +108,19 @@ sudo cmake --build build_release -j$(nproc)
 sudo cp build_release/openhd /usr/local/bin/openhd
 ```
 
-### 4. Install drone-follow
-
+**Install drone-follow:**
 ```bash
 cd ~/hailo-drone-follow && ./install.sh
 ```
 
-### 5. Deploy df_params.json & encryption key
-
+**Deploy df_params.json & encryption key** (see the key callout in §2 — same
+options apply: copy from ground unit, or generate fresh and `scp` to ground):
 ```bash
 sudo mkdir -p /usr/local/share/openhd
 sudo cp ~/hailo-drone-follow/df_params.json /usr/local/share/openhd/df_params.json
-
-# First-time only — generate encryption key (must match ground unit):
-sudo dd if=/dev/urandom of=/usr/local/share/openhd/txrx.key bs=32 count=1 2>/dev/null
 ```
 
-### 6. Enable SHM passthrough (for SHM mode)
+### 4. Enable SHM passthrough (for SHM mode)
 
 See the [Camera Modes](#camera-modes) section below for choosing and
 configuring Mode A or Mode B.
