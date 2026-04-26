@@ -141,6 +141,11 @@ if compgen -G "/usr/local/hailo/resources/json/*.json" >/dev/null; then
     chmod 644 /usr/local/hailo/resources/json/*.json
 fi
 
+# hailo-all ships /usr/local/hailo/resources/ as root:root, but hailo-apps
+# downloads HEFs and writes its .env into that tree at runtime as the user.
+# Hand the directory to RUN_AS_USER so on-demand model downloads don't EACCES.
+chown_back /usr/local/hailo/resources
+
 echo ""
 echo "=========================================="
 echo " Step 2/6: Clone / update OpenHD repos"
@@ -183,6 +188,10 @@ chown_back "$REPO_DIR/setup_env.sh"
 for egg in "$REPO_DIR"/*.egg-info; do
     [ -e "$egg" ] && chown_back "$egg"
 done
+# install.sh runs hailo-post-install, which (under sudo) drops root-owned
+# HEFs / .env / postprocess .so files into /usr/local/hailo/resources. Hand
+# the tree back to the user so subsequent runtime downloads don't EACCES.
+chown_back /usr/local/hailo/resources
 
 echo ""
 echo "=========================================="
