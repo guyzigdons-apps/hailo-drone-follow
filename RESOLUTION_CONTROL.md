@@ -211,14 +211,14 @@ User selects new resolution in QOpenHD
 
 **OpenHD** (air unit):
 ```bash
-cd ~/OpenHD/OpenHD
+cd ~/hailo-drone-follow/OpenHD/OpenHD
 sudo cmake --build build_release -j$(nproc)
 sudo cp build_release/openhd /usr/local/bin/openhd
 ```
 
 **QOpenHD** (ground unit):
 ```bash
-cd ~/qopenHD/build/release
+cd ~/hailo-drone-follow/qopenHD/build/release
 make -j$(nproc)
 cp release/QOpenHD QOpenHD_hailo_dynamic
 ```

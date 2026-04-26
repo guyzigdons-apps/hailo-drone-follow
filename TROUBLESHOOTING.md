@@ -92,7 +92,7 @@ ssh pi@192.168.0.117 systemctl status openhd
 The resolution list is compiled into the QOpenHD binary.
 If you see the old short list, rebuild QOpenHD:
 ```bash
-cd ~/qopenHD/build/release
+cd ~/hailo-drone-follow/qopenHD/build/release
 make -j4
 sudo cp release/QOpenHD /usr/local/bin/QOpenHD
 sudo systemctl restart qopenhd
@@ -116,7 +116,7 @@ sudo systemctl restart qopenhd
 
 ```bash
 # OpenHD — missing dependencies
-cd ~/OpenHD/OpenHD
+cd ~/hailo-drone-follow/OpenHD/OpenHD
 ./install_build_dep.sh
 
 # QOpenHD — Qt5 not found

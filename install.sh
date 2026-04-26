@@ -84,6 +84,18 @@ else
     echo -e "${GREEN}ReID HEF models already present in $REID_MODELS_DIR${NC}"
 fi
 
+# hailo-all / TAPPAS deb ships /usr/local/hailo/resources/ as root:root, and
+# the sudo wget above (when it runs) writes root-owned HEFs into it. But
+# hailo-apps downloads additional HEFs and writes its .env into that tree at
+# runtime as the invoking user, so leaving it root-owned causes EACCES on
+# first run of hailo-tiling et al. Hand the tree to the target user.
+# SUDO_USER is set when this script is invoked under sudo (e.g. by
+# scripts/install_air.sh); fall back to the current user otherwise.
+TARGET_USER="${SUDO_USER:-$USER}"
+if [ -d /usr/local/hailo/resources ]; then
+    sudo chown -R "$TARGET_USER":"$TARGET_USER" /usr/local/hailo/resources
+fi
+
 if ! $SKIP_PYTHON; then
     echo -e "${GREEN}[1/2] Setting up repo Python venv at ${CYAN}$REPO_VENV_DIR${NC}..."
 
@@ -103,6 +115,18 @@ if ! $SKIP_PYTHON; then
     pip install -e ".[hailo]"
 
     echo -e "${GREEN}  drone-follow + hailo-apps installed into $REPO_VENV_DIR.${NC}"
+
+    # `pip install hailo-apps` does NOT compile the C++ postprocess libraries
+    # or write /usr/local/hailo/resources/.env — that's done by the upstream
+    # `hailo-post-install` CLI. Without it, the pipeline crashes at runtime
+    # with "cannot open shared object file: libyolo_hailortpp_postprocess.so".
+    # Skip the (slow) re-run if the postprocess libs are already in place.
+    if [ ! -f /usr/local/hailo/resources/so/libyolo_hailortpp_postprocess.so ]; then
+        echo -e "${GREEN}  Running hailo-post-install (compiles postprocess libs, writes .env, downloads default models)...${NC}"
+        hailo-post-install
+    else
+        echo -e "${GREEN}  hailo-apps post-install artifacts already present, skipping.${NC}"
+    fi
 else
     echo -e "${YELLOW}[1/2] Skipping Python dependencies (--skip-python)${NC}"
 fi
