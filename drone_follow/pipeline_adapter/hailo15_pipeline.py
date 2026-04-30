@@ -37,8 +37,13 @@ LOGGER = logging.getLogger("drone_follow.app")
 # ---------------------------------------------------------------------------
 # Configuration defaults
 # ---------------------------------------------------------------------------
-MEDIALIB_TOP_CONFIG = "/etc/imaging/cfg/medialib_configs/ai_example_medialib_config.json"
+MEDIALIB_TOP_CONFIG_CANDIDATES = [
+    "/etc/imaging/cfg/medialib_configs/face_landmarks_medialib_config.json",
+    "/etc/imaging/cfg/medialib_configs/ai_example_medialib_config.json",
+]
 YOLO_HEF_CANDIDATES = [
+    "/home/root/apps/face_landmarks/resources/hailo_yolov8s_384_640.hef",
+    "/home/root/apps/face_landmarks/resources/hailo_yolov8n_384_640.hef",
     "/home/root/apps/ai_example_app/resources/hailo_yolov8s_384_640.hef",
     "/home/root/apps/ai_example_app/resources/hailo_yolov8n_384_640.hef",
 ]
@@ -104,11 +109,17 @@ def _resolve_frontend_config():
     Returns (frontend_config_path, encoder_config_path, n_streams, app_settings).
     The frontend config is a temp file that must be cleaned up by the caller.
     """
-    if not os.path.isfile(MEDIALIB_TOP_CONFIG):
+    medialib_config = None
+    for path in MEDIALIB_TOP_CONFIG_CANDIDATES:
+        if os.path.isfile(path):
+            medialib_config = path
+            break
+    if medialib_config is None:
         raise FileNotFoundError(
-            f"{MEDIALIB_TOP_CONFIG} not found. Run setup_hailo_sensor first.")
+            f"No medialib config found. Checked: {MEDIALIB_TOP_CONFIG_CANDIDATES}. "
+            "Run setup_hailo_sensor first.")
 
-    with open(MEDIALIB_TOP_CONFIG) as f:
+    with open(medialib_config) as f:
         top_config = json.load(f)
 
     default_profile = top_config.get("default_profile", "Daylight")
