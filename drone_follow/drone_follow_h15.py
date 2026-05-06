@@ -71,6 +71,26 @@ def _fix_udp_connection_url(args):
         LOGGER.info("[drone] H15 UDP fix: connection = %s", args.connection)
 
 
+def _disable_ipv6_loopback():
+    """Disable IPv6 on the loopback interface — required for reliable mavsdk_server gRPC.
+
+    With IPv6 enabled on lo, mavsdk_server v2.12.x's gRPC service registration
+    is non-deterministic (~50% success). Disabling it makes the connection
+    rock-solid (100%). Only affects loopback, not other network interfaces.
+    """
+    path = "/proc/sys/net/ipv6/conf/lo/disable_ipv6"
+    try:
+        with open(path, "r") as f:
+            current = f.read().strip()
+        if current == "1":
+            return  # already disabled
+        with open(path, "w") as f:
+            f.write("1")
+        LOGGER.info("[drone] Disabled IPv6 on loopback (was=%s) for mavsdk_server reliability", current)
+    except (PermissionError, FileNotFoundError, OSError) as e:
+        LOGGER.warning("[drone] Could not disable IPv6 loopback (%s) — mavsdk may be flaky", e)
+
+
 def _fix_mavsdk_server_path():
     """Ensure mavsdk can find the server binary on H15 (Yocto installs to /usr/bin/)."""
     import shutil
@@ -82,7 +102,7 @@ def _fix_mavsdk_server_path():
             if os.path.exists(sys_path):
                 os.makedirs(os.path.dirname(pip_path), exist_ok=True)
                 os.symlink(sys_path, pip_path)
-                LOGGER.info("[drone] Symlinked mavsdk_server: %s → %s", pip_path, sys_path)
+                LOGGER.info("[drone] Symlinked mavsdk_server: %s -> %s", pip_path, sys_path)
     except Exception as e:
         LOGGER.warning("[drone] Could not fix mavsdk_server path: %s", e)
 
@@ -117,6 +137,7 @@ def main():
     _resolve_serial_connection(args)
     _fix_udp_connection_url(args)
     _fix_mavsdk_server_path()
+    _disable_ipv6_loopback()
 
     shared_state = SharedDetectionState()
     shutdown = asyncio.Event()
