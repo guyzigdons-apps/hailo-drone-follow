@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import logging
 import signal
+import subprocess
 import threading
 import time
 from drone_follow.follow_api import ControllerConfig, SharedDetectionState
@@ -56,22 +57,57 @@ def _resolve_serial_connection(args):
 
 
 def _add_app_args(parser: argparse.ArgumentParser) -> None:
-    """Register application-level CLI flags (servers, UI)."""
+    """Register application-level CLI flags (servers, UI).
+
+    Output branches are organised in two orthogonal groups:
+
+    * UI group — outbound network video, mutually exclusive:
+        --openhd : RTP H.264 to an OpenHD ground station
+        --webui  : MJPEG to the local web UI
+
+    * Local group — on-device output, may coexist:
+        --display : X11 window with overlay (tile rectangles stripped, target
+                    person's bbox emphasised by class-id remap)
+        --record  : pure-GStreamer recording (x264enc -> matroskamux -> filesink)
+
+    If neither --openhd nor --webui is passed, --display defaults to True.
+    """
     group = parser.add_argument_group("app")
 
     group.add_argument("--follow-server-port", type=int, default=8080,
                        help="HTTP server port for target selection")
-    group.add_argument("--ui", action="store_true",
-                       help="Enable web UI with live video and clickable bounding boxes")
-    group.add_argument("--ui-port", type=int, default=5001,
-                       help="Web UI server port (default: 5001)")
-    group.add_argument("--ui-fps", type=int, default=10,
-                       help="MJPEG stream frame rate (default: 10)")
-    group.add_argument("--record", action="store_true",
-                       help="Auto-start recording on launch (recording is always available from the UI)")
 
-    group.add_argument("--no-display", action="store_true",
-                       help="Disable display window (headless mode)")
+    # --- UI group (mutually exclusive) ---
+    group.add_argument("--webui", action="store_true",
+                       help="Enable web UI with live MJPEG and clickable bounding boxes")
+    group.add_argument("--webui-port", type=int, default=5001,
+                       help="Web UI server port (default: 5001)")
+    group.add_argument("--webui-fps", type=int, default=10,
+                       help="MJPEG stream frame rate (default: 10)")
+    group.add_argument("--openhd", action="store_true",
+                       help="Send overlay video to OpenHD via UDP RTP (mutually exclusive with --webui)")
+
+    # --- Local group ---
+    group.add_argument("--display", action="store_true",
+                       help="Show local X11 display window with overlay (tile rectangles "
+                            "stripped, target person's bbox emphasised). Default: enabled "
+                            "when neither --openhd nor --webui is set; disabled otherwise.")
+    group.add_argument("--record", action="store_true",
+                       help="Build pure-GStreamer recording branch (videoconvert + H.264 "
+                            "encode + matroskamux + filesink). Auto-starts on launch; "
+                            "can be toggled mid-run from the web UI / OpenHD.")
+    group.add_argument("--record-output", type=str, default=None,
+                       help="Path for the recorded .mkv file. Default: "
+                            "drone_follow/recordings/rec_<timestamp>.mkv")
+    group.add_argument("--record-bitrate", type=int, default=5000,
+                       help="x264enc bitrate in kbps for the recording branch (default: 5000)")
+
+    group.add_argument("--log-perf", action="store_true",
+                       help="Log pipeline and tracker performance metrics periodically")
+
+    group.add_argument("--test-log", type=str, default=None,
+                       help="Write per-frame detection log as JSONL to this path "
+                            "(used by simulation tests)")
 
     # ReID re-identification
     group.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF,
@@ -79,17 +115,29 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                             f"(default: {_DEFAULT_REID_HEF}). Use --no-reid to disable.")
     group.add_argument("--no-reid", action="store_true",
                        help="Disable ReID re-identification")
-    group.add_argument("--update-interval", type=int, default=30,
-                       help="Frames between ReID gallery embedding updates while following (default: 30)")
-    group.add_argument("--reid-threshold", type=float, default=0.7,
-                       help="Cosine similarity threshold for ReID match (0.0–1.0, default: 0.7)")
+    group.add_argument("--update-interval", type=int, default=10,
+                       help="Frames between ReID gallery embedding updates while following (default: 10)")
+    group.add_argument("--reid-threshold", type=float, default=0.75,
+                       help="Cosine similarity threshold for ReID match (0.0–1.0, default: 0.75)")
     group.add_argument("--reid-timeout", type=float, default=20.0,
                        help="Seconds to search for a lost locked target via ReID before returning "
                             "to auto mode (default: 20.0)")
+    group.add_argument("--reid-drift-threshold", type=float, default=0.6,
+                       help="Below this similarity vs gallery, an in-track embedding is treated "
+                            "as drift; gallery is not updated and re-acquisition is triggered "
+                            "(0.0–1.0, default: 0.6)")
+    group.add_argument("--reid-duplicate-threshold", type=float, default=0.9,
+                       help="Above this similarity, the embedding is redundant and skipped, "
+                            "with periodic refresh via --reid-refresh-every (0.0–1.0, default: 0.9)")
+    group.add_argument("--reid-refresh-every", type=int, default=5,
+                       help="On every Nth consecutive duplicate-band decision, replace the oldest "
+                            "gallery vector to keep the gallery fresh (default: 5)")
+    group.add_argument("--reid-dump-embeddings", type=str, default=None,
+                       help="Save every embedding accepted into the ReID gallery for the active "
+                            "target to this .npy path at shutdown (used by tests to verify "
+                            "all stored embeddings describe the same person)")
 
     # OpenHD integration
-    group.add_argument("--openhd-stream", action="store_true",
-                       help="Send overlay video to OpenHD via UDP RTP instead of display sink")
     group.add_argument("--openhd-port", type=int, default=5500,
                        help="OpenHD UDP input port (default: 5500)")
     group.add_argument("--openhd-bitrate", type=int, default=3917,
@@ -105,12 +153,21 @@ def _build_parser() -> argparse.ArgumentParser:
       - app (this file):   UI/server ports
     """
     from hailo_apps.python.core.common.core import get_pipeline_parser
+    from drone_follow.pipeline_adapter import add_tracker_args
     parser = get_pipeline_parser()
 
     ControllerConfig.add_args(parser)
     add_drone_args(parser)
 
     _add_app_args(parser)
+    add_tracker_args(parser)
+
+    # Tile / multi-scale defaults are injected AFTER the upstream
+    # ``GStreamerTilingApp._add_tiling_arguments`` runs (it registers
+    # ``--tiles-x`` etc. and would clobber any ``set_defaults`` made
+    # here). See ``DroneFollowTilingApp._add_tiling_arguments`` in
+    # ``hailo_drone_detection_manager.py`` for the override; the values
+    # live in ``drone_follow/pipeline_defaults.py``.
 
     # Camera is mounted right-side up: no mirroring needed.
     # The library defines --horizontal-mirror/--vertical-mirror (store_true, default=False).
@@ -130,23 +187,43 @@ def main():
     # Create target state for follow server
     target_state = FollowTargetState()
 
-    # Pre-parse --ui flag to set up web UI before create_app parses all args.
-    # --openhd-stream is also pre-parsed because, in OpenHD mode, the recording
-    # branch must be present in the pipeline so QOpenHD's Record button (via the
-    # OpenHD bridge) can toggle capture even when --record wasn't passed at startup.
+    # Pre-parse output-branch flags so we can wire the web UI / recording
+    # state objects before create_app() runs the full parser. Display
+    # follows the implicit rule: enabled when neither --openhd nor
+    # --webui is set.
     ui_pre = argparse.ArgumentParser(add_help=False)
-    ui_pre.add_argument("--ui", action="store_true")
-    ui_pre.add_argument("--ui-port", type=int, default=5001)
-    ui_pre.add_argument("--ui-fps", type=int, default=10)
+    ui_pre.add_argument("--webui", action="store_true")
+    ui_pre.add_argument("--webui-port", type=int, default=5001)
+    ui_pre.add_argument("--webui-fps", type=int, default=10)
+    ui_pre.add_argument("--openhd", action="store_true")
+    ui_pre.add_argument("--display", action="store_true")
     ui_pre.add_argument("--record", action="store_true")
-    ui_pre.add_argument("--openhd-stream", action="store_true")
+    ui_pre.add_argument("--log-perf", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
-    # Build the recording branch whenever there is a control surface that can
-    # trigger it remotely (--openhd-stream brings QOpenHD's Record button into
-    # play; --record means autostart). --record additionally drives autostart;
-    # the branch alone has negligible cost when the valve stays closed.
-    record_branch_enabled = ui_pre_args.record or ui_pre_args.openhd_stream or ui_pre_args.ui
+    if ui_pre_args.openhd and ui_pre_args.webui:
+        raise SystemExit("error: --openhd and --webui are mutually exclusive "
+                         "(only one network encoder may run at a time)")
+
+    if not ui_pre_args.openhd and not ui_pre_args.webui:
+        ui_pre_args.display = True
+
+    # Build the recording branch whenever there's a control surface that
+    # can toggle it remotely:
+    #
+    #   --record  : auto-start recording at launch.
+    #   --webui   : the web UI's Record button can toggle mid-flight.
+    #   --openhd  : QOpenHD's Record button (via the OpenHD bridge) can
+    #               toggle mid-flight.
+    #
+    # The valve gates frames at runtime, so building the branch when no
+    # toggle source exists wastes CPU; building it when one does lets
+    # operators flip recording on/off without restarting drone-follow.
+    record_branch_enabled = (
+        ui_pre_args.record
+        or ui_pre_args.webui
+        or ui_pre_args.openhd
+    )
 
     # Always create SharedUIState — the OpenHD bridge needs it for bbox
     # messages even when the web UI is disabled.
@@ -154,7 +231,7 @@ def main():
     ui_state = SharedUIState()
 
     web_server = None
-    if ui_pre_args.ui:
+    if ui_pre_args.webui:
         from drone_follow.servers import WebServer
         # Check that the UI has been built
         _ui_build_index = os.path.join(
@@ -172,9 +249,20 @@ def main():
     reid_pre = argparse.ArgumentParser(add_help=False)
     reid_pre.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF)
     reid_pre.add_argument("--no-reid", action="store_true")
-    reid_pre.add_argument("--update-interval", type=int, default=30)
-    reid_pre.add_argument("--reid-threshold", type=float, default=0.7)
+    reid_pre.add_argument("--update-interval", type=int, default=10)
+    reid_pre.add_argument("--reid-threshold", type=float, default=0.75)
     reid_pre.add_argument("--reid-timeout", type=float, default=20.0)
+    reid_pre.add_argument("--reid-drift-threshold", type=float, default=0.6,
+        help="Below this similarity vs gallery, an in-track embedding is "
+             "treated as drift; gallery is not updated and re-acquisition "
+             "is triggered.")
+    reid_pre.add_argument("--reid-duplicate-threshold", type=float, default=0.9,
+        help="Above this similarity, the embedding is redundant and skipped "
+             "(with periodic refresh — see --reid-refresh-every).")
+    reid_pre.add_argument("--reid-refresh-every", type=int, default=5,
+        help="On every Nth consecutive duplicate-band decision, replace the "
+             "oldest gallery vector to keep the gallery fresh.")
+    reid_pre.add_argument("--reid-dump-embeddings", type=str, default=None)
     reid_pre_args, _ = reid_pre.parse_known_args()
 
     reid_manager = None
@@ -184,17 +272,36 @@ def main():
             hef_path=reid_pre_args.reid_model,
             update_interval=reid_pre_args.update_interval,
             reid_match_threshold=reid_pre_args.reid_threshold,
+            drift_threshold=reid_pre_args.reid_drift_threshold,
+            duplicate_threshold=reid_pre_args.reid_duplicate_threshold,
+            refresh_every=reid_pre_args.reid_refresh_every,
+            dump_embeddings_path=reid_pre_args.reid_dump_embeddings,
         )
 
     from drone_follow.pipeline_adapter import create_app
 
+    # Pre-parse --tracker to pass to create_app
+    from drone_follow.pipeline_adapter.tracker_factory import TRACKER_CHOICES, DEFAULT_TRACKER
+    tracker_pre = argparse.ArgumentParser(add_help=False)
+    tracker_pre.add_argument("--tracker", default=DEFAULT_TRACKER, choices=TRACKER_CHOICES)
+    tracker_pre_args, _ = tracker_pre.parse_known_args()
+
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
-                     ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
+                     ui_state=ui_state, ui_fps=ui_pre_args.webui_fps, parser=parser,
                      record_enabled=record_branch_enabled, record_dir=recordings_dir,
                      reid_manager=reid_manager,
-                     reid_search_timeout=reid_pre_args.reid_timeout)
+                     reid_search_timeout=reid_pre_args.reid_timeout,
+                     tracker_name=tracker_pre_args.tracker,
+                     log_perf=ui_pre_args.log_perf)
     args = app.options_menu
+    if getattr(args, "openhd", False) and getattr(args, "webui", False):
+        raise SystemExit("error: --openhd and --webui are mutually exclusive")
+    # Implicit-display rule: enabled when neither --openhd nor --webui is
+    # set. Mirror the pre-parse logic so the pipeline string builder reads
+    # the same display state.
+    if not getattr(args, "openhd", False) and not getattr(args, "webui", False):
+        args.display = True
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
 
@@ -204,6 +311,10 @@ def main():
     # Make the live config visible to the detection callback so it can read auto_select
     # and write target_bbox_height when a target is locked.
     app.user_data.controller_config = controller_config
+
+    test_log_path = getattr(args, "test_log", None)
+    if test_log_path:
+        app.user_data.open_test_log(test_log_path)
 
     # --save-config: dump effective config to JSON and exit
     save_path = getattr(args, "save_config", None)
@@ -226,11 +337,11 @@ def main():
     openhd_bridge.start()
 
     # Start web UI server
-    if ui_pre_args.ui:
+    if ui_pre_args.webui:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
         web_server = WebServer(ui_state, target_state, shared_state,
                                controller_config=controller_config,
-                               port=args.ui_port, static_dir=static_dir,
+                               port=args.webui_port, static_dir=static_dir,
                                follow_server_port=args.follow_server_port,
                                recording_ctl=app)
 
@@ -299,8 +410,22 @@ def main():
             app.cleanup_recording_branch()
         # Wait for drone thread to finish cleanly
         drone_thread.join(timeout=5.0)
+        if drone_thread.is_alive():
+            # Drone thread is stuck (typically a MAVSDK land/offboard timeout
+            # against a sim that's already gone). Its `with DetachedMavsdkServer`
+            # __exit__ won't run, and start_new_session=True means mavsdk_server
+            # would survive us — leaving UDP 14540 + TCP 50051 bound and blocking
+            # the next run. Reap it by name now while we still own a shell;
+            # scope to the current uid so we don't touch another user's server.
+            try:
+                subprocess.run(["pkill", "-9", "-u", str(os.getuid()), "-f", "mavsdk_server"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         if reid_manager is not None:
+            reid_manager.dump_embeddings()
             reid_manager.release()
+        app.user_data.close_test_log()
         if web_server is not None:
             web_server.stop()
         openhd_bridge.stop()

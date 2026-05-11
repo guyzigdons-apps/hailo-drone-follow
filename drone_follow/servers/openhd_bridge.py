@@ -39,34 +39,29 @@ LOGGER = logging.getLogger(__name__)
 # ControllerConfig attribute name.  Values are native float or int (no scaling).
 _CONFIG_PARAMS = {
     "kp_yaw":                   ("DF_KP_YAW",    float),
-    "kp_forward":               ("DF_KP_FWD",     float),
-    "kp_backward":              ("DF_KP_BACK",    float),
     "max_forward":              ("DF_MAX_FWD",    float),
     "max_backward":             ("DF_MAX_BACK",   float),
     "max_forward_accel":        ("DF_MAX_ACC",   float),
-    "target_center_y":          ("DF_TGT_CY",    float),
-    "dead_zone_y_deg":          ("DF_DZ_Y",      float),
     "dead_zone_deg":            ("DF_DZ_YAW",    float),
-    "kp_altitude":              ("DF_KP_ALT",    float),
+    "kp_distance":              ("DF_KP_DIST",   float),
+    "kp_distance_back":         ("DF_KP_DIST_B", float),
     "target_bbox_height":       ("DF_TGT_BH",    float),
     "dead_zone_bbox_percent":   ("DF_DZ_BH_PCT", float),
     "max_climb_speed":          ("DF_MAX_CLM",   float),
     "max_yawspeed":             ("DF_MAX_YAW",   float),
+    "kp_alt_hold":              ("DF_KP_ALT_H",  float),
     "min_altitude":             ("DF_MIN_ALT",   float),
     "max_altitude":             ("DF_MAX_ALT",   float),
     "yaw_alpha":                ("DF_YAW_ALPHA",  float),
     "forward_alpha":            ("DF_FWD_ALPHA",  float),
+    "forward_velocity_deadband": ("DF_FWD_DB",    float),
     "target_altitude":          ("DF_TGT_ALT",   float),
     "yaw_only":                 ("DF_YAW_ONLY",   bool),
     "auto_select":              ("DF_AUTO_SEL",  bool),
     "smooth_yaw":               ("DF_SMTH_YAW",   bool),
     "smooth_forward":           ("DF_SMTH_FWD",   bool),
-    "right_alpha":              ("DF_RT_ALPHA",   float),
-    "smooth_right":             ("DF_SMTH_RT",    bool),
     "down_alpha":               ("DF_DN_ALPHA",   float),
     "smooth_down":              ("DF_SMTH_DN",    bool),
-    "orbit_speed_m_s":          ("DF_ORBIT_SPD",  float),
-    "orbit_direction":          ("DF_ORBIT_DIR",  int),
 }
 
 # Fields where value 0 maps to Python None
@@ -212,10 +207,15 @@ class OpenHDBridge:
         self._send_immediate_report()
 
     def _apply_bitrate(self, kbps: int):
-        """Dynamically set x264enc bitrate from WFB link recommendation.
+        """Dynamically set the OpenHD encoder bitrate from the WFB link
+        recommendation.
 
-        Only applies in --openhd-stream mode where the drone-follow app owns the
-        x264enc encoder. In SHM mode OpenHD handles encoding directly.
+        Only applies in ``--openhd`` mode where the drone-follow app owns
+        the encoder. In SHM mode OpenHD handles encoding directly.
+
+        Handles both encoder backends transparently: ``x264enc`` (which
+        takes ``bitrate`` in kbps) and ``openh264enc`` (which takes it in
+        bits-per-second).
         """
         if kbps == self._current_bitrate_kbps:
             return
@@ -228,9 +228,13 @@ class OpenHDBridge:
         if encoder is None:
             # SHM mode — no local encoder; OpenHD handles bitrate directly
             return
-        encoder.set_property("bitrate", kbps)
+        factory_name = encoder.get_factory().get_name() if encoder.get_factory() else ""
+        if factory_name == "openh264enc":
+            encoder.set_property("bitrate", kbps * 1000)
+        else:
+            encoder.set_property("bitrate", kbps)
         self._current_bitrate_kbps = kbps
-        LOGGER.info("[openhd_bridge] x264enc bitrate set to %d kbps", kbps)
+        LOGGER.info("[openhd_bridge] %s bitrate set to %d kbps", factory_name or "encoder", kbps)
 
     def _apply_recording(self, value: int):
         """Start or stop air-side recording from QOpenHD's Record button.

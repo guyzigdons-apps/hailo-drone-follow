@@ -13,7 +13,19 @@ logs/
 recordings/
 drone_follow/ui/node_modules/
 drone_follow/ui/build/
-hailo-apps/
+
+# hailo-apps and sim/PX4-Autopilot are tracked as git submodules — see
+# .gitmodules. Don't ignore them.
+
+# Per-user Claude Code settings (shared memory/skills under .claude/ are tracked).
+.claude/settings.local.json
+
+# OpenHD repos cloned into the repo root by scripts/install_ground_station.sh.
+# No trailing slash — that way the patterns match both real directories AND
+# symlinks-to-directories (a real-dir-only pattern leaves symlinks untracked).
+OpenHD
+OpenHD-SysUtils
+qopenHD
 
 # Saved controller config — user tuning, not source (see PARAMETERS.md)
 df_config.json

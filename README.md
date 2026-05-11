@@ -8,11 +8,13 @@ For complete setup and deployment instructions with OpenHD, see [SETUP_GUIDE.md]
 
 ## Installation
 
+This repo consumes [hailo-apps-infra](https://github.com/hailocs/hailo-apps-internal) as a git submodule at `./hailo-apps/` (branch `community_plugins`). One `./install.sh` runs both the submodule's installer (system bits + shared venv) and the drone-follow editable install.
+
 ### Prerequisites
 
 - **Ubuntu 22.04+** with Python 3.10+
 - **Hailo device** (Hailo-8, Hailo-8L, or Hailo-10H) — PCIe card or M.2 module
-- **HailoRT driver** — must be installed before running the installer
+- **HailoRT driver** installed (see Step 1 below)
 - **Node.js / npm** (optional, for the web UI)
 - For **simulation**: Gazebo Garden, `python3-gz-transport13`, `python3-gz-msgs10`
 - For **real drone**: PX4-compatible flight controller (e.g. Cube Orange+)
@@ -27,44 +29,90 @@ sudo reboot
 hailortcli fw-control identify   # verify device detected
 ```
 
-You should see your device identified (e.g. "Hailo-8" or "Hailo-8L"). If `hailortcli` is not found or the device is not detected, the driver is not installed correctly.
-
-### Step 2: One-time Hailo system setup (manual)
-
-The hailo-apps system installer compiles the C++ postprocess modules, populates `/usr/local/hailo/resources/`, and downloads HEF models. Run it **once per machine**:
+### Step 2: Clone and install drone-follow
 
 ```bash
-# Clones hailo-apps if missing, then runs the system installer:
-git clone -b dev https://github.com/hailocs/hailo-apps-internal.git hailo-apps
-sudo hailo-apps/install.sh
-```
-
-This step is **not** repeated on subsequent updates — only `./install.sh` (Step 3) is.
-
-### Step 3: Run the drone-follow Installer
-
-The installer creates a repo-owned Python venv at `./venv/` (with `--system-site-packages` so apt-installed Hailo bindings are visible), installs `hailo-apps` and `drone-follow` as editable packages, and builds the UI:
-
-
-```bash
+git clone <this-repo> hailo-drone-follow
+cd hailo-drone-follow
 ./install.sh
 ```
 
-Auto-detects your Hailo device type (hailo8 / hailo8l). Options:
+`install.sh` runs five steps:
+
+1. `git submodule update --init --recursive hailo-apps` — fetch the pinned hailo-apps-infra commit on the `community_plugins` branch.
+2. `./hailo-apps/install.sh` — the submodule's installer creates `./hailo-apps/venv_hailo_apps` (with `--system-site-packages`), compiles the C++ postprocess modules, populates `/usr/local/hailo/resources/`, downloads default HEFs, and writes `/usr/local/hailo/resources/.env`.
+3. `pip install -e .` — install drone-follow editable into the shared venv.
+4. Download ReID HEFs (`repvgg_a0_person_reid_512.hef`, `osnet_x1_0.hef`) into `/usr/local/hailo/resources/models/hailo8/`.
+5. `npm install && npm run build` — build the React UI.
+
+Re-running is idempotent — already-installed steps are skipped.
+
+Flags:
 
 | Flag | Description |
 |---|---|
-| `--hailo-apps-dir DIR` | Use an existing hailo-apps checkout (default: `./hailo-apps`) |
-| `--skip-hailo-apps` | Skip hailo-apps clone and system deps |
-| `--skip-ui` | Skip UI npm install and build |
-| `--skip-python` | Skip Python dependency installation |
+| `--skip-submodule` | Skip `git submodule update --init` (assumes `./hailo-apps` ready) |
+| `--skip-apps` | Skip `./hailo-apps/install.sh` (assumes parent already installed) |
+| `--skip-python` | Skip `pip install -e .` |
+| `--skip-hefs` | Skip ReID HEF downloads |
+| `--skip-ui` | Skip npm install + UI build |
 
-### Step 4: Verify
+### Step 3: Verify
 
 ```bash
-source setup_env.sh
+source setup_env.sh              # activates ./hailo-apps/venv_hailo_apps, loads .env
 drone-follow --help
 ```
+
+To run the test suite (optional, dev-only — `pytest` is not in the default venv):
+
+```bash
+pip install pytest
+pytest drone_follow/tests/
+```
+
+### Step 5: OpenHD radio link (air + ground)
+
+For the **air unit** (Raspberry Pi with Cube Orange+ + Hailo-8L), the OpenHD radio link install is `scripts/install_air.sh`. It must be run as root and **must be run after Steps 1-3**, since `scripts/start_air.sh` launches drone-follow alongside OpenHD and therefore needs the parent venv + drone-follow installed.
+
+For the **ground station** (laptop or any RPi), the QOpenHD GUI install is `scripts/install_ground_station.sh`. It must be run as root, but **does not require a Hailo device or Steps 1-3** — `scripts/start_ground.sh` only launches `openhd --ground` and the `QOpenHD` GUI; no Python, no Hailo runtime, no drone-follow code is touched on the ground side.
+
+Both ends share an encryption key (see below).
+
+These installers clone the OpenHD release branches we maintain — `2.6.4-hailo` (OpenHD), `main-hailo` (OpenHD-SysUtils), `v2.6.0-hailo` (QOpenHD), and `master-hailo` (rtl88x2bu WiFi driver), all under `https://github.com/giladnah/`. The `*-hailo` suffix denotes "based on upstream release tag X plus our drone-follow protocol additions".
+
+```bash
+# Pi (air unit) — Steps 1-2 first, then from the repo root:
+sudo ./scripts/install_air.sh --generate-key      # FIRST machine — creates txrx.key
+
+# Ground station (laptop or RPi — no Hailo device, no Steps 1-2 needed):
+sudo ./scripts/install_ground_station.sh
+sudo scp <pi-host>:/usr/local/share/openhd/txrx.key /tmp/txrx.key
+sudo install -m 644 /tmp/txrx.key /usr/local/share/openhd/txrx.key
+```
+
+**txrx.key:** The radio link requires the *same* encryption key on both ends. Pass `--generate-key` to ONE machine (the air unit is a good default) and `scp` it to the other afterwards. The installers print clear instructions if the key is missing.
+
+### Step 5 (Pi only, optional): auto-start at boot
+
+```bash
+sudo ./scripts/boot/install.sh
+```
+
+This installs a systemd unit (`drone-follow-boot.service`) that auto-launches the air unit on every boot, and creates `~/Desktop/drone-follow.conf` with `ENABLED=false`. To opt in, edit the file and set `ENABLED=true`. The unit reads this file at boot — no `systemctl reload` needed when toggling.
+
+To remove the boot service: `sudo ./scripts/boot/uninstall.sh`.
+
+### Uninstall
+
+To wipe OpenHD/QOpenHD/driver artefacts (without removing the hailo-apps submodule or drone-follow itself):
+
+```bash
+sudo ./scripts/uninstall_air.sh             # Pi only
+sudo ./scripts/uninstall_ground_station.sh  # laptop only
+```
+
+These remove `/usr/local/bin/openhd`, `/usr/local/bin/openhd_sys_utils`, `/usr/local/share/openhd/`, the `88x2bu_ohd` driver module, the regdomain configs, and the cloned `OpenHD/`, `OpenHD-SysUtils/`, `qopenHD/` directories under the repo root. They do NOT touch HailoRT, hailo-all, the shared venv, or the drone-follow Python install — re-running the install steps above gets you back to a working state.
 
 ## Quick Start
 
@@ -72,16 +120,16 @@ drone-follow --help
 source setup_env.sh
 
 # Dev machine with USB camera + flight controller over serial:
-drone-follow --input usb --serial --ui
+drone-follow --input usb --serial --webui
 
 # RPi with camera + Cube Orange+ over USB serial:
-drone-follow --input rpi --serial --ui
+drone-follow --input rpi --serial --webui
 
 # Simulation (Gazebo camera + PX4 SITL):
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 
 # Real drone with OpenHD (starts OpenHD air + drone-follow):
-scripts/start_air.sh
+./scripts/start_air.sh
 ```
 
 ## How It Works
@@ -100,27 +148,27 @@ scripts/start_air.sh
 | `--serial` | off | Connect via USB serial (`/dev/ttyACM0`); overrides `--connection` |
 | `--connection URL` | `udpin://0.0.0.0:14540` | MAVSDK connection string |
 | `--takeoff-landing` | off | Auto arm/takeoff/land. Without this, the pilot switches to OFFBOARD via GCS. |
-| `--ui` | off | Enable web UI with live video and click-to-follow (port 5001) |
-| `--record` | off | Record video + detection overlays for the entire session |
-| `--target-bbox-height` | `0.3` | Desired person size in frame (0-1). Adjustable mid-flight via UI. |
+| `--display` | auto-on when no UI flag | Local X11 window with overlay (tile rectangles stripped, target person's bbox highlighted via class-id remap). |
+| `--webui` | off | Web UI with live MJPEG video and click-to-follow (port 5001). Mutually exclusive with `--openhd`. |
+| `--openhd` | off | Send overlay video to OpenHD via UDP RTP. Mutually exclusive with `--webui`. |
+| `--record` | off | Record post-overlay video to `recordings/rec_<ts>.mkv` (pure-GStreamer x264enc + matroskamux + filesink). |
+| `--target-bbox-height` | `0.25` | Desired person size in frame (0-0.25). Drives forward/backward distance. Adjustable mid-flight via UI. |
 | `--target-altitude` | `3.0` | Target altitude in metres. Also used as takeoff height. |
 | `--yaw-only` / `--no-yaw-only` | on | Yaw only: no forward/backward movement. Use `--no-yaw-only` for full follow. |
 | `--no-reid` | off | Disable ReID re-identification |
 | `--reid-timeout` | `20.0` | Seconds to search via ReID before returning to auto mode |
-| `--no-display` | off | Headless mode (no display window) |
-| `--openhd-stream` | off | Send overlay video to OpenHD via UDP RTP instead of display |
 
 Run `drone-follow --help` for the full list.
 
 ## Web UI
 
-Enable with `--ui` (served on port 5001). Provides live MJPEG video, detection overlays, and click-to-follow target selection.
+Enable with `--webui` (served on port 5001). Provides live MJPEG video, detection overlays, and click-to-follow target selection.
 
 ### Status Bar
 
 Shows real-time telemetry:
 - **Following indicator** — Current mode: "Auto (largest person)", "Following: ID X" (locked), or "Idle (paused)".
-- **Velocity readout** — Mode (TRACK / SEARCH / ORBIT) and commanded velocities.
+- **Velocity readout** — Mode (TRACK / SEARCH) and commanded velocities.
 - **Performance** — FPS, latency, CPU%, memory, Hailo NN core utilization, and chip temperature.
 - **Record / Clear Target** buttons.
 
@@ -130,12 +178,9 @@ Shows real-time telemetry:
 
 | Control | Range | Default | Description |
 |---|---|---|---|
-| **Target Size** | 5%-100% | 30% | Desired person bbox height. Drone approaches if smaller, retreats if larger. |
-| **Target Alt** | 1-20 m | 3.0 | Target altitude. Changed mid-flight via slider. |
+| **Target Size** | 10–25% | 25% | Desired person bbox height. Drone approaches if smaller, retreats if larger. |
+| **Target Alt** | 1–8 m | 3.0 | Target altitude. Changed mid-flight via slider. |
 | **Yaw Only** | ON/OFF | ON | When ON, drone only rotates — no translation. |
-| **Mode** | FOLLOW/ORBIT | FOLLOW | FOLLOW: approach/retreat. ORBIT: circle the person. |
-| **Orbit Speed** | 0.2-3.0 m/s | 1.0 | Lateral speed in orbit mode. |
-| **Direction** | CW/CCW | CW | Orbit direction. |
 
 **Tuning:**
 
@@ -203,7 +248,7 @@ sim/start_sim.sh --bridge --world 2_person_world
 
 # Terminal 2 — Run drone-follow:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
 
 **Key ports:** `14540/udp` (MAVLink), `5600/udp` (video from Gazebo)
@@ -217,19 +262,19 @@ sim/start_sim.sh --remote <DRONE_APP_IP> --world 2_person_world
 
 # Drone-follow machine:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
 
 **Simulation configs** in `sim/configs/`: `simulation.json` (yaw-only), `simulation_follow.json` (full follow with reduced speeds).
 
-**USB camera with sim:** Always add `--yaw-only` — forward/altitude commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
+**USB camera with sim:** Always add `--yaw-only` — forward commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
 
 ## OpenHD Integration
 
 For FPV video with detection overlays streamed to an OpenHD ground station:
 
 ```bash
-drone-follow --input shm:///tmp/openhd_raw_video --openhd-stream --ui --serial
+drone-follow --input shm:///tmp/openhd_raw_video --openhd --webui --serial
 ```
 
 ### Real drone with OpenHD (air unit)
@@ -237,12 +282,12 @@ drone-follow --input shm:///tmp/openhd_raw_video --openhd-stream --ui --serial
 The air unit pairs drone-follow with OpenHD wifibroadcast for long-range telemetry/video to a ground station running QOpenHD. `scripts/start_air.sh` launches both side-by-side; the typical CLI is:
 
 ```bash
-drone-follow --input rpi --openhd-stream \
+drone-follow --input rpi --openhd \
     --connection tcpout://127.0.0.1:5760 \
     --tiles-x 1 --tiles-y 1
 ```
 
-`--openhd-stream` redirects the overlay video into an x264 encoder + RTP/UDP sink (default `127.0.0.1:5500`) so OpenHD picks it up as an external camera. Bitrate and port are tunable with `--openhd-bitrate` (default 3917 kbps) and `--openhd-port` (default 5500). For the full air/ground build and deployment story, see [SETUP_GUIDE.md](SETUP_GUIDE.md).
+`--openhd` redirects the overlay video into an x264 encoder + RTP/UDP sink (default `127.0.0.1:5500`) so OpenHD picks it up as an external camera. Bitrate and port are tunable with `--openhd-bitrate` (default 3917 kbps) and `--openhd-port` (default 5500). For the full air/ground build and deployment story, see [SETUP_GUIDE.md](SETUP_GUIDE.md).
 
 The pipeline reads raw video from OpenHD's shared memory, runs detection, and streams H264+RTP back to OpenHD. Resolution is auto-detected from `/tmp/openhd_raw_video.meta`. The pipeline auto-recovers from OpenHD restarts (resolution changes, socket reconnection).
 
@@ -257,7 +302,7 @@ Store controller settings in JSON instead of CLI flags:
 drone-follow --save-config my_config.json
 
 # Run with a config file (CLI flags still override)
-drone-follow --config configs/outdoor_follow.json --input rpi --serial --ui
+drone-follow --config configs/outdoor_follow.json --input rpi --serial --webui
 ```
 
 ### Bundled Presets
@@ -266,7 +311,6 @@ drone-follow --config configs/outdoor_follow.json --input rpi --serial --ui
 |---|---|---|
 | `outdoor_follow.json` | Full follow | Real drone outdoor. 5m altitude, conservative speeds. |
 | `outdoor_yaw_only.json` | Yaw-only | Real drone, rotation only. Safe for first outdoor tests. |
-| `outdoor_orbit.json` | Orbit | Cinematic circling at 1.5 m/s, 5m altitude. |
 
 ## Performance Monitoring
 
@@ -278,16 +322,16 @@ NN core utilization is read from HailoRT's monitor data (`/tmp/hmon_files/`), en
 
 Yaw-only mode is **on by default** (`--yaw-only`). The drone only rotates to keep the person centered in the frame — no forward/backward or altitude movement. Use `--no-yaw-only` for full follow. This is also available as a toggle in the web UI.
 
-Note: `--forward-gain 0` also fully disables forward/backward motion (including the safety backward retreat).
+Note: `--distance-gain 0` also disables forward/backward motion while leaving yaw active (the safety backward retreat still fires).
 
 ## Web UI Controls
 
-The web UI (`--ui`, served on port 5001) provides live video, detection overlays, and real-time tuning of the controller. All changes take effect immediately. The same controller parameters are also exposed to QOpenHD on the ground via the OpenHD parameter bridge — both surfaces edit one shared `ControllerConfig`, so a slider moved on the air-side UI shows the same value on the ground-side QOpenHD and vice versa. See [PARAMETERS.md](PARAMETERS.md) for the bridge protocol and [Control Surfaces](#control-surfaces) below for the full picture.
+The web UI (`--webui`, served on port 5001) provides live video, detection overlays, and real-time tuning of the controller. All changes take effect immediately. The same controller parameters are also exposed to QOpenHD on the ground via the OpenHD parameter bridge — both surfaces edit one shared `ControllerConfig`, so a slider moved on the air-side UI shows the same value on the ground-side QOpenHD and vice versa. See [PARAMETERS.md](PARAMETERS.md) for the bridge protocol and [Control Surfaces](#control-surfaces) below for the full picture.
 
 ### Status Bar
 
 - **Following indicator** — Shows which person is being tracked (by ID) or "Auto (largest person)" if no specific target is selected.
-- **Velocity readout** — Current mode (TRACK/SEARCH/ORBIT) and commanded velocities: forward, lateral, down, and yaw.
+- **Velocity readout** — Current mode (TRACK/SEARCH) and commanded velocities: forward, down, and yaw.
 - **Record** — Start/stop recording the video stream.
 - **Clear Target** — Stop following a specific person and revert to auto (largest person).
 
@@ -297,24 +341,21 @@ The web UI (`--ui`, served on port 5001) provides live video, detection overlays
 
 | Control | Range | Default | Description |
 |---|---|---|---|
-| **Target Size** | 5% – 100% | 30% | Desired person bounding box height as percentage of frame. The drone approaches if the person is smaller than this, retreats if larger. Increase to keep the person closer, decrease for more distance. |
-| **Target Alt** | 1 – 20 m | 3.0 | Target altitude. Used as initial takeoff height (with `--takeoff-landing`) and as a go-to altitude when changed mid-flight. |
+| **Target Size** | 10% – 25% | 25% | Desired person bounding-box height as a fraction of frame. The drone approaches if the person is smaller, retreats if larger. Larger setpoint = drone holds closer. |
+| **Target Alt** | 1 – 8 m | 3.0 | Target altitude. Used as initial takeoff height (with `--takeoff-landing`) and as a soft reference when changed mid-flight. |
 | **Yaw Only** | ON/OFF | ON | When ON, disables all forward/backward and altitude movement. The drone only rotates to keep the person centered. Use `--no-yaw-only` for full follow. |
-| **Mode: FOLLOW / ORBIT** | — | FOLLOW | FOLLOW: drone faces and approaches/retreats from the person. ORBIT: drone circles around the person while maintaining yaw lock, adding lateral velocity. |
-| **Orbit Speed** | 0.2 – 3.0 m/s | 1.0 | Lateral speed during orbit mode. Only visible when Mode is ORBIT. |
-| **Direction: CW / CCW** | — | CW | Orbit direction: clockwise or counter-clockwise. Only visible when Mode is ORBIT. |
 
 **Tuning (below operational controls):**
 
 | Control | Range | Default | Description |
 |---|---|---|---|
 | **KP Yaw** | 0 – 10 | 5.0 | Yaw proportional gain. Higher = faster rotation to center the person. Uses sqrt response to avoid oscillation. |
-| **KP Forward** | 0 – 10 | 3.0 | Forward/approach proportional gain. Controls how aggressively the drone moves toward a distant person. Set to 0 to disable forward/backward movement entirely. |
-| **KP Backward** | 0 – 10 | 5.0 | Backward/retreat proportional gain. Controls retreat speed when too close. Higher than KP Forward by default for safety. |
+| **KP Distance** | 0 – 3 | 0.6 | Approach gain on `(target/bbox - 1)` when factor > 0 (person too far). Set to 0 to disable forward motion. |
+| **KP Dist Back** | 0 – 5 | 2.5 | Retreat gain when factor < 0 (person too close). Higher than approach gain so retreat saturates `max_backward` before the bbox-safety panic threshold trips. |
 | **Yaw Smooth** | ON/OFF | ON | Low-pass filter on yaw commands. Reduces jitter but adds slight lag. |
 | **Yaw Alpha** | 0.05 – 1.0 | 0.3 | EMA smoothing factor for yaw. Lower = smoother (more lag), higher = more responsive. Only active when Yaw Smooth is ON. |
 | **Fwd Smooth** | ON/OFF | ON | EMA smoothing on forward velocity. Reduces sudden speed changes. |
-| **Fwd Alpha** | 0.05 – 1.0 | 0.1 | EMA factor for forward smoothing. Lower = smoother, higher = more responsive. |
+| **Fwd Alpha** | 0.05 – 1.0 | 0.15 | EMA factor for forward smoothing. Lower = smoother, higher = more responsive. |
 
 ### How Target Size Works
 
@@ -355,7 +396,7 @@ drone_follow/
   ui/                  React web dashboard
   drone_follow_app.py  Composition root and CLI entrypoint
 reid_analysis/         ReID embedding extraction and gallery matching strategies
-configs/               Real-drone controller presets (outdoor_follow, outdoor_orbit, etc.)
+configs/               Real-drone controller presets (outdoor_follow, etc.)
 sim/
   PX4-Autopilot/       PX4 git submodule (v1.14.0)
   bridge/              Gazebo camera -> UDP video bridge
@@ -382,8 +423,8 @@ drone-follow exposes the same control surface through three independent channels
 
 | Channel | Started by | Edits config | Selects target | Toggles recording | Reads detections |
 |---|---|---|---|---|---|
-| Web UI (HTTP/MJPEG, port 5001) | `--ui` | `POST /api/config` | UI click → `FollowServer POST /follow/<id>` | `POST /api/record/start` & `/stop` | MJPEG + SSE |
+| Web UI (HTTP/MJPEG, port 5001) | `--webui` | `POST /api/config` | UI click → `FollowServer POST /follow/<id>` | `POST /api/record/start` & `/stop` | MJPEG + SSE |
 | FollowServer (HTTP, port 8080) | always | — | `POST /follow/<id>` / `/follow/clear` | — | `GET /status` |
-| OpenHD bridge (UDP 5510/5511) | always | UDP JSON `{"param": ..., "value": ...}` from QOpenHD | `param=follow_id` (-1 idle / 0 auto / N lock) | `param=recording` (1=start, 0=stop) — branch is auto-built in `--openhd-stream` mode | bbox payload to OpenHD for ground display |
+| OpenHD bridge (UDP 5510/5511) | always | UDP JSON `{"param": ..., "value": ...}` from QOpenHD | `param=follow_id` (-1 idle / 0 auto / N lock) | `param=recording` (1=start, 0=stop) — branch is auto-built in `--openhd` mode | bbox payload to OpenHD for ground display |
 
-`--ui` and `--openhd-stream` are independent flags — you can run either, both, or neither (e.g. headless follow with no ground link). The OpenHD bridge always starts so that QOpenHD remains in sync regardless of the `--openhd-stream` setting.
+`--webui` and `--openhd` are independent flags — you can run either, both, or neither (e.g. headless follow with no ground link). The OpenHD bridge always starts so that QOpenHD remains in sync regardless of the `--openhd` setting.

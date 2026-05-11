@@ -52,8 +52,15 @@ def add_drone_args(parser) -> None:
 # ---------------------------------------------------------------------------
 
 def _to_mavsdk(cmd: VelocityCommand) -> VelocityBodyYawspeed:
-    """Translate a pure VelocityCommand to MAVSDK's type."""
-    return VelocityBodyYawspeed(cmd.forward_m_s, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
+    """Translate a pure VelocityCommand to MAVSDK's type.
+
+    The MAVSDK 4-tuple has a right axis but VelocityCommand does not — orbit was
+    removed and the controller always emitted right=0. The literal 0.0 here makes
+    the right slot explicit at the boundary; bringing back lateral motion means
+    re-adding a right_m_s field that goes through the smoothing/clamping in
+    VelocityCommandAPI.send rather than passing through unguarded.
+    """
+    return VelocityBodyYawspeed(cmd.forward_m_s, 0.0, cmd.down_m_s, cmd.yawspeed_deg_s)
 
 
 class VelocityCommandAPI:
@@ -77,7 +84,6 @@ class VelocityCommandAPI:
         self._config = config
         self._filtered_yaw: float = 0.0
         self._filtered_forward: float = 0.0
-        self._filtered_right: float = 0.0
         self._filtered_down: float = 0.0
         # Slew-rate limiter state for the forward axis (tilt-transient safety).
         # EMA bounds peak acceleration only as a function of step size; a hard
@@ -98,8 +104,6 @@ class VelocityCommandAPI:
 
         # Clamp each axis to configured maximums
         forward = max(-cfg.max_backward, min(cfg.max_forward, cmd.forward_m_s))
-        max_lat = cfg.max_orbit_speed
-        right = max(-max_lat, min(max_lat, cmd.right_m_s))
         down = max(-cfg.max_down_speed, min(cfg.max_down_speed, cmd.down_m_s))
         yaw_raw = max(-cfg.max_yawspeed, min(cfg.max_yawspeed, cmd.yawspeed_deg_s))
 
@@ -109,12 +113,6 @@ class VelocityCommandAPI:
             forward = self._filtered_forward
         else:
             self._filtered_forward = forward
-
-        if cfg.smooth_right:
-            self._filtered_right = self._ema(right, self._filtered_right, cfg.right_alpha)
-            right = self._filtered_right
-        else:
-            self._filtered_right = right
 
         if cfg.smooth_down:
             self._filtered_down = self._ema(down, self._filtered_down, cfg.down_alpha)
@@ -143,7 +141,7 @@ class VelocityCommandAPI:
         # Keep the EMA filter state in sync so it doesn't fight the slew limiter
         self._filtered_forward = forward
 
-        clamped = VelocityCommand(forward, right, down, yaw_out)
+        clamped = VelocityCommand(forward, down, yaw_out)
 
         if self._drone is not None:
             await self._drone.offboard.set_velocity_body(_to_mavsdk(clamped))
@@ -154,7 +152,6 @@ class VelocityCommandAPI:
         """Send an immediate zero-velocity command and reset all filter states."""
         self._filtered_yaw = 0.0
         self._filtered_forward = 0.0
-        self._filtered_right = 0.0
         self._filtered_down = 0.0
         self._prev_forward = 0.0
         zero = VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
@@ -170,7 +167,6 @@ class VelocityCommandAPI:
         """Reset all per-axis low-pass filter states."""
         self._filtered_yaw = 0.0
         self._filtered_forward = 0.0
-        self._filtered_right = 0.0
         self._filtered_down = 0.0
         self._prev_forward = 0.0
 
@@ -216,11 +212,17 @@ class DetachedMavsdkServer:
             LOGGER.warning("[drone] mavsdk_server not found at %s, using default System() behavior", server_path)
             return self.connection_url  # Fallback to default behavior
 
-        # Kill any stale mavsdk_server on our port (from previous runs that
-        # survived due to start_new_session=True).
+        # Reap any stale mavsdk_server from a prior run. start_new_session=True
+        # means the server survives Ctrl+C, and if our previous shutdown timed
+        # out (e.g. the drone_thread join expired during a stuck land/offboard
+        # call), __exit__ never ran. The leftover keeps UDP 14540 + TCP 50051
+        # bound, which blocks the next run from connecting to PX4. Kill by name
+        # so we cover both ports regardless of which one was held; scope to the
+        # current uid so we don't touch other users' mavsdk_server processes
+        # on shared hosts.
         try:
             subprocess.run(
-                ["fuser", "-k", f"{self.port}/tcp"],
+                ["pkill", "-9", "-u", str(os.getuid()), "-f", "mavsdk_server"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
             )
             time.sleep(0.3)
@@ -479,18 +481,22 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 hold_velocity=_prev_cmd,
             )
 
-            # Altitude limits: clamp bbox_height-driven altitude commands to
-            # [min_altitude, max_altitude].  compute_velocity_command() now
-            # produces the altitude command; we just enforce the floor/ceiling.
+            # Altitude hold: drive the down axis from a P-loop on
+            # (current_alt - target_altitude) so the drone holds the operator's
+            # commanded altitude. Then clamp to [min_altitude, max_altitude].
             current_alt = altitude_cache.get("m")
             if current_alt is not None:
                 down = cmd.down_m_s
+                if not config.yaw_only:
+                    alt_err = current_alt - config.target_altitude  # +ve = too high
+                    down = config.kp_alt_hold * alt_err
+                    down = max(-config.max_climb_speed, min(config.max_down_speed, down))
                 if current_alt <= config.min_altitude and down > 0:
                     down = 0.0  # at floor — don't descend further
                 elif current_alt >= config.max_altitude and down < 0:
                     down = 0.0  # at ceiling — don't climb further
                 if down != cmd.down_m_s:
-                    cmd = VelocityCommand(cmd.forward_m_s, cmd.right_m_s, down, cmd.yawspeed_deg_s)
+                    cmd = VelocityCommand(cmd.forward_m_s, down, cmd.yawspeed_deg_s)
 
             # Control-axes log (throttled)
             if now - _last_fwd_log_time >= _FWD_LOG_INTERVAL and detection is not None:
@@ -506,15 +512,13 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                      f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
                      f"Down:{cmd.down_m_s:+5.2f}m/s", level=logging.INFO)
             if ui_state is not None:
-                if detection is not None and config.follow_mode == "orbit":
-                    mode = "ORBIT"
-                elif detection is not None:
+                if detection is not None:
                     mode = "TRACK"
                 elif time_since_detection >= config.search_enter_delay_s:
                     mode = "SEARCH"
                 else:
                     mode = "SEARCH-WAIT"
-                ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode, right_m_s=cmd.right_m_s)
+                ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
             _prev_cmd = cmd
 
             # Periodic status log to UI
@@ -562,7 +566,7 @@ async def _start_offboard(drone, vel_api: VelocityCommandAPI, shutdown: asyncio.
     (NO_SETPOINT_SET otherwise). Streams at ~20 Hz for 2 s, then
     retries offboard.start() up to 3 times.
     """
-    zero = VelocityCommand(0.0, 0.0, 0.0, 0.0)
+    zero = VelocityCommand(0.0, 0.0, 0.0)
     setpoint_period_s = 0.05
 
     for _ in range(int(2.0 / setpoint_period_s)):
@@ -803,10 +807,15 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                         await vel_api.send_zero()
                     except (OffboardError, ConnectionError):
                         pass
-                    try:
-                        await drone.offboard.stop()
-                    except (OffboardError, ConnectionError):
-                        pass
+                    # MAVSDK's offboard.stop() issues MAV_CMD_DO_SET_MODE→HOLD
+                    # (= AUTO LOITER), so calling it on the pilot-handover path
+                    # would clobber the mode the pilot just RC-selected. Only
+                    # force HOLD when we ourselves are tearing down.
+                    if shutdown.is_set():
+                        try:
+                            await drone.offboard.stop()
+                        except (OffboardError, ConnectionError):
+                            pass
 
                     if shutdown.is_set():
                         LOGGER.warning("[drone] Shutdown requested, stopping control loop...")

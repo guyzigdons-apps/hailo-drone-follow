@@ -1,12 +1,6 @@
 """Pure domain types for drone follow — no third-party dependencies."""
 
 from dataclasses import dataclass
-from enum import Enum
-
-
-class FollowMode(str, Enum):
-    FOLLOW = "follow"
-    ORBIT = "orbit"
 
 
 @dataclass
@@ -18,7 +12,6 @@ class VelocityCommand:
     the follow layer free of MAVSDK dependencies.
     """
     forward_m_s: float
-    right_m_s: float
     down_m_s: float
     yawspeed_deg_s: float
 

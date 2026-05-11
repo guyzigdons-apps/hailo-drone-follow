@@ -1,5 +1,19 @@
 # CLAUDE.md — Project Context for drone-follow
 
+## Claude memory & skills (read first)
+
+Sub-project knowledge lives under `.claude/`:
+
+- `.claude/memory/MEMORY.md` — index of single-topic memories.
+  - `hailotilecropper_dynamic.md` — community cropper plugin properties + build/install gotchas.
+  - `webui_build.md` — Vite 8 / Node 20 requirement.
+  - `openhd_pairing.md` — txrx.key authoritative location, never use `--clean-start`.
+  - `tracking_callback_risks.md` — fragile spots in the detection callback / `highlight_target` probe — start here for tracking regressions.
+- `.claude/skills/drone-follow-dev/SKILL.md` — sim + drone-follow run loop, port hygiene, kill recipes.
+- `.claude/skills/safe-pull-and-rollback/SKILL.md` — tag-before-pull / compare / roll back / cross-machine tag share.
+
+Repo-wide knowledge (not drone-follow-specific) is in `.hailo/memory/` at the repo root — pipeline patterns, common pitfalls, etc.
+
 ## Project Overview
 
 A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hailo NPU) for person detection and MAVSDK for PX4 drone control. Runs on a Raspberry Pi 5 with Hailo-8L accelerator mounted on a drone with a Cube Orange+ flight controller.
@@ -8,7 +22,7 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 
 - **`drone_follow/follow_api/`** — Pure domain logic (follow controller, geometry, shared state)
 - **`drone_follow/drone_api/mavsdk_drone.py`** — MAVSDK adapter; CLI args, connection, control loop
-- **`drone_follow/pipeline_adapter/`** — Hailo/GStreamer detection pipeline, ByteTracker, ReID manager
+- **`drone_follow/pipeline_adapter/`** — Hailo/GStreamer detection pipeline, ByteTracker, ReID manager (drift protection + raw-detection fallback in [`reid_manager.py`](drone_follow/pipeline_adapter/reid_manager.py); see [`docs/tracking-reid-algorithm.md`](docs/tracking-reid-algorithm.md)). Output-branch construction (display / record / openhd / webui) and the strip-tiles + highlight-target metadata pad probe live in [`vision_branches.py`](drone_follow/pipeline_adapter/vision_branches.py).
 - **`drone_follow/servers/`** — HTTP servers (follow API, web UI + MJPEG, OpenHD bridge)
 - **`drone_follow/drone_follow_app.py`** — Main entry point (`main()`), wires everything together
 - **`reid_analysis/`** — ReID embedding extraction and gallery matching strategies
@@ -21,14 +35,21 @@ A Hailo-based drone-follow application that uses an AI pipeline (GStreamer + Hai
 - `--connection URL` — MAVSDK connection string (default: `udpin://0.0.0.0:14540` for simulation)
 - `--takeoff-landing` — Enable auto arm/takeoff/land (default: off — drone must already be airborne)
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Held by a fixed-altitude P loop; also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
-- `--target-bbox-height` — Desired person size in frame 0–1 (default: 0.3). Adjustable mid-flight via UI "Target Size" slider.
+- `--target-bbox-height` — Desired person size in frame 0–0.25 (default: 0.25). Drives forward/backward distance. Adjustable mid-flight via UI "Target Size" slider.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
 - `--horizontal-mirror` / `--vertical-mirror` — Both default to off (camera right-side up). Pass both flags for 180° rotation if camera is mounted upside-down. The pipeline also passes `mirror_image=False` to `SOURCE_PIPELINE()`.
-- `--ui` / `--ui-port` / `--ui-fps` — Enable the web UI (port 5001 default, 10 FPS MJPEG default). Live video, click-to-follow, and slider-based controller tuning.
-- `--record` — Capture post-overlay frames to `drone_follow/recordings/rec_<timestamp>.mp4` via an ffmpeg subprocess (libx264, 5 Mbps). Auto-starts ~1 s after PLAYING; can also be toggled mid-flight from the web UI's Record button. Saved on the drone — fewer compression artifacts than a ground-side capture, and survives RF dropouts.
-- `--openhd-stream` — Send overlay video to OpenHD via UDP RTP instead of an X11 display sink. Uses x264 software encode (the RPi5 has no HW H.264).
+- `--webui` / `--webui-port` / `--webui-fps` — Enable the web UI (port 5001 default, 10 FPS MJPEG default). Live video, click-to-follow, and slider-based controller tuning. Mutually exclusive with `--openhd`.
+- `--reid-threshold M` (default 0.75) — Cosine-similarity floor for accepting a re-acquisition / raw-detection match.
+- `--reid-drift-threshold M` (default 0.6) — Below this similarity vs the gallery, an in-track sample is treated as drift; the gallery is **not** updated and an immediate re-acquisition pass runs over the visible detections.
+- `--reid-duplicate-threshold M` (default 0.9) — Above this similarity, an in-track sample is redundant and skipped, with periodic refresh via `--reid-refresh-every`.
+- `--reid-refresh-every N` (default 5) — On every Nth consecutive duplicate-band decision, replace the oldest gallery vector to keep the gallery fresh.
+- `--reid-timeout S` (default 20.0) — Seconds to keep searching with the gallery (during a tracker loss) before giving up and returning to auto.
+- `--update-interval N` (default 30) — Frames between in-track gallery sampling.
+- `--record` — Pure-GStreamer recording branch (videoconvert -> x264enc -> matroskamux -> filesink). Output: `drone_follow/recordings/rec_<timestamp>.mkv` (override with `--record-output`). Auto-starts after pipeline is PLAYING; can be toggled mid-flight from the web UI / OpenHD. One file per pipeline run — pause/resume creates a time gap inside the same file.
+- `--record-output PATH` / `--record-bitrate KBPS` — Override the recording filename and x264enc bitrate (default 5000 kbps).
+- `--openhd` — Send overlay video to OpenHD via UDP RTP. Uses x264 software encode (the RPi5 has no HW H.264). Mutually exclusive with `--webui`.
 - `--openhd-port` (default: 5500) / `--openhd-bitrate` (default: 3917 kbps) — OpenHD UDP destination and x264 starting bitrate. Bitrate is updated dynamically from QOpenHD's WFB link recommendation via the OpenHD bridge.
-- `--no-display` — Headless mode (no X11 window). Pair with `--openhd-stream` or SHM input for SSH/bench sessions.
+- `--display` — Show the local X11 window with overlay. On the display branch, tile rectangles are stripped and the tracked target's bbox is recoloured via class-id remap (pure-metadata pad probe; see `highlight_target` in `pipeline_adapter/vision_branches.py`). **Implicit-display rule:** when neither `--openhd` nor `--webui` is set, display defaults ON (so `drone-follow --input usb` opens a window). When a UI flag is set, display defaults OFF unless you also pass `--display` explicitly.
 
 ## Drone Connection
 
@@ -55,6 +76,21 @@ The app has three follow modes:
 ### ReID search timeout
 When a locked target is lost, ReID searches for a configurable duration (`--reid-timeout`, default 20s). If the target is not re-identified within that time, the app returns to auto mode (not idle). The timeout applies both when other persons are visible (ReID compares embeddings each frame) and when no persons are visible (holding position).
 
+### ReID drift protection (every `--update-interval` frames)
+While ByteTracker is happily holding the locked target, the ReID manager periodically samples an embedding from the target bbox and decides what to do with it:
+
+- **`sim < drift_threshold` (default 0.6)** — Suspected tracker drift. The embedding is **not** stored, and an immediate re-acquisition pass runs over the visible tracks. If a different track matches the gallery above `--reid-threshold`, the lock is switched onto it. If reacquire confirms the same track, that's a "false drift" — still don't store, just keep tracking.
+- **`drift ≤ sim ≤ duplicate` (0.6–0.9)** — Normal enrichment. Add to the gallery (FIFO-replace oldest when full).
+- **`sim > duplicate_threshold` (0.9)** — Near-duplicate. Skip, but increment a streak counter; every `refresh_every` consecutive duplicates (default 5), replace the oldest gallery vector so the gallery doesn't go stale.
+
+The first `min_gallery_for_drift_check` (default 6) samples bypass the drift gate — drift detection over a single seed embedding is too brittle.
+
+### Raw-detection fallback
+If ByteTracker activates zero tracks for the locked person (e.g. detector confidence dropped below `track_thresh=0.4`) but raw `persons` are visible, ReID scores them directly via `score_visible_persons`. If the best raw match crosses `--reid-threshold`, the controller is driven from that raw bbox even though no tracker id exists for it — locked-follow survives a tracker dropout.
+
+### Where to read more
+[`docs/tracking-reid-algorithm.md`](docs/tracking-reid-algorithm.md) has the full per-frame flow (main flow + gallery sub-flow + recovery sub-flow as ASCII diagrams) plus a knobs table. The implementation lives in [`drone_follow/pipeline_adapter/reid_manager.py`](drone_follow/pipeline_adapter/reid_manager.py) (`update_gallery`, `_reacquire`, `try_reidentify`, `score_visible_persons`) and the callback wiring is in [`drone_follow/pipeline_adapter/hailo_drone_detection_manager.py`](drone_follow/pipeline_adapter/hailo_drone_detection_manager.py).
+
 ### OpenHD follow_id semantics
 - `-1` = IDLE (drone holds position)
 - `0` = AUTO (follow largest person)
@@ -78,27 +114,58 @@ By default (no `--takeoff-landing`), the app streams zero setpoints and waits fo
 ## Running
 
 ```bash
-# Real drone with OpenHD (RPi — starts OpenHD air + drone-follow):
+# Real drone with OpenHD — Mode A (default: drone-follow owns the camera):
 scripts/start_air.sh
-# (script invokes: drone-follow --input rpi --openhd-stream \
-#                                --connection tcpout://127.0.0.1:5760 --tiles-x 1 --tiles-y 1)
+# (invokes: drone-follow --input rpi --openhd \
+#                        --connection tcpout://127.0.0.1:5760 --tiles-x 2 --tiles-y 2)
+
+# Real drone with OpenHD — Mode B (OpenHD owns the camera, drone-follow reads SHM):
+scripts/start_air.sh --mode shm
+# (invokes: drone-follow --input shm:///tmp/openhd_raw_video \
+#                        --connection tcpout://127.0.0.1:5760 --tiles-x 2 --tiles-y 2)
 
 # Manual OpenHD-mode invocation (e.g. with debug UI on the air unit):
-drone-follow --input rpi --openhd-stream --ui --no-display \
+drone-follow --input rpi --openhd --webui \
     --connection tcpout://127.0.0.1:5760 --tiles-x 1 --tiles-y 1
 
 # Dev machine with USB camera + flight controller:
 source setup_env.sh
-drone-follow --input usb --serial --ui
+drone-follow --input usb --serial --webui
 
 # Simulation (see Simulation section for full setup):
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
+
+## OpenHD Camera Modes (Air Unit)
+
+There are two integration modes; both are supported by `scripts/install_air.sh` and `scripts/start_air.sh` via `--mode <stream|shm>`:
+
+- **Mode A — `--mode stream`** *(default)*: drone-follow owns the CSI camera (`--input rpi`), runs Hailo inference, encodes the overlay with x264, and pushes RTP to OpenHD on UDP 5500 (`--openhd`). OpenHD relays that stream over the WFB radio link. Requires `primary_camera_type=5` (`X_CAM_TYPE_HAILO_AI`); any other value (e.g. `31` = IMX219) makes OpenHD acquire the CSI camera itself and drone-follow's Picamera2 then fails with `Device or resource busy`. `/boot/openhd/hailo.txt` must NOT be present.
+
+- **Mode B — `--mode shm`**: OpenHD owns the camera and tees raw NV12 frames to a SHM socket. drone-follow reads from `/tmp/openhd_raw_video` (`--input shm://...`) and does AI only — no encoding, no overlay baked into the WFB stream. Requires `primary_camera_type` set to a libcamera value (`31` = IMX219, `32` = IMX708) and `/boot/openhd/hailo.txt` present.
+
+`install_air.sh --mode <stream|shm> [--camera-type <N>]` configures `primary_camera_type` and the hailo.txt flag; `start_air.sh --mode <stream|shm>` invokes drone-follow with the matching CLI args. Pass the same `--mode` to both. The boot service reads an optional `MODE=stream|shm` line in `~/Desktop/drone-follow.conf` (see Boot Service below) and forwards it to `start_air.sh`.
+
+The `primary_camera_type` value can also be changed from QOpenHD (Settings → Camera → Primary Camera Type) — QOpenHD pushes the change via MAVLink and OpenHD persists it to `/usr/local/share/openhd/video/air_camera_generic.json`. Either way, OpenHD must be fully restarted after the change — the camera handle is opened once at OpenHD startup.
+
+See `OpenHD/HAILO_INTEGRATION.md` for the full architecture, parameter list, and the binary detection payload format.
+
+## Ground Station Setup (no Hailo required)
+
+A pure ground-station install (`scripts/install_ground_station.sh` + `scripts/start_ground.sh`) does **not** need a Hailo device, the HailoRT driver, or the parent `hailo-apps-internal/install.sh` + `hailo_drone_follow/install.sh` flow. `start_ground.sh` only launches `/usr/local/bin/openhd --ground` and the QOpenHD GUI binary — no Python, no Hailo runtime, no drone-follow code runs on the ground side. Just clone the repo and run:
+
+```bash
+sudo ./scripts/install_ground_station.sh
+```
+
+The air unit's Step 5 prerequisite ("must be run after Steps 2-3") still applies because `start_air.sh` launches drone-follow alongside OpenHD; that constraint does not extend to the ground side.
+
+**Headless / kiosk display:** if neither `WAYLAND_DISPLAY` nor `DISPLAY` is set when `start_ground.sh` runs (SSH session, console boot, dedicated kiosk-style ground station), the script auto-exports `QT_QPA_PLATFORM=eglfs` so QOpenHD renders directly to KMS/DRM with no compositor required. Set `QT_QPA_PLATFORM` manually to override.
 
 ## Virtual Environment
 
-This repo owns its own venv at `./venv/` (created with `--system-site-packages` so apt-installed Hailo bindings are visible). `drone-follow` is installed as an editable package, and `hailo-apps` is pip-installed from GitHub (the `[hailo]` extra in `pyproject.toml`). Always `source setup_env.sh` before running — it activates `./venv/`, exports `PYTHONPATH`, runs the RPi kernel-compatibility check, and loads `/usr/local/hailo/resources/.env`.
+This repo consumes `hailo-apps-infra` as a git submodule at `./hailo-apps/` (branch `community_plugins`), and shares its venv at `./hailo-apps/venv_hailo_apps` (created by the submodule's installer with `--system-site-packages` so apt-installed Hailo bindings are visible). `drone-follow` is installed as an editable package into that venv; `hailo-apps` is `pip install -e .`-installed by the submodule's own installer (it also lays down system bits — postprocess .so files and `/usr/local/hailo/resources/`). Always `source setup_env.sh` before running — it activates `./hailo-apps/venv_hailo_apps`, exports `HAILO_APPS_PATH` + `PYTHONPATH`, runs the RPi kernel-compatibility check, and loads `/usr/local/hailo/resources/.env`.
 
 ## Development Machine Setup (x86_64)
 
@@ -122,15 +189,18 @@ sudo dpkg -i hailort_<version>_<arch>.deb
 sudo reboot
 hailortcli fw-control identify  # verify device detected
 
-# 2. Build the repo-owned venv with drone-follow + hailo-apps from GitHub:
+# 2. Bootstrap hailo-apps submodule, run its installer, install drone-follow:
 ./install.sh
 
 # Options:
-#   --skip-ui              Skip UI npm install and build
-#   --skip-python          Skip Python dependency installation
+#   --skip-submodule       Skip `git submodule update --init` (assumes ./hailo-apps ready)
+#   --skip-apps            Skip ./hailo-apps/install.sh (assumes parent already installed)
+#   --skip-python          Skip `pip install -e .`
+#   --skip-hefs            Skip ReID HEF downloads
+#   --skip-ui              Skip npm install + UI build
 ```
 
-`install.sh` creates `./venv/` (no sudo), installs `drone-follow` as editable, and pulls `hailo-apps` from GitHub via the `[hailo]` extra. Re-run after pulling drone-follow updates.
+`install.sh` initialises the `hailo-apps` git submodule, runs its installer to create `./hailo-apps/venv_hailo_apps` and populate `/usr/local/hailo/resources/`, then `pip install -e .`'s drone-follow into that venv. Re-run after pulling drone-follow updates (idempotent — already-installed steps are skipped).
 
 Verify: `source setup_env.sh && drone-follow --help`
 
@@ -140,13 +210,13 @@ Verify: `source setup_env.sh && drone-follow --help`
 source setup_env.sh
 
 # With USB camera + real flight controller over serial:
-drone-follow --input usb --serial --ui
+drone-follow --input usb --serial --webui
 
 # With Gazebo camera + PX4 SITL (see Simulation section):
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 
 # With USB camera + PX4 SITL (yaw only — forward commands unsafe with real webcam):
-drone-follow --input usb --yaw-only --ui
+drone-follow --input usb --yaw-only --webui
 ```
 
 ### Simulation (Bundled PX4 SITL)
@@ -164,7 +234,7 @@ sim/start_sim.sh --bridge --world 2_person_world
 
 # Terminal 2 — Run drone-follow:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
 
 ### Remote Simulation (sim on one machine, drone-follow on another)
@@ -175,7 +245,7 @@ sim/start_sim.sh --remote <DRONE_APP_IP> --world 2_person_world
 
 # Drone-follow machine:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --ui
+drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
 
 `--remote <IP>` implies `--bridge` and also starts a MAVLink UDP relay (`sim/mavlink_relay.py`) so both video (5600) and MAVLink (14540) reach the remote machine.
@@ -189,7 +259,7 @@ Pass `--world NAME` to `start_sim.sh` to load a custom world (uses PX4's native 
 
 **Simulation configs** in `sim/configs/`: `simulation.json` (yaw-only, safe for SITL), `simulation_follow.json` (full follow with reduced speeds).
 
-**USB camera with sim:** If using `--input usb` instead of the Gazebo camera, always add `--yaw-only` — forward/altitude commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
+**USB camera with sim:** If using `--input usb` instead of the Gazebo camera, always add `--yaw-only` — forward commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
 
 ## Networking (Dual-Interface: Home WiFi + Field AP)
 
@@ -205,7 +275,41 @@ A udev rule pins the TP-Link adapter to `wlan1` by MAC address. Both interfaces 
 
 A systemd service (`drone-follow-boot.service`) auto-starts drone-follow + OpenHD at boot, controlled by a desktop config file.
 
-- **Config:** `~/Desktop/drone-follow.conf` — set `ENABLED=true` or `ENABLED=false`
+- **Config:** `~/Desktop/drone-follow.conf`
+  - `ENABLED=true|false` — auto-start at boot
+  - `MODE=stream|shm` (optional) — passed through as `start_air.sh --mode <MODE>`. Omit for the script default (stream / Mode A). Must match how `install_air.sh` was run.
 - **Install:** `sudo scripts/boot/install.sh`
 - **Uninstall:** `sudo scripts/boot/uninstall.sh`
-- **Flow:** systemd → `drone-follow-boot.sh` → reads config → if enabled, runs `scripts/start_air.sh` as hailo user
+- **Flow:** systemd → `drone-follow-boot.sh` → reads config → if enabled, runs `scripts/start_air.sh` (with `--mode` if set) as hailo user
+
+## Troubleshooting
+
+### Never use `openhd --clean-start` on a paired air/ground
+
+`openhd --clean-start` regenerates `/usr/local/share/openhd/txrx.key` (and resets `/usr/local/share/openhd/video/air_camera_generic.json` back to defaults — `primary_camera_type=31`, undoing Mode A). The new random key won't match the other side's, so WFB packets are encrypted with one key and decrypted with another → ground silently drops everything → QOpenHD shows black screen and the scan-for-air-unit menu finds nothing.
+
+**Recovery options:**
+
+1. **Sync keys:** copy one side's `/usr/local/share/openhd/txrx.key` to the other (any 128-byte file as long as both sides match).
+2. **Reset both to the OpenHD example_key** (deterministic, no scp needed if both Pis have the OpenHD source tree):
+   ```
+   sudo cp <openhd-src>/OpenHD/ohd_interface/lib/wifibroadcast/example_key/txrx.key \
+           /usr/local/share/openhd/txrx.key
+   ```
+   Restart OpenHD on that side **without** `--clean-start`.
+
+To configure Mode A vs Mode B, use `scripts/install_air.sh --mode <stream|shm>` (which only flips `primary_camera_type` + `/boot/openhd/hailo.txt` — no key regeneration). Don't use `--clean-start` for mode switching.
+
+### Kernel upgrades break WFB on the ground / air unit
+
+Symptom: ground or air looks fine until the next reboot after `apt upgrade`, then `wlan1` doesn't appear and OpenHD logs "no wifibroadcast cards". Cause: the OpenHD-modified `rtl88x2bu_ohd` driver is built for the old kernel; the new kernel can't load a `.ko` from a different ABI.
+
+**Fix:** build and install via DKMS so the driver auto-rebuilds on every kernel update. The current `scripts/install_air.sh` and `scripts/install_ground_station.sh` (via `OpenHD/build_native.sh driver`) install via DKMS by default. If you upgraded from a pre-DKMS install:
+
+```
+sudo dkms status -m rtl88x2bu             # if empty: never registered
+cd <openhd-src> && sudo ./build_native.sh driver   # registers + builds for current kernel
+sudo modprobe 88x2bu_ohd                  # load it (or reboot)
+```
+
+After this, `dkms status` should list `rtl88x2bu/<version>, <kernel>: installed`. Future kernel upgrades will auto-rebuild.
