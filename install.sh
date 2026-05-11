@@ -8,6 +8,9 @@
 #
 # Idempotent: re-running picks up missing steps and skips ones already done.
 #
+# Run as your normal user; the parent hailo-apps installer is invoked with
+# sudo automatically (it needs root for apt + /usr/local/hailo/resources).
+#
 # Flags:
 #   --skip-submodule   skip git submodule update (assumes ./hailo-apps is ready)
 #   --skip-apps        skip running ./hailo-apps/install.sh (assumes parent installed)
@@ -53,9 +56,16 @@ if [[ ! -d "$APPS_DIR" ]] || [[ -z "$(ls -A "$APPS_DIR" 2>/dev/null)" ]]; then
 fi
 
 # --- Step 2: Run the parent hailo-apps installer -----------------------------
+# The parent installer requires sudo (apt, /usr/local/hailo/resources/, ...).
+# It uses $SUDO_USER internally to chown the venv back to the invoking user,
+# so the remaining drone-follow steps below run unprivileged as expected.
 if ! $SKIP_APPS; then
   echo "==> [2/5] Running ./hailo-apps/install.sh (creates venv_hailo_apps + .env, may take a while)"
-  "$APPS_DIR/install.sh"
+  if [[ $EUID -eq 0 ]]; then
+    "$APPS_DIR/install.sh"
+  else
+    sudo -E "$APPS_DIR/install.sh"
+  fi
 fi
 
 VENV="$APPS_DIR/venv_hailo_apps"
