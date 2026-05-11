@@ -5,7 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 APP_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 OPENHD_BIN="/usr/local/bin/openhd"
-QOPENHD_BIN="${APP_ROOT}/qopenHD/build/release/release/QOpenHD"
+# The newer install_ground_station.sh clones qopenHD into the repo root, the
+# older one clones it into $HOME. Probe both so this script works either way.
+if [ -x "${APP_ROOT}/qopenHD/build/release/release/QOpenHD" ]; then
+    QOPENHD_BIN="${APP_ROOT}/qopenHD/build/release/release/QOpenHD"
+else
+    QOPENHD_BIN="${HOME}/qopenHD/build/release/release/QOpenHD"
+fi
 OPENHD_LOG="/tmp/openhd.log"
 QOPENHD_LOG="/tmp/qopenhd.log"
 
