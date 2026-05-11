@@ -47,6 +47,8 @@ cd hailo-drone-follow
 
 Re-running is idempotent — already-installed steps are skipped.
 
+> **Common gotcha:** if `./hailo-apps/install.sh` aborts at the C++ install step with `PermissionError: [Errno 13] Permission denied: '/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgsthailo*.so'`, the build itself worked — only the system-path install needs root. See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) → *"`./install.sh` fails with `PermissionError` on `libgsthailotilecropper_dynamic.so`"* for the one-liner recovery.
+
 Flags:
 
 | Flag | Description |
