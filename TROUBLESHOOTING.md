@@ -254,6 +254,38 @@ sudo dpkg --configure -a --force-confdef --force-confold
 sudo DEBIAN_FRONTEND=noninteractive ./scripts/install_air.sh
 ```
 
+### `./install.sh` fails with `PermissionError` on `libgsthailotilecropper_dynamic.so`
+
+Symptom (during the `./hailo-apps/install.sh` stage of `./install.sh`):
+
+```
+Installing cpp/libgsthailotilecropper_dynamic.so to /usr/lib/aarch64-linux-gnu/gstreamer-1.0
+...
+PermissionError: [Errno 13] Permission denied:
+    '/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgsthailotilecropper_dynamic.so'
+```
+
+The C++ compile succeeded — meson built every `.so` into `hailo-apps/hailo_apps/postprocess/build.release/cpp/`. Only the `ninja install` half failed: the parent installer runs `hailo-post-install` as the unprivileged user, and meson tries to `remove` an existing root-owned `.so` (left over from a prior install or laid down by a system deb) before overwriting it.
+
+Recovery — re-run just the install half as root via the venv's pinned python (the binary's shebang hard-codes the venv interpreter, so all `hailo_apps.*` imports still resolve under sudo):
+
+```bash
+sudo /home/hailo/hailo-drone-follow/hailo-apps/venv_hailo_apps/bin/hailo-post-install \
+     --skip-download --group default
+
+# Restore ownership so future user-mode rebuilds don't EACCES.
+sudo chown -R "$USER:$USER" /usr/local/hailo/resources
+sudo chown -R "$USER:$USER" \
+     /home/hailo/hailo-drone-follow/hailo-apps/hailo_apps/postprocess/build.release
+
+# Continue the drone-follow install — parent (hailo-apps) is already done:
+./install.sh --skip-submodule --skip-apps
+```
+
+`--skip-download` avoids re-fetching the HEFs that downloaded before the compile step ran. Drop it if you suspect the download itself failed.
+
+If step 1 still fails, split it into pieces: `sudo .../bin/hailo-post-install --skip-download --skip-compile` (just `.env`), then `cd .../postprocess/build.release && sudo ninja install` (just the system install), then `hailo-download-resources --group default` as the user.
+
 ### Build fails: `unrecognized argument in option '-mabi=apcs-gnu'`
 
 The rtl88x2bu driver Makefile is being built with the wrong platform default. ARM flags ended up in an x86 build (or vice versa). Pull the latest `OpenHD#2.6.4-hailo` (≥ `e8f6f7da`) which selects `master-hailo` (RPi default) vs `x86-hailo` (I386_PC default) per `$PLATFORM`, then re-run install.

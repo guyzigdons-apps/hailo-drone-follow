@@ -313,3 +313,20 @@ sudo modprobe 88x2bu_ohd                  # load it (or reboot)
 ```
 
 After this, `dkms status` should list `rtl88x2bu/<version>, <kernel>: installed`. Future kernel upgrades will auto-rebuild.
+
+### `./install.sh` aborts with `PermissionError` on `/usr/lib/.../libgsthailo*.so`
+
+`./hailo-apps/install.sh` runs `hailo-post-install` as the unprivileged user via `run_as_user`, but the final step (`ninja install` from `hailo_apps/postprocess/build.release/`) writes `.so` files into `/usr/lib/<triplet>/gstreamer-1.0/`. Meson `remove`s any existing file before copying, and that `remove` fails with EACCES if a previous install (or a Hailo deb) left a root-owned `.so` there. The compile half succeeded — only the system-path drop needs root.
+
+Fix: re-run post-install as root via the venv binary directly (its shebang pins the venv interpreter, so `hailo_apps.*` imports still resolve under sudo), then restore ownership and resume:
+
+```bash
+sudo /home/hailo/hailo-drone-follow/hailo-apps/venv_hailo_apps/bin/hailo-post-install \
+     --skip-download --group default
+sudo chown -R "$USER:$USER" /usr/local/hailo/resources
+sudo chown -R "$USER:$USER" \
+     /home/hailo/hailo-drone-follow/hailo-apps/hailo_apps/postprocess/build.release
+./install.sh --skip-submodule --skip-apps
+```
+
+Full breakdown in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) → *"`./install.sh` fails with `PermissionError` on `libgsthailotilecropper_dynamic.so`"*.
