@@ -682,7 +682,7 @@ export default function App() {
 
               return (
                 <g
-                  key={`${det.id ?? "x"}-${i}`}
+                  key={hasId ? `id-${det.id}` : `untracked-${i}`}
                   onClick={hasId ? () => handleFollow(det.id) : undefined}
                   style={{ cursor: hasId ? "pointer" : "default", pointerEvents: "auto" }}
                 >
