@@ -1,0 +1,114 @@
+# Roadmap: robot-follow v1.1
+
+## Milestones
+
+- ✅ **v1.0 Drone follow** - Phase 0 (shipped pre-GSD, 2026-04)
+- 🚧 **v1.1 Robot abstraction + rover support (sim-only)** - Phases 1-6 (in progress)
+- 📋 **v1.2 Real rover hardware** - Planned
+
+## Phases
+
+<details>
+<summary>✅ v1.0 Drone follow (Phase 0) - SHIPPED 2026-04</summary>
+
+Pre-GSD baseline. Full feature list in `.planning/MILESTONES.md` § v1.0.
+Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01, SIM-01..02, OPS-01..03.
+
+</details>
+
+### 🚧 v1.1 Robot abstraction + rover support (sim-only)
+
+**Milestone Goal:** Generalize the app from drone-only to robot-generic — drone path unchanged, ROS 2 cmd_vel rover adapter shipped, Gazebo rover sim runs end-to-end follow-the-person.
+
+- [ ] **Phase 1: Rename** - Mechanical `drone_follow` → `robot_follow` package rename with `drone-follow` alias preserved
+- [ ] **Phase 2: Cleanup** - Delete confirmed dead code, merge duplications, fix hot-path races
+- [ ] **Phase 3: Abstraction** - `Robot` protocol + `Capabilities`, drone adapter behind protocol; CRITICAL GATE before rover work
+- [ ] **Phase 4: Rover adapter** - ROS 2 Humble rclpy node publishing `geometry_msgs/Twist`; parallel with Phase 5
+- [ ] **Phase 5: Rover sim** - Gazebo Garden rover SDF + cmd_vel bridge + video_bridge.py camera path; parallel with Phase 4
+- [ ] **Phase 6: Sim integration** - Rover defaults, bottom-edge safety repurpose, ByteTracker config, end-to-end validation
+
+## Phase Details
+
+### Phase 1: Rename
+**Goal**: The package is `robot_follow`; `drone-follow` and `robot-follow` both work; no field deployment breaks.
+**Depends on**: Phase 0 (pre-GSD baseline)
+**Requirements**: RENAME-01, RENAME-02, RENAME-03, RENAME-04, RENAME-05
+**Success Criteria** (what must be TRUE):
+  1. `pip show robot_follow` shows the renamed package; `pip show drone_follow` returns nothing.
+  2. `drone-follow --help` and `robot-follow --help` produce identical output (same `main()` entry point).
+  3. `scripts/start_air.sh` on a fresh checkout runs without path errors; boot service unit file is unchanged on disk.
+  4. All documentation examples using `drone-follow` still work via the alias; no internal import of `drone_follow` remains in the source tree.
+**Plans**: TBD
+
+### Phase 2: Cleanup
+**Goal**: Dead code is deleted, duplications are merged, hot-path races are fixed; codebase is clean before structural changes.
+**Depends on**: Phase 1
+**Requirements**: CLEAN-01, CLEAN-02, CLEAN-03, CLEAN-04, CLEAN-05, CLEAN-06, CLEAN-07, CLEAN-08, CLEAN-09, CLEAN-10, CLEAN-11, CLEAN-12, CLEAN-13, CLEAN-14, CLEAN-15, CLEAN-16, CLEAN-17, CLEAN-18
+**Success Criteria** (what must be TRUE):
+  1. `sim/world_loader.py` and `scripts/bench_reid_callback.py` do not exist; `grep -r "world_loader\|bench_reid" .` returns nothing outside git history.
+  2. `drone-follow --input usb --webui` starts and serves the web UI; no regression in any existing flag path.
+  3. Web UI MJPEG stream delivers a frame to a second simultaneous browser tab without either tab falling through to the 2 s SSE timeout (CLEAN-16 race fixed).
+  4. A single `ControllerConfig.tunable_fields()` call drives both `web_server` and `openhd_bridge` field lists; no parallel altitude knob lists remain (CLEAN-14).
+  5. Branch-decision tree (display/record/webui/openhd selection) is defined in one place in `vision_branches`; implicit-display rule appears exactly once (CLEAN-15).
+**Plans**: TBD
+
+### Phase 3: Abstraction
+**Goal**: `Robot` protocol and `Capabilities` are the only actuator boundary; drone path runs end-to-end behind `MavsdkDroneAdapter`; `--robot` CLI flag exists. This is the critical gate — rover work cannot start until this phase passes.
+**Depends on**: Phase 2
+**Requirements**: ABS-01, ABS-02, ABS-03, ABS-04, ABS-05, ABS-06, ABS-07, ABS-08, ABS-09, ABS-10, ABS-11
+**Success Criteria** (what must be TRUE):
+  1. Full SITL drone follow-the-person test passes with `--robot drone` (default); `--takeoff-landing`, `--target-altitude`, and `--connection` paths are unchanged.
+  2. `--robot drone --help` shows drone-specific flags (`--takeoff-landing`, `--serial`); `--robot rover --help` does not show those flags (two-pass argparse pre-parse working).
+  3. `robot_api/robot.py` exists with `Robot` protocol, `Capabilities`, and `RobotCommand`; `VelocityCommand` no longer exists in the codebase.
+  4. `robot_api/adapters/mavsdk_drone.py` exists; `drone_api/mavsdk_drone.py` does not exist; `run_robot()` is the composition root entry point.
+  5. On a machine with `/opt/ros/humble` installed, `setup_env.sh` with `--robot rover` detected auto-sources `/opt/ros/humble/setup.bash` after venv activation.
+**Plans**: TBD
+
+### Phase 4: Rover adapter
+**Goal**: `Ros2RoverAdapter` publishes `geometry_msgs/Twist` on `/cmd_vel`; SIGINT handler is preserved; adapter integrates cleanly with the asyncio control loop.
+**Depends on**: Phase 3 (critical gate must pass first)
+**Note**: Phases 4 and 5 are independent once Phase 3 lands and can be developed in parallel.
+**Requirements**: ROVER-01, ROVER-02, ROVER-03, ROVER-04, ROVER-05, ROVER-06, ROVER-07, ROVER-08
+**Success Criteria** (what must be TRUE):
+  1. After `Ros2RoverAdapter.start_session()`, `signal.getsignal(signal.SIGINT) is on_signal` — drone-follow's handler is active, not rclpy's (ROVER-02, ROVER-08 verified).
+  2. `ros2 topic echo /cmd_vel` shows one `Twist` message per control tick while `drone-follow --robot rover` is running against a dummy detector input; `linear.x` is in m/s, `angular.z` is in rad/s (ROVER-06 conversion verified).
+  3. `drone-follow --robot rover --help` shows `--cmd-vel-topic`, `--ros-namespace`, `--ros-domain-id`; no drone-only flags visible.
+  4. On a machine without ROS installed, `--robot rover` raises a friendly `RuntimeError` with "ROS 2 not sourced" message rather than an `ImportError` traceback.
+**Plans**: TBD
+
+### Phase 5: Rover sim
+**Goal**: `sim/rover/start_rover_sim.sh` launches a Gazebo Garden differential-drive rover world; cmd_vel arrives from ROS and camera video reaches drone-follow via UDP on port 5600.
+**Depends on**: Phase 3 (critical gate must pass first)
+**Note**: Phases 4 and 5 are independent once Phase 3 lands and can be developed in parallel.
+**Setup note**: Install `ros-humble-ros-gzgarden-bridge` (Garden-specific), NOT `ros-humble-ros-gz-bridge` (Fortress). Use `gz::sim::systems::DiffDrive` with filename `gz-sim-diff-drive-system` in SDF; `ignition::` prefix causes silent load failure on Garden.
+**Requirements**: RSIM-01, RSIM-02, RSIM-03, RSIM-04, RSIM-05, RSIM-06, RSIM-07
+**Success Criteria** (what must be TRUE):
+  1. `gz topic -l` after `start_rover_sim.sh` shows a `/cmd_vel` gz topic and a rover camera gz topic; `gz topic -e -t /cmd_vel` confirms DiffDrive plugin loaded and receiving (RSIM-01, RSIM-02 verified).
+  2. `drone-follow --input udp://0.0.0.0:5600` receives frames from the rover sim camera via `video_bridge.py` (gz-transport → UDP H.264); no `ros_gz_image_bridge`, no new camera shim (RSIM-06 camera plumbing decision).
+  3. `sim/rover/start_rover_sim.sh` runs in one command from a clean terminal; required apt packages (`ros-humble-ros-gzgarden-bridge`) are listed in `install.sh --rover` with a friendly error if `/opt/ros/humble` is missing.
+  4. At least one rover actor world (`walk_across_then_approach`) renders a walking person in Gazebo Garden; rover model appears on a ground plane.
+**Plans**: TBD
+
+### Phase 6: Sim integration
+**Goal**: Rover follows a walking actor end-to-end in Gazebo Garden with rover-safe defaults; SIGINT shuts down cleanly with zero residual `/cmd_vel` messages; port isolation from PX4 SITL is documented.
+**Depends on**: Phase 4 and Phase 5 (both must complete before Phase 6)
+**Requirements**: RINT-01, RINT-02, RINT-03, RINT-04, RINT-05, RINT-06
+**Success Criteria** (what must be TRUE):
+  1. `drone-follow --robot rover --config configs/rover_simulation.json` follows a walking actor in the `walk_across_then_approach` Gazebo world for the full walk pattern without losing the target (RINT-04 deterministic test passes).
+  2. Bottom-edge frame safety with `--robot rover` slows/stops the rover when the person is too low in frame; with `--robot drone` the same edge still triggers the retreat-from-tilt behavior (RINT-02 capability-gated, both branches verified).
+  3. Ctrl+C from `drone-follow --robot rover` produces zero additional `/cmd_vel` messages within 100 ms; rclpy node is destroyed cleanly before `rclpy.try_shutdown()` (RINT-06 shutdown integration test).
+  4. `configs/rover_simulation.json` ships with rover-safe defaults (no altitude knobs, `track_buffer` ≈ 30 frames, lower `kp_yaw`); `configs/drone_simulation.json` (or equivalent) still uses original values; both load without validation errors (RINT-01, RINT-03).
+
+## Progress
+
+**Execution Order:**
+Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
+
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 1. Rename | v1.1 | 0/TBD | Not started | - |
+| 2. Cleanup | v1.1 | 0/TBD | Not started | - |
+| 3. Abstraction | v1.1 | 0/TBD | Not started | - |
+| 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
+| 5. Rover sim | v1.1 | 0/TBD | Not started | - |
+| 6. Sim integration | v1.1 | 0/TBD | Not started | - |

@@ -135,17 +135,69 @@ Tracked but not in current roadmap. All require physical hardware to exercise.
 
 ## Traceability
 
-Filled in by `gsd-roadmapper` during roadmap creation. Each requirement maps to exactly one phase.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (Roadmapper fills this in) | | |
+| RENAME-01 | Phase 1 | Pending |
+| RENAME-02 | Phase 1 | Pending |
+| RENAME-03 | Phase 1 | Pending |
+| RENAME-04 | Phase 1 | Pending |
+| RENAME-05 | Phase 1 | Pending |
+| CLEAN-01 | Phase 2 | Pending |
+| CLEAN-02 | Phase 2 | Pending |
+| CLEAN-03 | Phase 2 | Pending |
+| CLEAN-04 | Phase 2 | Pending |
+| CLEAN-05 | Phase 2 | Pending |
+| CLEAN-06 | Phase 2 | Pending |
+| CLEAN-07 | Phase 2 | Pending |
+| CLEAN-08 | Phase 2 | Pending |
+| CLEAN-09 | Phase 2 | Pending |
+| CLEAN-10 | Phase 2 | Pending |
+| CLEAN-11 | Phase 2 | Pending |
+| CLEAN-12 | Phase 2 | Pending |
+| CLEAN-13 | Phase 2 | Pending |
+| CLEAN-14 | Phase 2 | Pending |
+| CLEAN-15 | Phase 2 | Pending |
+| CLEAN-16 | Phase 2 | Pending |
+| CLEAN-17 | Phase 2 | Pending |
+| CLEAN-18 | Phase 2 | Pending |
+| ABS-01 | Phase 3 | Pending |
+| ABS-02 | Phase 3 | Pending |
+| ABS-03 | Phase 3 | Pending |
+| ABS-04 | Phase 3 | Pending |
+| ABS-05 | Phase 3 | Pending |
+| ABS-06 | Phase 3 | Pending |
+| ABS-07 | Phase 3 | Pending |
+| ABS-08 | Phase 3 | Pending |
+| ABS-09 | Phase 3 | Pending |
+| ABS-10 | Phase 3 | Pending |
+| ABS-11 | Phase 3 | Pending |
+| ROVER-01 | Phase 4 | Pending |
+| ROVER-02 | Phase 4 | Pending |
+| ROVER-03 | Phase 4 | Pending |
+| ROVER-04 | Phase 4 | Pending |
+| ROVER-05 | Phase 4 | Pending |
+| ROVER-06 | Phase 4 | Pending |
+| ROVER-07 | Phase 4 | Pending |
+| ROVER-08 | Phase 4 | Pending |
+| RSIM-01 | Phase 5 | Pending |
+| RSIM-02 | Phase 5 | Pending |
+| RSIM-03 | Phase 5 | Pending |
+| RSIM-04 | Phase 5 | Pending |
+| RSIM-05 | Phase 5 | Pending |
+| RSIM-06 | Phase 5 | Pending |
+| RSIM-07 | Phase 5 | Pending |
+| RINT-01 | Phase 6 | Pending |
+| RINT-02 | Phase 6 | Pending |
+| RINT-03 | Phase 6 | Pending |
+| RINT-04 | Phase 6 | Pending |
+| RINT-05 | Phase 6 | Pending |
+| RINT-06 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 55 total (5 RENAME + 18 CLEAN + 11 ABS + 8 ROVER + 7 RSIM + 6 RINT)
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 55 ⚠️ (until roadmap created)
+- Mapped to phases: 55 ✓
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-05-12*
-*Last updated: 2026-05-12 after initial definition*
+*Last updated: 2026-05-12 — traceability filled by gsd-roadmapper*
