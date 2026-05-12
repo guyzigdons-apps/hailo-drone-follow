@@ -5,14 +5,14 @@
 See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 **Core value:** The pipeline keeps a target person in frame and computes safe velocity commands for the robot, even when the target is briefly occluded — without operator input.
-**Current focus:** Bootstrap to v1.0-shipped baseline; v1.1 milestone defining.
+**Current focus:** v1.1 Robot abstraction + rover support (sim-only) — defining requirements.
 
 ## Current Position
 
-Phase: Not started (defining requirements for milestone v1.1)
+Phase: Not started (defining requirements)
 Plan: —
-Status: Bootstrapping `.planning/` to v1.0-shipped baseline, then defining v1.1 milestone (robot abstraction + rover support).
-Last activity: 2026-05-12 — `.planning/` initialized from CLAUDE.md.
+Status: Defining requirements for milestone v1.1.
+Last activity: 2026-05-12 — Milestone v1.1 started.
 
 ## Accumulated Context
 

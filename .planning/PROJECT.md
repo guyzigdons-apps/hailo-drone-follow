@@ -40,7 +40,26 @@ The pipeline keeps a target person in frame and computes safe velocity commands 
 
 <!-- Current scope. Building toward these. Filled by the current milestone. -->
 
-(Set by current milestone — see Current Milestone section.)
+See Current Milestone section below for the v1.1 scope.
+
+## Current Milestone: v1.1 Robot abstraction + rover support (sim-only)
+
+**Goal:** Generalize the app from drone-only to robot-generic — drone path unchanged, ROS 2 cmd_vel rover adapter shipped, Gazebo rover sim runs end-to-end follow-the-person.
+
+**Target features:**
+- Package rename `drone_follow` → `robot_follow` (`drone-follow` console script kept as alias for boot service + muscle memory).
+- Pre-abstraction cleanup of audit-confirmed dead code, duplication, and drone-leakage seams.
+- `robot_api/` with `Robot` protocol + `Capabilities` (`has_altitude`, `needs_offboard_handshake`, `needs_takeoff_landing`, `yaw_units`). Existing MAVSDK drone code moves behind it. New `RobotCommand` type replaces `VelocityCommand`. `--robot drone|rover` CLI flag.
+- ROS 2 Humble cmd_vel rover adapter (`robot_api/adapters/ros2_rover.py`): wraps `rclpy.Node`, publishes `geometry_msgs/Twist` on `/cmd_vel`. Background-thread rclpy executor bridges to the asyncio control loop.
+- Gazebo Garden rover sim (`sim/rover/`): differential-drive rover SDF + `ros_gz_bridge` for cmd_vel + camera→UDP shim so drone-follow keeps using `--input udp://...`. Reuses existing actor walk SDFs on a ground plane.
+- End-to-end follow-the-person in rover sim with rover-specific safety defaults (bottom-edge frame safety = "slow/stop", not "retreat from tilt"; rover defaults in `configs/rover_simulation.json`).
+
+**Non-goals for v1.1:**
+- Real rover hardware (deferred to v1.2).
+- ROS 2 nav stack integration (we publish raw `/cmd_vel`, not Nav2 goals).
+- PX4 Rover airframe support (chose ROS 2 over MAVSDK Rover).
+
+
 
 ### Out of Scope
 
@@ -82,4 +101,4 @@ The pipeline keeps a target person in frame and computes safe velocity commands 
 | Implicit-display rule (display ON when no UI flag, OFF when `--webui`/`--openhd` set) | DX-friendly defaults: `drone-follow --input usb` just works on a desk | ✓ Good |
 
 ---
-*Last updated: 2026-05-12 after bootstrap to v1.0-shipped baseline*
+*Last updated: 2026-05-12 after milestone v1.1 started*
