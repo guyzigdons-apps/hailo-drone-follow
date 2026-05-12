@@ -27,6 +27,8 @@ ACTION_ADDED = "added"
 ACTION_SKIPPED_DUPLICATE = "skipped_duplicate"
 ACTION_REFRESHED = "refreshed"
 ACTION_SKIPPED_DRIFT = "skipped_drift"
+ACTION_SKIPPED_BOOTSTRAP_OUTLIER = "skipped_bootstrap_outlier"
+ACTION_SKIPPED_OVERLAP = "skipped_overlap"
 ACTION_NOOP = "noop"
 
 
@@ -80,6 +82,19 @@ def _crop_person(
     return frame_bgr[y1:y2, x1:x2]
 
 
+def _bbox_iou(a, b) -> float:
+    """IoU of two HailoBBox objects in normalized coords."""
+    ax1, ay1, aw, ah = a.xmin(), a.ymin(), a.width(), a.height()
+    bx1, by1, bw, bh = b.xmin(), b.ymin(), b.width(), b.height()
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = inter_w * inter_h
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
 class ReIDManager:
     """Manages ReID gallery and re-identification for a single followed target.
 
@@ -97,6 +112,8 @@ class ReIDManager:
                  duplicate_threshold: float = 0.9,
                  refresh_every: int = 5,
                  min_gallery_for_drift_check: int = 6,
+                 bootstrap_consistency_threshold: Optional[float] = None,
+                 overlap_skip_iou: float = 0.15,
                  dump_embeddings_path: Optional[str] = None):
         self._hef_path = hef_path
         self._max_gallery_size = max_gallery_size
@@ -108,6 +125,20 @@ class ReIDManager:
         # Drift check over a single seed embedding is too brittle (one bad
         # outlier kicks reacquire). Wait until we have at least this many.
         self._min_gallery_for_drift_check = min_gallery_for_drift_check
+        # When set, a candidate seed during the bootstrap window (before the
+        # drift gate engages) is rejected if its similarity to any existing
+        # seed is below this floor — protects against a wrong-actor crop being
+        # baked in before the gallery is big enough for the drift check. We
+        # do not trigger reacquire here: with one or two seeds we can't tell
+        # which side is the outlier.
+        self._bootstrap_consistency_threshold = bootstrap_consistency_threshold
+        # When another tracked person's bbox overlaps the target's by more than
+        # this IoU at the moment of a gallery update, the crop is a "bridge"
+        # — partial body of both actors. Storing it lets later wrong-actor
+        # samples cross the drift threshold because they have a near neighbour
+        # in the gallery. We wait for a clean frame instead. Set to 1.0 to
+        # disable.
+        self._overlap_skip_iou = overlap_skip_iou
         # Counts consecutive duplicate-band decisions; used to throttle the
         # refresh-oldest mechanism so the gallery doesn't go stale on a long
         # clean follow.
@@ -238,6 +269,28 @@ class ReIDManager:
         if not self._ensure_extractor():
             return GalleryUpdateResult(ACTION_NOOP, -1.0, 0)
 
+        # Bbox-overlap gate: if another tracked person significantly overlaps
+        # the target's bbox, the crop is a "bridge" (partial body of both
+        # actors). Storing it eventually lets wrong-actor samples cross the
+        # drift threshold via that near-neighbour. Skip and wait for a clean
+        # frame — applies in ALL phases (incl. the very first BOOTSTRAP add).
+        if person_by_id and self._overlap_skip_iou < 1.0:
+            worst_tid, worst_iou = None, 0.0
+            for tid, other in person_by_id.items():
+                if tid == self._tracking_id:
+                    continue
+                iou = _bbox_iou(hailo_bbox, other.get_bbox())
+                if iou > worst_iou:
+                    worst_tid, worst_iou = tid, iou
+            if worst_iou >= self._overlap_skip_iou:
+                with self._lock:
+                    size = self._gallery.embedding_count(str(self._original_id))
+                LOGGER.debug(
+                    "[REID GALLERY] skip — bbox overlaps track %s (IoU=%.2f >= %.2f)",
+                    worst_tid, worst_iou, self._overlap_skip_iou,
+                )
+                return GalleryUpdateResult(ACTION_SKIPPED_OVERLAP, -1.0, size)
+
         crop = _crop_person(frame_bgr, hailo_bbox, video_width, video_height)
         if crop is None or crop.size == 0:
             with self._lock:
@@ -270,11 +323,20 @@ class ReIDManager:
 
                 if size_before < self._min_gallery_for_drift_check:
                     # Bootstrap-protect: too few reference vectors for a
-                    # reliable drift check — just append.
-                    self._gallery.update(name, emb, self._frame_counter)
-                    action = ACTION_ADDED
-                    self._duplicate_streak = 0
-                    size = self._gallery.embedding_count(name)
+                    # reliable drift check — normally just append.
+                    # When ``bootstrap_consistency_threshold`` is set, reject
+                    # a candidate that disagrees too strongly with the existing
+                    # seeds (catches contamination before the drift gate kicks in).
+                    if (self._bootstrap_consistency_threshold is not None
+                            and size_before > 0
+                            and sim < self._bootstrap_consistency_threshold):
+                        action = ACTION_SKIPPED_BOOTSTRAP_OUTLIER
+                        size = size_before
+                    else:
+                        self._gallery.update(name, emb, self._frame_counter)
+                        action = ACTION_ADDED
+                        self._duplicate_streak = 0
+                        size = self._gallery.embedding_count(name)
                 elif sim < self._drift_threshold:
                     # Suspected drift — reacquire happens after lock release.
                     action = ACTION_SKIPPED_DRIFT
@@ -328,6 +390,12 @@ class ReIDManager:
         elif action == ACTION_REFRESHED:
             LOGGER.debug("[REID GALLERY] refreshed (replaced oldest) sim=%.3f size=%d/%d",
                          sim, size, self._max_gallery_size)
+        elif action == ACTION_SKIPPED_BOOTSTRAP_OUTLIER:
+            LOGGER.debug(
+                "[REID GALLERY] bootstrap outlier sim=%.3f < %.2f size=%d/%d — rejected",
+                sim, self._bootstrap_consistency_threshold or 0.0,
+                size, self._max_gallery_size,
+            )
         elif action == ACTION_SKIPPED_DRIFT:
             if reacquired is not None and reacquired != self._tracking_id:
                 LOGGER.debug("[REID GALLERY] drift sim=%.3f -> reacquired as ID %d",

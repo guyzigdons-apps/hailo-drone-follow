@@ -255,7 +255,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 
 **Key ports:** `14540/udp` (MAVLink), `5600/udp` (video from Gazebo)
 
-**Bundled worlds** in `sim/worlds/`: `2_person_world`, `2_persons_diagonal`, `random_walk`. Pass `--world NAME` to `start_sim.sh`.
+**Bundled worlds** in `sim/worlds/`: `person_in_front`, `2_person_world`, `2_persons_diagonal`, `walk_across_then_approach`, `circle_around`, `random_walk`. Pass `--world NAME` to `start_sim.sh`.
 
 **Remote simulation** (sim on one machine, drone-follow on another):
 ```bash

@@ -222,8 +222,17 @@ def test_drift_path_reacquires_to_different_id():
     mgr._gallery.add_person("1", _unit(1))
     mgr._gallery.update("1", _unit(0.99, 0.14), frame_count=1)  # close to unit(1)
 
-    persons = {7: _FakePerson(_FakeBBox()), 9: _FakePerson(_FakeBBox())}
-    result = mgr.update_gallery(_frame(), _FakeBBox(), 80, 80, person_by_id=persons)
+    # Two visible persons at well-separated bbox positions so the overlap
+    # gate doesn't fire (otherwise we'd never reach the drift branch). The
+    # currently-tracked id (7) is skipped by the overlap loop, so only the
+    # other person's bbox needs to be off-target.
+    mgr._tracking_id = 7
+    persons = {
+        7: _FakePerson(_FakeBBox(x=0.05, y=0.4)),
+        9: _FakePerson(_FakeBBox(x=0.75, y=0.4)),
+    }
+    result = mgr.update_gallery(_frame(), _FakeBBox(x=0.05, y=0.4), 80, 80,
+                                person_by_id=persons)
 
     assert result.action == ACTION_SKIPPED_DRIFT
     assert result.reacquire_attempted is True

@@ -132,6 +132,18 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--reid-refresh-every", type=int, default=5,
                        help="On every Nth consecutive duplicate-band decision, replace the oldest "
                             "gallery vector to keep the gallery fresh (default: 5)")
+    group.add_argument("--reid-min-gallery-for-drift-check", type=int, default=6,
+                       help="Number of seed embeddings to collect before the drift gate engages. "
+                            "Below this, samples are added unconditionally to seed the gallery. "
+                            "Lower values catch swaps sooner but make the gallery more brittle "
+                            "to a single bad early crop (default: 6)")
+    group.add_argument("--reid-bootstrap-consistency", type=float, default=None,
+                       help="If set (0.0-1.0), reject a candidate seed during the bootstrap "
+                            "window whose similarity to existing seeds is below this floor. "
+                            "Catches a wrong-actor crop being baked into the gallery before "
+                            "the drift gate engages. No reacquire is triggered — with a tiny "
+                            "gallery we can't tell which side is the outlier. "
+                            "Suggested value: 0.4 (default: disabled)")
     group.add_argument("--reid-dump-embeddings", type=str, default=None,
                        help="Save every embedding accepted into the ReID gallery for the active "
                             "target to this .npy path at shutdown (used by tests to verify "
@@ -262,6 +274,12 @@ def main():
     reid_pre.add_argument("--reid-refresh-every", type=int, default=5,
         help="On every Nth consecutive duplicate-band decision, replace the "
              "oldest gallery vector to keep the gallery fresh.")
+    reid_pre.add_argument("--reid-min-gallery-for-drift-check", type=int, default=6)
+    reid_pre.add_argument("--reid-bootstrap-consistency", type=float, default=None)
+    reid_pre.add_argument("--reid-overlap-skip-iou", type=float, default=0.15,
+        help="When another tracked person overlaps the target's bbox by more "
+             "than this IoU, skip the gallery update for this frame to avoid "
+             "storing a bridge crop. Set to 1.0 to disable.")
     reid_pre.add_argument("--reid-dump-embeddings", type=str, default=None)
     reid_pre_args, _ = reid_pre.parse_known_args()
 
@@ -275,6 +293,9 @@ def main():
             drift_threshold=reid_pre_args.reid_drift_threshold,
             duplicate_threshold=reid_pre_args.reid_duplicate_threshold,
             refresh_every=reid_pre_args.reid_refresh_every,
+            min_gallery_for_drift_check=reid_pre_args.reid_min_gallery_for_drift_check,
+            bootstrap_consistency_threshold=reid_pre_args.reid_bootstrap_consistency,
+            overlap_skip_iou=reid_pre_args.reid_overlap_skip_iou,
             dump_embeddings_path=reid_pre_args.reid_dump_embeddings,
         )
 

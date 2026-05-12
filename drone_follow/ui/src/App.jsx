@@ -2,6 +2,15 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 const LOG_POLL_INTERVAL = 500; // ms
 const DEBOUNCE_MS = 250;
+// Dead-zone radius for overlay rendering, in normalized frame coords.
+// While the target centre stays within this distance of the rendered
+// position, rendering doesn't move — kills frame-to-frame jitter.
+const OVERLAY_DEAD_ZONE = 0.01;
+// Per-RAF lerp factor pulling the rendered position toward the target.
+const OVERLAY_SMOOTH_ALPHA = 0.25;
+const CROSS_HALF_SIZE = 10; // pixels, half the arm length of the cross
+const CROSS_STROKE = 3;
+const CROSS_HALO_STROKE = 6;
 
 export default function App() {
   const [detections, setDetections] = useState([]);
@@ -18,6 +27,12 @@ export default function App() {
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
   const logEndRef = useRef(null);
+  // Per-id latest target bbox (cx, cy, w, h) and smoothly-interpolated
+  // rendered bbox, both in normalized coords. RAF lerps rendered → target.
+  const targetBoxesRef = useRef(new Map());
+  const renderedBoxesRef = useRef(new Map());
+  // Bumped by the RAF loop to trigger SVG re-renders between detection events.
+  const [, setSmoothTick] = useState(0);
 
   // Frame-synced detections via SSE (replaces polling)
   useEffect(() => {
@@ -109,6 +124,64 @@ export default function App() {
       logEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [logs]);
+
+  // Push the latest detection bboxes into the target map; prune ids that
+  // disappeared from this frame. Newly-seen ids seed the rendered box at
+  // the target so they don't glide in from the previous position.
+  useEffect(() => {
+    const targets = targetBoxesRef.current;
+    const rendered = renderedBoxesRef.current;
+    const seen = new Set();
+    for (const det of detections) {
+      if (det.id == null) continue;
+      seen.add(det.id);
+      const cx = det.bbox.x + det.bbox.w / 2;
+      const cy = det.bbox.y + det.bbox.h / 2;
+      targets.set(det.id, { cx, cy, w: det.bbox.w, h: det.bbox.h });
+      if (!rendered.has(det.id)) {
+        rendered.set(det.id, { cx, cy, w: det.bbox.w, h: det.bbox.h });
+      }
+    }
+    for (const k of [...targets.keys()]) if (!seen.has(k)) targets.delete(k);
+    for (const k of [...rendered.keys()]) if (!seen.has(k)) rendered.delete(k);
+  }, [detections]);
+
+  // RAF loop: lerp rendered boxes toward targets; bump tick to re-render.
+  // Centre movement below the dead-zone is ignored so the overlay parks.
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const targets = targetBoxesRef.current;
+      const rendered = renderedBoxesRef.current;
+      let dirty = false;
+      for (const [id, t] of targets) {
+        const cur = rendered.get(id);
+        if (!cur) {
+          rendered.set(id, { ...t });
+          dirty = true;
+          continue;
+        }
+        const dx = t.cx - cur.cx;
+        const dy = t.cy - cur.cy;
+        if (dx * dx + dy * dy >= OVERLAY_DEAD_ZONE * OVERLAY_DEAD_ZONE) {
+          cur.cx += dx * OVERLAY_SMOOTH_ALPHA;
+          cur.cy += dy * OVERLAY_SMOOTH_ALPHA;
+          dirty = true;
+        }
+        const dw = t.w - cur.w;
+        const dh = t.h - cur.h;
+        if (Math.abs(dw) > 1e-4 || Math.abs(dh) > 1e-4) {
+          cur.w += dw * OVERLAY_SMOOTH_ALPHA;
+          cur.h += dh * OVERLAY_SMOOTH_ALPHA;
+          dirty = true;
+        }
+      }
+      if (dirty) setSmoothTick((n) => (n + 1) & 0xffff);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   // MJPEG stream via fetch + ReadableStream → canvas
   useEffect(() => {
@@ -589,44 +662,95 @@ export default function App() {
         {vw > 0 && vh > 0 && (
           <svg className="overlay" viewBox={`0 0 ${vw} ${vh}`}>
             {detections.map((det, i) => {
-              const x = det.bbox.x * vw;
-              const y = det.bbox.y * vh;
-              const w = det.bbox.w * vw;
-              const h = det.bbox.h * vh;
               const isFollowing =
                 det.id != null && det.id === followingId;
               const hasId = det.id != null;
+              // ID-less detections (transient raw boxes) skip smoothing.
+              const smoothed = hasId
+                ? renderedBoxesRef.current.get(det.id)
+                : null;
+              const cx = smoothed ? smoothed.cx : det.bbox.x + det.bbox.w / 2;
+              const cy = smoothed ? smoothed.cy : det.bbox.y + det.bbox.h / 2;
+              const bw = smoothed ? smoothed.w : det.bbox.w;
+              const bh = smoothed ? smoothed.h : det.bbox.h;
+              const px = (cx - bw / 2) * vw;
+              const py = (cy - bh / 2) * vh;
+              const pw = bw * vw;
+              const ph = bh * vh;
+              const pcx = cx * vw;
+              const pcy = cy * vh;
 
               return (
                 <g
-                  key={`${det.id ?? "x"}-${i}-${det.bbox.x.toFixed(3)}-${det.bbox.y.toFixed(3)}`}
+                  key={`${det.id ?? "x"}-${i}`}
                   onClick={hasId ? () => handleFollow(det.id) : undefined}
                   style={{ cursor: hasId ? "pointer" : "default", pointerEvents: "auto" }}
                 >
-                  <rect
-                    x={x}
-                    y={y}
-                    width={w}
-                    height={h}
-                    fill="transparent"
-                    stroke={isFollowing ? "#00ff00" : "#ffffff"}
-                    strokeWidth={isFollowing ? 6 : 1}
-                    strokeOpacity={isFollowing ? 1.0 : 0.7}
-                  />
-                  <text
-                    x={x + 4}
-                    y={y - 6}
-                    fill={isFollowing ? "#00ff00" : "#ffffff"}
-                    fontSize={14}
-                    fontFamily="monospace"
-                    fontWeight="bold"
-                    style={{
-                      textShadow: "1px 1px 2px rgba(0,0,0,0.8)",
-                    }}
-                  >
-                    {hasId ? `ID: ${det.id}` : "person"}{" "}
-                    ({Math.round(det.confidence * 100)}%) h:{det.bbox.h.toFixed(2)}
-                  </text>
+                  {isFollowing ? (
+                    <>
+                      {/* invisible bbox-sized hit target so the whole person stays clickable */}
+                      <rect
+                        x={px}
+                        y={py}
+                        width={pw}
+                        height={ph}
+                        fill="transparent"
+                        stroke="none"
+                      />
+                      {/* black halo so the cross stays readable on any background */}
+                      <line
+                        x1={pcx - CROSS_HALF_SIZE}
+                        y1={pcy}
+                        x2={pcx + CROSS_HALF_SIZE}
+                        y2={pcy}
+                        stroke="#000000"
+                        strokeWidth={CROSS_HALO_STROKE}
+                        strokeOpacity={0.75}
+                        strokeLinecap="round"
+                      />
+                      <line
+                        x1={pcx}
+                        y1={pcy - CROSS_HALF_SIZE}
+                        x2={pcx}
+                        y2={pcy + CROSS_HALF_SIZE}
+                        stroke="#000000"
+                        strokeWidth={CROSS_HALO_STROKE}
+                        strokeOpacity={0.75}
+                        strokeLinecap="round"
+                      />
+                      <line
+                        x1={pcx - CROSS_HALF_SIZE}
+                        y1={pcy}
+                        x2={pcx + CROSS_HALF_SIZE}
+                        y2={pcy}
+                        stroke="#80f060"
+                        strokeWidth={CROSS_STROKE}
+                        strokeOpacity={1.0}
+                        strokeLinecap="round"
+                      />
+                      <line
+                        x1={pcx}
+                        y1={pcy - CROSS_HALF_SIZE}
+                        x2={pcx}
+                        y2={pcy + CROSS_HALF_SIZE}
+                        stroke="#80f060"
+                        strokeWidth={CROSS_STROKE}
+                        strokeOpacity={1.0}
+                        strokeLinecap="round"
+                      />
+                    </>
+                  ) : (
+                    <rect
+                      x={px}
+                      y={py}
+                      width={pw}
+                      height={ph}
+                      fill="transparent"
+                      stroke="#ffffff"
+                      strokeWidth={2}
+                      strokeOpacity={0.8}
+                    />
+                  )}
                 </g>
               );
             })}

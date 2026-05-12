@@ -2,7 +2,7 @@
 <sdf version="1.9">
   <world name="2_persons_diagonal">
     <!-- Both persons walk diagonal paths in front of the drone (X>0).
-         They cross around (10, 0). z=1.0 so they stand on top of the ground
+         They cross around (13, 0). z=1.0 so they stand on top of the ground
          plane (matches the working 2_person_world). Speed ~0.7 m/s. -->
     <actor name="person_1">
       <skin>
@@ -19,17 +19,17 @@
         <delay_start>0</delay_start>
         <auto_start>true</auto_start>
         <trajectory id="0" type="walking">
-          <!-- 20 s hold while drone arms + takes off -->
-          <waypoint><time>0</time>     <pose>5 -5 1.0 0 0 0.785398</pose></waypoint>
-          <waypoint><time>20</time>    <pose>5 -5 1.0 0 0 0.785398</pose></waypoint>
-          <!-- Walk NE diagonal to (15, 5) — 14.14 m in 20 s ≈ 0.71 m/s -->
-          <waypoint><time>40</time>    <pose>15 5 1.0 0 0 0.785398</pose></waypoint>
+          <!-- 5 s hold while drone arms + takes off -->
+          <waypoint><time>0</time>     <pose>8 -5 1.0 0 0 0.785398</pose></waypoint>
+          <waypoint><time>5</time>    <pose>8 -5 1.0 0 0 0.785398</pose></waypoint>
+          <!-- Walk NE diagonal to (18, 5) — 14.14 m in 20 s ≈ 0.71 m/s -->
+          <waypoint><time>25</time>    <pose>18 5 1.0 0 0 0.785398</pose></waypoint>
           <!-- Pivot to face back -->
-          <waypoint><time>40.5</time>  <pose>15 5 1.0 0 0 -2.356194</pose></waypoint>
-          <!-- Walk back SW to (5, -5) -->
-          <waypoint><time>60.5</time>  <pose>5 -5 1.0 0 0 -2.356194</pose></waypoint>
+          <waypoint><time>25.5</time>  <pose>18 5 1.0 0 0 -2.356194</pose></waypoint>
+          <!-- Walk back SW to (8, -5) -->
+          <waypoint><time>45.5</time>  <pose>8 -5 1.0 0 0 -2.356194</pose></waypoint>
           <!-- Pivot to face forward again before loop restart -->
-          <waypoint><time>61</time>    <pose>5 -5 1.0 0 0 0.785398</pose></waypoint>
+          <waypoint><time>46</time>    <pose>8 -5 1.0 0 0 0.785398</pose></waypoint>
         </trajectory>
       </script>
     </actor>
@@ -51,17 +51,17 @@
         <delay_start>0</delay_start>
         <auto_start>true</auto_start>
         <trajectory id="0" type="walking">
-          <!-- 20 s hold while drone arms + takes off -->
-          <waypoint><time>0</time>     <pose>5 5 1.0 0 0 -0.785398</pose></waypoint>
-          <waypoint><time>20</time>    <pose>5 5 1.0 0 0 -0.785398</pose></waypoint>
-          <!-- Walk SE diagonal to (15, -5) — crosses person_1's path near (10, 0) -->
-          <waypoint><time>40</time>    <pose>15 -5 1.0 0 0 -0.785398</pose></waypoint>
+          <!-- 5 s hold while drone arms + takes off -->
+          <waypoint><time>0</time>     <pose>8 5 1.0 0 0 -0.785398</pose></waypoint>
+          <waypoint><time>5</time>    <pose>8 5 1.0 0 0 -0.785398</pose></waypoint>
+          <!-- Walk SE diagonal to (18, -5) — crosses person_1's path near (13, 0) -->
+          <waypoint><time>25</time>    <pose>18 -5 1.0 0 0 -0.785398</pose></waypoint>
           <!-- Pivot to face back -->
-          <waypoint><time>40.5</time>  <pose>15 -5 1.0 0 0 2.356194</pose></waypoint>
-          <!-- Walk back NW to (5, 5) -->
-          <waypoint><time>60.5</time>  <pose>5 5 1.0 0 0 2.356194</pose></waypoint>
+          <waypoint><time>25.5</time>  <pose>18 -5 1.0 0 0 2.356194</pose></waypoint>
+          <!-- Walk back NW to (8, 5) -->
+          <waypoint><time>45.5</time>  <pose>8 5 1.0 0 0 2.356194</pose></waypoint>
           <!-- Pivot to face forward again before loop restart -->
-          <waypoint><time>61</time>    <pose>5 5 1.0 0 0 -0.785398</pose></waypoint>
+          <waypoint><time>46</time>    <pose>8 5 1.0 0 0 -0.785398</pose></waypoint>
         </trajectory>
       </script>
     </actor>

@@ -743,12 +743,18 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
                                 return
                             await asyncio.sleep(_ARM_SHUTDOWN_POLL_S)
                 await drone.action.takeoff()
-                await asyncio.sleep(15)
+                # Give the drone time to clear the ground and reach roughly
+                # the takeoff altitude before we hand control to offboard.
+                # At ~1-2 m/s climb and 3 m target this takes ~3 s; 5 s adds
+                # a small margin for arm/spool-up.
+                await asyncio.sleep(5)
 
                 await _start_offboard(drone, vel_api, shutdown)
                 if shutdown.is_set():
                     return
-                await asyncio.sleep(3)
+                # Short settle after switching to offboard before the live
+                # control loop starts streaming follow setpoints.
+                await asyncio.sleep(1)
 
                 altitude_cache = await _start_altitude_telemetry()
                 control_task = asyncio.create_task(

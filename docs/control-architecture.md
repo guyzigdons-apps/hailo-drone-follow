@@ -200,7 +200,7 @@ The following table gives a field-tuner's view of what to change when. Every val
 | `max_forward_accel` | 1.5 m/s² | Slew-rate cap (tilt-transient safety) |
 | `forward_alpha` (EMA) | 0.15 | Lower = more pitch-oscillation attenuation, more phase lag |
 | `max_bbox_height_safety` | 0.8 | Hard emergency reverse threshold |
-| `top_margin_safety` / `bottom_margin_safety` | 0.10 / 0.10 | Frame-edge safety bands (0 disables) |
+| `top_margin_safety` / `bottom_margin_safety` | 0.10 / 0.25 | Frame-edge safety bands (0 disables). Bottom is wider so the drone retreats well before the person's feet reach the bottom edge. |
 
 ### Altitude (held by PX4 alt-hold)
 | Param | Default | Tune if |

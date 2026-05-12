@@ -64,7 +64,7 @@ class ControllerConfig:
     # caused approach/back-off oscillation around the boundary.
     # 0 disables the override on that edge.
     top_margin_safety: float = 0.10
-    bottom_margin_safety: float = 0.10
+    bottom_margin_safety: float = 0.25
     # --- Modes ---
     yaw_only: bool = True
     auto_select: bool = True          # when False: clear/loss → IDLE (hold position); no autonomous re-acquisition

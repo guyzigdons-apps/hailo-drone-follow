@@ -524,6 +524,13 @@ def _app_callback_inner(element, buffer, user_data):
         cx = bbox.xmin() + bbox.width() / 2.0
         cy = bbox.ymin() + bbox.height() / 2.0
         bbox_h = bbox.height()
+    if config is not None and bbox_h > 0:
+        _factor = (config.target_bbox_height / bbox_h) - 1.0
+        LOGGER.info(
+            "ctrl: bh=%.3f bottom=%.3f target=%.3f factor=%.3f filtered=%s",
+            bbox_h, cy + bbox_h / 2.0, config.target_bbox_height, _factor,
+            bool(filtered),
+        )
     user_data.shared_state.update(Detection(
         label="person",
         confidence=best.get_confidence(),

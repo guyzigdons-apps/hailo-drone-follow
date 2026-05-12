@@ -254,7 +254,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 - `14540/udp` — MAVLink (PX4 MAVSDK API, default `--connection`)
 - `5600/udp` — Video feed from Gazebo (via video bridge)
 
-**Bundled worlds** in `sim/worlds/`: `2_person_world`, `2_persons_diagonal`, `random_walk`
+**Bundled worlds** in `sim/worlds/`: `person_in_front`, `2_person_world`, `2_persons_diagonal`, `walk_across_then_approach`, `circle_around`, `random_walk`
 Pass `--world NAME` to `start_sim.sh` to load a custom world (uses PX4's native `PX4_GZ_WORLD` env var).
 
 **Simulation configs** in `sim/configs/`: `simulation.json` (yaw-only, safe for SITL), `simulation_follow.json` (full follow with reduced speeds).

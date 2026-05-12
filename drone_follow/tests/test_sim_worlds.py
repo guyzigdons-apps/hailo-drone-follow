@@ -27,7 +27,7 @@ SIM_SCRIPT = REPO_ROOT / "sim" / "start_sim.sh"
 SETUP_ENV = REPO_ROOT / "setup_env.sh"
 RECORDINGS_DIR = REPO_ROOT / "drone_follow" / "recordings"
 
-WARMUP_S = 5
+WARMUP_S = 3
 RUN_S = 60
 SHUTDOWN_S = 10
 PROGRESS_TICK_S = 5
@@ -58,8 +58,15 @@ def _fmt_size(path):
     return "missing" if n < 0 else f"{n:>7}B"
 
 
-def _wait_with_progress(label, total_s, watch=()):
-    """Sleep `total_s`, printing progress + sizes of `watch` files every tick."""
+def _wait_with_progress(label, total_s, watch=(),
+                        must_be_running=None, must_be_running_name="",
+                        must_be_running_log=None):
+    """Sleep `total_s`, printing progress + sizes of `watch` files every tick.
+
+    If `must_be_running` is given and dies mid-wait, abort immediately with a
+    RuntimeError (and dump the tail of `must_be_running_log` if provided) so
+    the test fails loudly instead of polling an empty file for the full window.
+    """
     start = time.monotonic()
     while True:
         elapsed = time.monotonic() - start
@@ -70,6 +77,16 @@ def _wait_with_progress(label, total_s, watch=()):
         elapsed = time.monotonic() - start
         sizes = "  ".join(f"{p.name}={_fmt_size(p)}" for p in watch)
         _log(f"  {label}: +{elapsed:>4.1f}s / {total_s}s   {sizes}")
+        if must_be_running is not None and must_be_running.poll() is not None:
+            rc = must_be_running.returncode
+            _log(f"{must_be_running_name} exited early (rc={rc}) during {label}")
+            if must_be_running_log is not None:
+                _log(f"last lines of {must_be_running_log.name}:")
+                print(_tail(must_be_running_log), flush=True)
+            raise RuntimeError(
+                f"{must_be_running_name} exited early during {label} "
+                f"(code={rc}); see {must_be_running_log}"
+            )
 
 
 def _tail(path, n=25):
@@ -174,10 +191,10 @@ def sim_run(tmp_path, request):
         _wait_with_progress(
             "capture", run_seconds,
             watch=(log_path, app_log_path, sim_log_path),
+            must_be_running=app,
+            must_be_running_name="drone-follow",
+            must_be_running_log=app_log_path,
         )
-        if app.poll() is not None:
-            _log(f"drone-follow exited early (rc={app.returncode}); last app log lines:")
-            print(_tail(app_log_path), flush=True)
 
         # Shut drone-follow down here — before returning the log path — so the
         # test body sees fully-flushed JSONL, a finalized recording, and any
@@ -188,6 +205,17 @@ def sim_run(tmp_path, request):
         _log("shutting down drone-follow so artifacts are flushed before assertions")
         _kill_group(app)
         procs.remove(app)
+
+        # If drone-follow never managed to log anything (Hailo driver wedged,
+        # pipeline segfault, etc.) the JSONL stays at 0B and downstream
+        # assertions would fail confusingly. Surface the real cause loudly.
+        if _size(log_path) <= 0:
+            _log(f"drone-follow produced no detections; tail of {app_log_path.name}:")
+            print(_tail(app_log_path), flush=True)
+            raise RuntimeError(
+                f"no detections written to {log_path} after {run_seconds}s "
+                f"(drone-follow rc={app.returncode}); see {app_log_path}"
+            )
         return log_path
 
     yield _run
@@ -315,7 +343,10 @@ def test_2_persons_diagonal_keeps_initial_target(sim_run, tmp_path):
     try:
         log = _read_jsonl(sim_run(
             "2_persons_diagonal", reid=True,
-            extra_args=("--reid-dump-embeddings", str(emb_path)),
+            extra_args=(
+                "--reid-dump-embeddings", str(emb_path),
+                "--reid-bootstrap-consistency", "0.4",
+            ),
         ))
         s = _summarize("2_persons_diagonal", log)
 
@@ -429,6 +460,7 @@ def test_walk_across_then_approach_holds_target_through_approach(sim_run):
         f"approach window: only {n_id_w}/{n_w} frames had a tracker ID — "
         f"ByteTracker dropped the target during the close approach"
     )
+
 
 
 def test_circle_around_keeps_target_in_view(sim_run):
