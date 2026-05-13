@@ -1,3 +1,19 @@
+---
+gsd_state_version: 1.0
+milestone: v1.1
+milestone_name: Robot abstraction + rover support (sim-only)
+status: planning
+stopped_at: Phase 1 context gathered; pivoted to prep an old-design + branch-changes presentation
+last_updated: "2026-05-13T15:41:19.186Z"
+last_activity: 2026-05-12 — Roadmap created; v1.1 Phases 1-6 defined.
+progress:
+  total_phases: 6
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+---
+
 # Project State
 
 ## Project Reference
@@ -52,6 +68,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-12
-Stopped at: Roadmap created, REQUIREMENTS.md traceability filled, ready to plan Phase 1.
-Resume file: None
+Last session: 2026-05-13T15:41:19.185Z
+Stopped at: Phase 1 context gathered; pivoted to prep an old-design + branch-changes presentation
+Resume file: .planning/phases/01-rename/01-CONTEXT.md
