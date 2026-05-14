@@ -4,8 +4,8 @@ milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
 current_plan: 5
 status: executing
-stopped_at: Completed 02-01-PLAN.md — CLEAN-01/02/06/10 landed (Tasks 1 and 2 swept into parallel 02-02 commits; Task 3 clean as 0b40abd)
-last_updated: "2026-05-14T17:12:35.625Z"
+stopped_at: Completed 02-02-PLAN.md — CLEAN-03/07/09 landed (Wave 1B parallel with 02-01 and 02-03)
+last_updated: "2026-05-14T17:13:08.157Z"
 last_activity: 2026-05-14
 progress:
   total_phases: 6
@@ -94,6 +94,12 @@ Progress: [██████░░░░] 64%
 - **Lazy-import for `decide_branches` via `_decide()` helper.** Module-level `from robot_follow.pipeline_adapter.vision_branches import decide_branches` would `ImportError` at collection time (the symbol doesn't land until 02-05). The lazy helper keeps collection green and makes intent obvious in the source. `git grep decide_branches robot_follow/tests/` finds exactly the call sites, not import noise.
 - **Pre-existing controller failures deferred (DEFER-02-00-A).** `test_controller.py::TestDistanceForward::{test_center_y_is_ignored, test_clamped_to_max_forward}` fail on the clean tree (HEAD = 5f15982) — `cmd_bot.forward_m_s` is `-0.75` but the tests expect `0.0`. Verified by stash-pre/stash-post comparison; not caused by Wave 0. Logged at `.planning/phases/02-cleanup/deferred-items.md`. Out of scope for Phase 2 (CLEAN-01..18 doesn't touch the controller); recommended action: fold into a follow-up plan or extra CLEAN-19 before Phase 3 starts (Phase 3 touches the controller via the adapter boundary; this should be green before then).
 
+### Phase 2 decisions (2026-05-14, 02-02 execute)
+
+- **JSON loader tolerance verified BEFORE deleting `vfov` (CLEAN-03).** Both `ControllerConfig.from_json` and `ControllerConfig.load_from_file` filter input keys by `{f.name for f in fields(cls)}` and silently drop unknowns. Legacy `"vfov": 41.0` keys in `df_config.example.json`, `sim/configs/simulation.json`, and `sim/configs/simulation_follow.json` continue to load without warning — no JSON edits needed. Forward-compat win: any shipped tuning file in the field with a stale `vfov` key still loads.
+- **CLEAN-07 atomicity held — signature change + 11 test sites in commit `f923870`.** `SharedDetectionState.update()` lost its `available_ids=None` default and the matching `if available_ids is not None:` guard. All 11 single-arg call sites in `test_shared_state.py` (lines 32, 40, 46, 47, 54, 55, 56, 63, 66, 82, 104) gained `available_ids=set()`. Production callers in `hailo_drone_detection_manager.py` (8 sites) and `test_follow_server.py` (4 sites) were already explicit — no porting work needed. Tests green at every intermediate commit (`git show --stat f923870` confirms `state.py` + `test_shared_state.py` in one commit; `vision_branches.py` also swept in from a parallel agent's staging area).
+- **CLEAN-09 collapsed the sentinel AND the 3 dead branches, not just the symbol.** Removing `_NULLABLE_FIELDS = set()` alone would leave three always-False `if` conditions in the codebase. Both files (`web_server.py`, `openhd_bridge.py`) now read as straight-line config-set / param-apply logic with no sentinel mention anywhere. `grep -rn '_NULLABLE_FIELDS' robot_follow/` returns 0 matches.
+
 ### Phase 2 decisions (2026-05-14, 02-03 execute)
 
 - **CLEAN-04 documents `--mission-duration` instead of removing it.** RESEARCH § CLEAN-04 confirmed the flag is read at `mavsdk_drone.py:767` (auto-land timeout in the `--takeoff-landing` branch) and `:799` (control-loop iteration timeout in the no-takeoff-landing branch). Removing it would silently turn the 300 s default into an infinite mission. Fix is `help=` string + a CLAUDE.md bullet noting the surprise hazard and how to disable the watchdog (`--mission-duration 86400`). Reinforces the wave-1 pattern: distrust the planner's "remove unused flag" instinct until the read sites are grepped.
@@ -117,6 +123,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T17:11:54.358Z
-Stopped at: Completed 02-01-PLAN.md — CLEAN-01/02/06/10 landed (Tasks 1 and 2 swept into parallel 02-02 commits; Task 3 clean as 0b40abd)
+Last session: 2026-05-14T17:13:08.155Z
+Stopped at: Completed 02-02-PLAN.md — CLEAN-03/07/09 landed (Wave 1B parallel with 02-01 and 02-03)
 Resume file: None
