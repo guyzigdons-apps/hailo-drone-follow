@@ -33,6 +33,8 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
+from robot_follow.follow_api.config import ControllerConfig
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -256,41 +258,12 @@ class _WebHandler(BaseHTTPRequestHandler):
             status["recording"] = self.recording_ctl.is_recording
         self._send_json(status)
 
-    _CONFIG_FIELDS = {
-        "kp_yaw": float,
-        "max_forward": float,
-        "max_backward": float,
-        "max_forward_accel": float,
-        "max_yawspeed": float,
-        "dead_zone_deg": float,
-        "yaw_only": bool,
-        "auto_select": bool,
-        "target_bbox_height": float,
-        "kp_distance": float,
-        "kp_distance_back": float,
-        "dead_zone_bbox_percent": float,
-        "max_climb_speed": float,
-        "kp_alt_hold": float,
-        "min_altitude": float,
-        "max_altitude": float,
-        "top_margin_safety": float,
-        "bottom_margin_safety": float,
-        "smooth_yaw": bool,
-        "yaw_alpha": float,
-        "smooth_forward": bool,
-        "forward_alpha": float,
-        "forward_velocity_deadband": float,
-        "smooth_down": bool,
-        "down_alpha": float,
-        "target_altitude": float,
-    }
-
     def _handle_get_config(self):
         cfg = self.controller_config
         if cfg is None:
             self.send_error(404, "No controller config available")
             return
-        data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}
+        data = {k: getattr(cfg, k) for k in ControllerConfig.tunable_fields()}
         data["follow_server_port"] = self.follow_server_port
         self._send_json(data)
 
@@ -322,14 +295,15 @@ class _WebHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, "Invalid JSON")
             return
+        tunable = ControllerConfig.tunable_fields()
         changed_keys = {}
         for key, value in payload.items():
-            if key not in self._CONFIG_FIELDS:
+            schema = tunable.get(key)
+            if schema is None:
                 continue
-            expected = self._CONFIG_FIELDS[key]
             try:
                 changed_keys[key] = getattr(cfg, key)
-                setattr(cfg, key, expected(value))
+                setattr(cfg, key, schema.py_type(value))
             except (TypeError, ValueError):
                 changed_keys.pop(key, None)
                 continue
@@ -340,7 +314,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 setattr(cfg, k, old_val)
             self._send_json({"error": str(e)}, status=400)
             return
-        self._send_json({k: getattr(cfg, k) for k in self._CONFIG_FIELDS})
+        self._send_json({k: getattr(cfg, k) for k in tunable})
 
     def _handle_static(self):
         """Serve React static build with SPA fallback to index.html."""

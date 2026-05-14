@@ -129,15 +129,25 @@ def test_kp_alt_hold_in_df_params():
 
 
 def test_kp_alt_hold_in_openhd_bridge_params():
-    """OpenHD MAVLink bridge exposes kp_alt_hold so QOpenHD can set it."""
-    from robot_follow.servers.openhd_bridge import _CONFIG_PARAMS
-    assert "kp_alt_hold" in _CONFIG_PARAMS
+    """OpenHD MAVLink bridge exposes kp_alt_hold so QOpenHD can set it.
+
+    CLEAN-14: openhd_bridge no longer owns its own param dict; it iterates
+    ControllerConfig.tunable_fields() filtered to entries with a mavlink_id.
+    """
+    from robot_follow.follow_api.config import ControllerConfig
+    tf = ControllerConfig.tunable_fields()
+    assert "kp_alt_hold" in tf
+    assert tf["kp_alt_hold"].mavlink_id is not None
 
 
 def test_kp_alt_hold_in_web_server_fields():
-    """Web UI /config endpoint exposes kp_alt_hold."""
-    from robot_follow.servers.web_server import _WebHandler
-    assert "kp_alt_hold" in _WebHandler._CONFIG_FIELDS
+    """Web UI /config endpoint exposes kp_alt_hold.
+
+    CLEAN-14: web_server no longer owns its own field dict; it iterates
+    ControllerConfig.tunable_fields() (every entry, including web-UI-only).
+    """
+    from robot_follow.follow_api.config import ControllerConfig
+    assert "kp_alt_hold" in ControllerConfig.tunable_fields()
 
 
 def test_forward_velocity_deadband_round_trip(tmp_path):
@@ -159,15 +169,23 @@ def test_forward_velocity_deadband_in_df_params():
 
 
 def test_forward_velocity_deadband_in_openhd_bridge_params():
-    """OpenHD MAVLink bridge exposes forward_velocity_deadband so QOpenHD can set it."""
-    from robot_follow.servers.openhd_bridge import _CONFIG_PARAMS
-    assert "forward_velocity_deadband" in _CONFIG_PARAMS
+    """OpenHD MAVLink bridge exposes forward_velocity_deadband so QOpenHD can set it.
+
+    CLEAN-14: see test_kp_alt_hold_in_openhd_bridge_params for the schema source.
+    """
+    from robot_follow.follow_api.config import ControllerConfig
+    tf = ControllerConfig.tunable_fields()
+    assert "forward_velocity_deadband" in tf
+    assert tf["forward_velocity_deadband"].mavlink_id is not None
 
 
 def test_forward_velocity_deadband_in_web_server_fields():
-    """Web UI /config endpoint exposes forward_velocity_deadband."""
-    from robot_follow.servers.web_server import _WebHandler
-    assert "forward_velocity_deadband" in _WebHandler._CONFIG_FIELDS
+    """Web UI /config endpoint exposes forward_velocity_deadband.
+
+    CLEAN-14: see test_kp_alt_hold_in_web_server_fields for the schema source.
+    """
+    from robot_follow.follow_api.config import ControllerConfig
+    assert "forward_velocity_deadband" in ControllerConfig.tunable_fields()
 
 
 def test_vfov_field_removed():

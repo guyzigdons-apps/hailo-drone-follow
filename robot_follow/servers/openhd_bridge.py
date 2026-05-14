@@ -32,37 +32,32 @@ import socket
 import threading
 import time
 
+from robot_follow.follow_api.config import ControllerConfig
+
 LOGGER = logging.getLogger(__name__)
 
-# Mapping: wire_name -> (mavlink_id, python_type)
-# wire_name matches both the JSON "param" field from OpenHD and the
-# ControllerConfig attribute name.  Values are native float or int (no scaling).
-_CONFIG_PARAMS = {
-    "kp_yaw":                   ("DF_KP_YAW",    float),
-    "max_forward":              ("DF_MAX_FWD",    float),
-    "max_backward":             ("DF_MAX_BACK",   float),
-    "max_forward_accel":        ("DF_MAX_ACC",   float),
-    "dead_zone_deg":            ("DF_DZ_YAW",    float),
-    "kp_distance":              ("DF_KP_DIST",   float),
-    "kp_distance_back":         ("DF_KP_DIST_B", float),
-    "target_bbox_height":       ("DF_TGT_BH",    float),
-    "dead_zone_bbox_percent":   ("DF_DZ_BH_PCT", float),
-    "max_climb_speed":          ("DF_MAX_CLM",   float),
-    "max_yawspeed":             ("DF_MAX_YAW",   float),
-    "kp_alt_hold":              ("DF_KP_ALT_H",  float),
-    "min_altitude":             ("DF_MIN_ALT",   float),
-    "max_altitude":             ("DF_MAX_ALT",   float),
-    "yaw_alpha":                ("DF_YAW_ALPHA",  float),
-    "forward_alpha":            ("DF_FWD_ALPHA",  float),
-    "forward_velocity_deadband": ("DF_FWD_DB",    float),
-    "target_altitude":          ("DF_TGT_ALT",   float),
-    "yaw_only":                 ("DF_YAW_ONLY",   bool),
-    "auto_select":              ("DF_AUTO_SEL",  bool),
-    "smooth_yaw":               ("DF_SMTH_YAW",   bool),
-    "smooth_forward":           ("DF_SMTH_FWD",   bool),
-    "down_alpha":               ("DF_DN_ALPHA",   float),
-    "smooth_down":              ("DF_SMTH_DN",    bool),
-}
+# Mapping wire_name -> (mavlink_id, py_type) is now sourced from
+# ControllerConfig.tunable_fields() — the single source of truth shared
+# with web_server. Entries where `mavlink_id is None` are web-UI-only
+# (currently `top_margin_safety`, `bottom_margin_safety`) and MUST be
+# skipped by every loop in this module; extending the OpenHD MAVLink
+# schema requires a C++ patch on the OpenHD side (deferred to v1.2).
+# See robot_follow/follow_api/config.py for the schema.
+
+
+def _openhd_tunable_fields():
+    """Return the subset of tunable fields exposed to OpenHD MAVLink.
+
+    Filters out entries with `mavlink_id is None` (web-UI-only). Each
+    call hits the classmethod fresh — the dict is small (~24 entries)
+    and the cost is negligible against listener/reporter loop work.
+    """
+    return {
+        name: schema
+        for name, schema in ControllerConfig.tunable_fields().items()
+        if schema.mavlink_id is not None
+    }
+
 
 # Special params for follow target control (not in ControllerConfig)
 _FOLLOW_ID_PARAM = "follow_id"
@@ -170,7 +165,7 @@ class OpenHDBridge:
                 self._apply_save_config(int(value))
             elif param_name == _LOAD_CONFIG_PARAM:
                 self._apply_load_config(int(value))
-            elif param_name in _CONFIG_PARAMS:
+            elif param_name in _openhd_tunable_fields():
                 self._apply_config_param(param_name, value)
             else:
                 LOGGER.warning("[openhd_bridge] Unknown param: %s", param_name)
@@ -301,7 +296,7 @@ class OpenHDBridge:
 
     def _apply_config_param(self, param_name, value):
         """Apply a single parameter change from OpenHD to ControllerConfig."""
-        _, py_type = _CONFIG_PARAMS[param_name]
+        py_type = _openhd_tunable_fields()[param_name].py_type
 
         # Convert to Python type
         if py_type is bool:
@@ -349,7 +344,8 @@ class OpenHDBridge:
     def _send_report(self, sock):
         """Send all current parameter values to OpenHD."""
         params = {}
-        for param_name, (_, py_type) in _CONFIG_PARAMS.items():
+        for param_name, schema in _openhd_tunable_fields().items():
+            py_type = schema.py_type
             py_value = getattr(self._config, param_name, None)
             if py_type is bool:
                 params[param_name] = int(py_value) if py_value is not None else 0
