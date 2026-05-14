@@ -204,26 +204,53 @@ def main():
     # Create target state for follow server
     target_state = FollowTargetState()
 
-    # Pre-parse output-branch flags so we can wire the web UI / recording
-    # state objects before create_app() runs the full parser. Display
-    # follows the implicit rule: enabled when neither --openhd nor
-    # --webui is set.
-    ui_pre = argparse.ArgumentParser(add_help=False)
-    ui_pre.add_argument("--webui", action="store_true")
-    ui_pre.add_argument("--webui-port", type=int, default=5001)
-    ui_pre.add_argument("--webui-fps", type=int, default=10)
-    ui_pre.add_argument("--openhd", action="store_true")
-    ui_pre.add_argument("--display", action="store_true")
-    ui_pre.add_argument("--record", action="store_true")
-    ui_pre.add_argument("--log-perf", action="store_true")
-    ui_pre_args, _ = ui_pre.parse_known_args()
+    # Pre-parse output-branch / ReID / tracker flags in one shot so we can
+    # wire the web UI / recording state objects and the ReIDManager before
+    # create_app() runs the full parser. Display follows the implicit
+    # rule: enabled when neither --openhd nor --webui is set.
+    from robot_follow.pipeline_adapter.tracker_factory import TRACKER_CHOICES, DEFAULT_TRACKER
+    pre = argparse.ArgumentParser(add_help=False)
+    # UI / output branches
+    pre.add_argument("--webui", action="store_true")
+    pre.add_argument("--webui-port", type=int, default=5001)
+    pre.add_argument("--webui-fps", type=int, default=10)
+    pre.add_argument("--openhd", action="store_true")
+    pre.add_argument("--display", action="store_true")
+    pre.add_argument("--record", action="store_true")
+    pre.add_argument("--log-perf", action="store_true")
+    # ReID
+    pre.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF)
+    pre.add_argument("--no-reid", action="store_true")
+    pre.add_argument("--update-interval", type=int, default=10)
+    pre.add_argument("--reid-threshold", type=float, default=0.75)
+    pre.add_argument("--reid-timeout", type=float, default=20.0)
+    pre.add_argument("--reid-drift-threshold", type=float, default=0.6,
+        help="Below this similarity vs gallery, an in-track embedding is "
+             "treated as drift; gallery is not updated and re-acquisition "
+             "is triggered.")
+    pre.add_argument("--reid-duplicate-threshold", type=float, default=0.9,
+        help="Above this similarity, the embedding is redundant and skipped "
+             "(with periodic refresh — see --reid-refresh-every).")
+    pre.add_argument("--reid-refresh-every", type=int, default=5,
+        help="On every Nth consecutive duplicate-band decision, replace the "
+             "oldest gallery vector to keep the gallery fresh.")
+    pre.add_argument("--reid-min-gallery-for-drift-check", type=int, default=6)
+    pre.add_argument("--reid-bootstrap-consistency", type=float, default=None)
+    pre.add_argument("--reid-overlap-skip-iou", type=float, default=0.15,
+        help="When another tracked person overlaps the target's bbox by more "
+             "than this IoU, skip the gallery update for this frame to avoid "
+             "storing a bridge crop. Set to 1.0 to disable.")
+    pre.add_argument("--reid-dump-embeddings", type=str, default=None)
+    # Tracker
+    pre.add_argument("--tracker", default=DEFAULT_TRACKER, choices=TRACKER_CHOICES)
+    pre_args, _ = pre.parse_known_args()
 
-    if ui_pre_args.openhd and ui_pre_args.webui:
+    if pre_args.openhd and pre_args.webui:
         raise SystemExit("error: --openhd and --webui are mutually exclusive "
                          "(only one network encoder may run at a time)")
 
-    if not ui_pre_args.openhd and not ui_pre_args.webui:
-        ui_pre_args.display = True
+    if not pre_args.openhd and not pre_args.webui:
+        pre_args.display = True
 
     # Build the recording branch whenever there's a control surface that
     # can toggle it remotely:
@@ -237,9 +264,9 @@ def main():
     # toggle source exists wastes CPU; building it when one does lets
     # operators flip recording on/off without restarting robot-follow.
     record_branch_enabled = (
-        ui_pre_args.record
-        or ui_pre_args.webui
-        or ui_pre_args.openhd
+        pre_args.record
+        or pre_args.webui
+        or pre_args.openhd
     )
 
     # Always create SharedUIState — the OpenHD bridge needs it for bbox
@@ -248,7 +275,7 @@ def main():
     ui_state = SharedUIState()
 
     web_server = None
-    if ui_pre_args.webui:
+    if pre_args.webui:
         from robot_follow.servers import WebServer
         # Check that the UI has been built
         _ui_build_index = os.path.join(
@@ -262,64 +289,32 @@ def main():
     # Build the full parser from all domains, then pass to pipeline adapter
     parser = _build_parser()
 
-    # Pre-parse ReID args to initialize the manager before create_app
-    reid_pre = argparse.ArgumentParser(add_help=False)
-    reid_pre.add_argument("--reid-model", type=str, default=_DEFAULT_REID_HEF)
-    reid_pre.add_argument("--no-reid", action="store_true")
-    reid_pre.add_argument("--update-interval", type=int, default=10)
-    reid_pre.add_argument("--reid-threshold", type=float, default=0.75)
-    reid_pre.add_argument("--reid-timeout", type=float, default=20.0)
-    reid_pre.add_argument("--reid-drift-threshold", type=float, default=0.6,
-        help="Below this similarity vs gallery, an in-track embedding is "
-             "treated as drift; gallery is not updated and re-acquisition "
-             "is triggered.")
-    reid_pre.add_argument("--reid-duplicate-threshold", type=float, default=0.9,
-        help="Above this similarity, the embedding is redundant and skipped "
-             "(with periodic refresh — see --reid-refresh-every).")
-    reid_pre.add_argument("--reid-refresh-every", type=int, default=5,
-        help="On every Nth consecutive duplicate-band decision, replace the "
-             "oldest gallery vector to keep the gallery fresh.")
-    reid_pre.add_argument("--reid-min-gallery-for-drift-check", type=int, default=6)
-    reid_pre.add_argument("--reid-bootstrap-consistency", type=float, default=None)
-    reid_pre.add_argument("--reid-overlap-skip-iou", type=float, default=0.15,
-        help="When another tracked person overlaps the target's bbox by more "
-             "than this IoU, skip the gallery update for this frame to avoid "
-             "storing a bridge crop. Set to 1.0 to disable.")
-    reid_pre.add_argument("--reid-dump-embeddings", type=str, default=None)
-    reid_pre_args, _ = reid_pre.parse_known_args()
-
     reid_manager = None
-    if not reid_pre_args.no_reid and reid_pre_args.reid_model:
+    if not pre_args.no_reid and pre_args.reid_model:
         from robot_follow.pipeline_adapter.reid_manager import ReIDManager
         reid_manager = ReIDManager(
-            hef_path=reid_pre_args.reid_model,
-            update_interval=reid_pre_args.update_interval,
-            reid_match_threshold=reid_pre_args.reid_threshold,
-            drift_threshold=reid_pre_args.reid_drift_threshold,
-            duplicate_threshold=reid_pre_args.reid_duplicate_threshold,
-            refresh_every=reid_pre_args.reid_refresh_every,
-            min_gallery_for_drift_check=reid_pre_args.reid_min_gallery_for_drift_check,
-            bootstrap_consistency_threshold=reid_pre_args.reid_bootstrap_consistency,
-            overlap_skip_iou=reid_pre_args.reid_overlap_skip_iou,
-            dump_embeddings_path=reid_pre_args.reid_dump_embeddings,
+            hef_path=pre_args.reid_model,
+            update_interval=pre_args.update_interval,
+            reid_match_threshold=pre_args.reid_threshold,
+            drift_threshold=pre_args.reid_drift_threshold,
+            duplicate_threshold=pre_args.reid_duplicate_threshold,
+            refresh_every=pre_args.reid_refresh_every,
+            min_gallery_for_drift_check=pre_args.reid_min_gallery_for_drift_check,
+            bootstrap_consistency_threshold=pre_args.reid_bootstrap_consistency,
+            overlap_skip_iou=pre_args.reid_overlap_skip_iou,
+            dump_embeddings_path=pre_args.reid_dump_embeddings,
         )
 
     from robot_follow.pipeline_adapter import create_app
 
-    # Pre-parse --tracker to pass to create_app
-    from robot_follow.pipeline_adapter.tracker_factory import TRACKER_CHOICES, DEFAULT_TRACKER
-    tracker_pre = argparse.ArgumentParser(add_help=False)
-    tracker_pre.add_argument("--tracker", default=DEFAULT_TRACKER, choices=TRACKER_CHOICES)
-    tracker_pre_args, _ = tracker_pre.parse_known_args()
-
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
-                     ui_state=ui_state, ui_fps=ui_pre_args.webui_fps, parser=parser,
+                     ui_state=ui_state, ui_fps=pre_args.webui_fps, parser=parser,
                      record_enabled=record_branch_enabled, record_dir=recordings_dir,
                      reid_manager=reid_manager,
-                     reid_search_timeout=reid_pre_args.reid_timeout,
-                     tracker_name=tracker_pre_args.tracker,
-                     log_perf=ui_pre_args.log_perf)
+                     reid_search_timeout=pre_args.reid_timeout,
+                     tracker_name=pre_args.tracker,
+                     log_perf=pre_args.log_perf)
     args = app.options_menu
     if getattr(args, "openhd", False) and getattr(args, "webui", False):
         raise SystemExit("error: --openhd and --webui are mutually exclusive")
@@ -363,7 +358,7 @@ def main():
     openhd_bridge.start()
 
     # Start web UI server
-    if ui_pre_args.webui:
+    if pre_args.webui:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
         web_server = WebServer(ui_state, target_state, shared_state,
                                controller_config=controller_config,
@@ -415,7 +410,7 @@ def main():
         signal.signal(signal.SIGTERM, on_signal)
 
     # Start recording from CLI flag after pipeline is running
-    if ui_pre_args.record:
+    if pre_args.record:
         def _start_recording_delayed():
             time.sleep(1.0)  # wait for pipeline to reach PLAYING
             app.start_recording()
