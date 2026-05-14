@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 1 of 8 (Phase 2 in progress; 02-00 done, 02-01 next)
-status: in_progress
-stopped_at: Completed 02-00-PLAN.md — Phase 2 Wave 0 xfail scaffolds landed
-last_updated: "2026-05-14T17:02:01.607Z"
+current_plan: 3
+status: executing
+stopped_at: Completed 02-03-PLAN.md — Wave 1C edits (CLEAN-04 docs, CLEAN-05/-08 dead-code removal) in mavsdk_drone.py + robot_follow_app.py
+last_updated: "2026-05-14T17:10:14.809Z"
 last_activity: 2026-05-14
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 11
-  completed_plans: 4
+  completed_plans: 5
   percent: 36
 ---
 
@@ -28,10 +28,10 @@ See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 Phase: 2 of 6 (Cleanup) — **in progress, Wave 0 complete**
 Plan: 1 of 8 complete (02-00 Wave 0 xfail scaffolds landed)
-Current Plan: 02-01 (Wave 1 — dead-code deletes)
+Current Plan: 3
 Total Plans in Phase: 8
 Status: In progress
-Last activity: 2026-05-14 — 02-00 completed (Wave 0 xfail gates for CLEAN-15 and CLEAN-16 landed).
+Last activity: 2026-05-14
 
 Progress: [████░░░░░░] 36%
 
@@ -57,6 +57,7 @@ Progress: [████░░░░░░] 36%
 | Phase 01-rename P02 | 73 min   | 3 tasks  | 77 files  |
 | Phase 01-rename P03 | 22 min | 2 tasks | 1 files |
 | Phase 02-cleanup P00 | 2 min | 2 tasks | 2 files |
+| Phase 02-cleanup P03 | 3 min | 3 tasks tasks | 3 files files |
 
 ## Accumulated Context
 
@@ -91,6 +92,12 @@ Progress: [████░░░░░░] 36%
 - **Lazy-import for `decide_branches` via `_decide()` helper.** Module-level `from robot_follow.pipeline_adapter.vision_branches import decide_branches` would `ImportError` at collection time (the symbol doesn't land until 02-05). The lazy helper keeps collection green and makes intent obvious in the source. `git grep decide_branches robot_follow/tests/` finds exactly the call sites, not import noise.
 - **Pre-existing controller failures deferred (DEFER-02-00-A).** `test_controller.py::TestDistanceForward::{test_center_y_is_ignored, test_clamped_to_max_forward}` fail on the clean tree (HEAD = 5f15982) — `cmd_bot.forward_m_s` is `-0.75` but the tests expect `0.0`. Verified by stash-pre/stash-post comparison; not caused by Wave 0. Logged at `.planning/phases/02-cleanup/deferred-items.md`. Out of scope for Phase 2 (CLEAN-01..18 doesn't touch the controller); recommended action: fold into a follow-up plan or extra CLEAN-19 before Phase 3 starts (Phase 3 touches the controller via the adapter boundary; this should be green before then).
 
+### Phase 2 decisions (2026-05-14, 02-03 execute)
+
+- **CLEAN-04 documents `--mission-duration` instead of removing it.** RESEARCH § CLEAN-04 confirmed the flag is read at `mavsdk_drone.py:767` (auto-land timeout in the `--takeoff-landing` branch) and `:799` (control-loop iteration timeout in the no-takeoff-landing branch). Removing it would silently turn the 300 s default into an infinite mission. Fix is `help=` string + a CLAUDE.md bullet noting the surprise hazard and how to disable the watchdog (`--mission-duration 86400`). Reinforces the wave-1 pattern: distrust the planner's "remove unused flag" instinct until the read sites are grepped.
+- **CLEAN-05's outer `getattr(args, "serial", None) is not None` guard is real and kept.** Only the inner `getattr(args, "serial_baud", 115200)` was unreachable (the `--serial-baud` registration at `mavsdk_drone.py:41` has `default=57600`, and the parser builds before `_resolve_serial_connection` runs). The `--serial` field genuinely has a `None` default, so the outer guard is testing whether the operator passed the flag — keep it.
+- **CLEAN-08 keeps `import os` at the top of `mavsdk_drone.py`.** Other sites use `os.getuid()` (line 230), `os.path.join` / `os.path.exists` (lines 212, 216), and `os.environ`. Removing the import together with the pipe-reader block would have introduced a `NameError`. Lesson: when stripping the only visible user of a stdlib import, grep the whole file for other call sites before pulling the import too.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -103,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T17:02:01.605Z
-Stopped at: Completed 02-00-PLAN.md — Phase 2 Wave 0 xfail scaffolds landed
+Last session: 2026-05-14T17:10:14.807Z
+Stopped at: Completed 02-03-PLAN.md — Wave 1C edits (CLEAN-04 docs, CLEAN-05/-08 dead-code removal) in mavsdk_drone.py + robot_follow_app.py
 Resume file: None
