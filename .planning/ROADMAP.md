@@ -118,7 +118,7 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. Rename | v1.1 | 3/3 | Complete | 2026-05-14 |
-| 2. Cleanup | v1.1 | 0/8 | Planned | - |
+| 2. Cleanup | v1.1 | 1/8 | In Progress | - |
 | 3. Abstraction | v1.1 | 0/TBD | Not started | - |
 | 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
 | 5. Rover sim | v1.1 | 0/TBD | Not started | - |

@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 4 (Phase 1 done; Phase 2 unblocked)
-status: verifying
-stopped_at: "Completed 01-03-PLAN.md — Phase 1 ready for /gsd:verify-work"
-last_updated: "2026-05-14T16:10:57.940Z"
-last_activity: 2026-05-14 — 01-03 completed (A passed, B+C deferred with mitigations). Phase 1 ready for goal-verification.
+current_plan: 1 of 8 (Phase 2 in progress; 02-00 done, 02-01 next)
+status: in_progress
+stopped_at: Completed 02-00-PLAN.md — Phase 2 Wave 0 xfail scaffolds landed
+last_updated: "2026-05-14T17:02:01.607Z"
+last_activity: 2026-05-14
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
-  percent: 100
+  total_plans: 11
+  completed_plans: 4
+  percent: 36
 ---
 
 # Project State
@@ -22,31 +22,32 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 **Core value:** The pipeline keeps a target person in frame and computes safe velocity commands for the robot, even when the target is briefly occluded — without operator input.
-**Current focus:** v1.1 Phase 1 — Rename (ready to plan)
+**Current focus:** v1.1 Phase 2 — Cleanup (Wave 0 done; Waves 1-3 ahead)
 
 ## Current Position
 
-Phase: 1 of 6 (Rename) — **complete, ready for /gsd:verify-work**
-Plan: 3 of 3 complete (Wave 2 — manual verifications resolved)
-Current Plan: 4 (Phase 1 done; Phase 2 unblocked)
-Total Plans in Phase: 3
-Status: Ready for verification
-Last activity: 2026-05-14 — 01-03 completed (A passed, B+C deferred with mitigations). Phase 1 ready for goal-verification.
+Phase: 2 of 6 (Cleanup) — **in progress, Wave 0 complete**
+Plan: 1 of 8 complete (02-00 Wave 0 xfail scaffolds landed)
+Current Plan: 02-01 (Wave 1 — dead-code deletes)
+Total Plans in Phase: 8
+Status: In progress
+Last activity: 2026-05-14 — 02-00 completed (Wave 0 xfail gates for CLEAN-15 and CLEAN-16 landed).
 
-Progress: [██████████] 100%
+Progress: [████░░░░░░] 36%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 32 min
-- Total execution time: 96 min (1.6 h)
+- Total plans completed: 4
+- Average duration: 24.5 min
+- Total execution time: 98 min (1.6 h)
 
 **By Phase:**
 
-| Phase     | Plans | Total  | Avg/Plan |
-|-----------|-------|--------|----------|
-| 01-rename | 3     | 96 min | 32 min   |
+| Phase      | Plans | Total  | Avg/Plan |
+|------------|-------|--------|----------|
+| 01-rename  | 3     | 96 min | 32 min   |
+| 02-cleanup | 1     | 2 min  | 2 min    |
 
 *Updated after each plan completion*
 
@@ -55,6 +56,7 @@ Progress: [██████████] 100%
 | Phase 01-rename P01 | 1 min    | 1 task   | 1 file    |
 | Phase 01-rename P02 | 73 min   | 3 tasks  | 77 files  |
 | Phase 01-rename P03 | 22 min | 2 tasks | 1 files |
+| Phase 02-cleanup P00 | 2 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -83,10 +85,17 @@ Progress: [██████████] 100%
 - **Verification A executed by operator in their own venv shell on the x86_64 dev box.** `./install.sh --skip-apps --skip-hefs --skip-ui` re-runs cleanly post-rename: legacy-uninstall banner present at `install.sh:98`, final `pip install -e .` reports `Successfully installed robot-follow-1.1.0.dev0`, post-run pip metadata is exclusive (`pip show robot-follow` exits 0, `pip show drone-follow` exits non-zero), `diff <(robot-follow --help) <(drone-follow --help)` is empty, and `head -5 "$(which drone-follow)"` shows `from robot_follow.robot_follow_app import main`. Idempotency confirmed (the run was the second post-rename install on this dev box; first uninstalled the prior `robot-follow-1.1.0.dev0`, then reinstalled cleanly).
 - **Verifications B and C deferred per operator scope; mitigations cited on disk.** Verification B (deployed-RPi boot-service ExecStart path check) deferred because no air-unit RPi was reachable from this dev box at execution time. Mitigation: Plan 01-02 Task 1 Step 4 ran `git diff 5850558 scripts/boot/` and found the diff empty — `scripts/boot/drone-follow-boot.service` and `scripts/boot/drone-follow-boot.sh` were not touched by the rename commit, so the deployed `ExecStart` path is mechanically unchanged. Verification C (full pytest suite on a Hailo-capable host) deferred because the dev box has no Hailo HW. Mitigation: Plan 01-02 ran `pytest robot_follow/tests/test_install_smoke.py -v` to 10/10 PASSED, covering the RENAME-01..05 surface that's testable without Hailo HW. Both deferrals become regression smoke steps at the next field deployment / Hailo-host sync, not open Phase-1 blockers.
 
+### Phase 2 decisions (2026-05-14, 02-00 execute)
+
+- **Wave-0 xfail scaffolds use `strict=False`.** A coincidental pre-fix pass (e.g., SharedUIState being benign under low test load) reports as `xpass` instead of breaking the suite. Strict semantics belong in plans 02-05 / 02-07 when the markers come off and the tests carry the load of regression detection. Wave 0's job is "tests exist, suite stays green", not "lock in correctness".
+- **Lazy-import for `decide_branches` via `_decide()` helper.** Module-level `from robot_follow.pipeline_adapter.vision_branches import decide_branches` would `ImportError` at collection time (the symbol doesn't land until 02-05). The lazy helper keeps collection green and makes intent obvious in the source. `git grep decide_branches robot_follow/tests/` finds exactly the call sites, not import noise.
+- **Pre-existing controller failures deferred (DEFER-02-00-A).** `test_controller.py::TestDistanceForward::{test_center_y_is_ignored, test_clamped_to_max_forward}` fail on the clean tree (HEAD = 5f15982) — `cmd_bot.forward_m_s` is `-0.75` but the tests expect `0.0`. Verified by stash-pre/stash-post comparison; not caused by Wave 0. Logged at `.planning/phases/02-cleanup/deferred-items.md`. Out of scope for Phase 2 (CLEAN-01..18 doesn't touch the controller); recommended action: fold into a follow-up plan or extra CLEAN-19 before Phase 3 starts (Phase 3 touches the controller via the adapter boundary; this should be green before then).
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
 - Rover camera gz topic name: confirm actual topic (`/model/rover/camera` vs `/camera`) with `gz topic -l` when `rover.sdf` first loads before hardcoding in `start_rover_sim.sh`.
+- Pre-existing `test_controller.py` failures (DEFER-02-00-A) — 2 tests fail in `TestDistanceForward`; not blocking Phase 2 but should be green before Phase 3.
 
 ### Pending Todos
 
@@ -94,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T15:53:45.163Z
-Stopped at: Completed 01-03-PLAN.md — Phase 1 ready for /gsd:verify-work
+Last session: 2026-05-14T17:02:01.605Z
+Stopped at: Completed 02-00-PLAN.md — Phase 2 Wave 0 xfail scaffolds landed
 Resume file: None
