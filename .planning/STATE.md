@@ -4,15 +4,15 @@ milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
 current_plan: 7
 status: executing
-stopped_at: Completed 02-06-PLAN.md — CLEAN-14 landed (Wave 3 parallel with 02-04)
-last_updated: "2026-05-14T17:21:48.119Z"
+stopped_at: Completed 02-04-PLAN.md — CLEAN-11/13 landed (Wave 3 parallel with 02-06)
+last_updated: "2026-05-14T17:22:56.728Z"
 last_activity: 2026-05-14
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 11
   completed_plans: 9
-  percent: 64
+  percent: 82
 ---
 
 # Project State
@@ -26,14 +26,14 @@ See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 ## Current Position
 
-Phase: 2 of 6 (Cleanup) — **in progress, Wave 1 complete (02-01, 02-02, 02-03 all landed)**
-Plan: 4 of 8 complete (02-00 + 02-01 + 02-02 + 02-03)
+Phase: 2 of 6 (Cleanup) — **in progress, Waves 1-3 mostly complete (02-01..04 + 02-06 all landed; 02-05 + 02-07 remain)**
+Plan: 6 of 8 complete (02-00 + 02-01 + 02-02 + 02-03 + 02-04 + 02-06)
 Current Plan: 7
 Total Plans in Phase: 8
 Status: In progress
 Last activity: 2026-05-14
 
-Progress: [██████░░░░] 64%
+Progress: [████████░░] 82%
 
 ## Performance Metrics
 
@@ -113,6 +113,13 @@ Progress: [██████░░░░] 64%
 - **`DroneFollowUserData.controller_config` attribute kept (init to `None`) even after removing the constructor kwarg.** The callback at `hailo_drone_detection_manager.py:278` reads `user_data.controller_config`; the real value is attached post-construction at `robot_follow_app.py:340`. Removing the attribute outright would `AttributeError` before the attach landed. Only the dead constructor kwarg path got stripped.
 - **Parallel-plan working-tree race accepted as Rule-3 deviation.** Plans 02-01, 02-02, and 02-03 ran concurrently in the same working tree. 02-02's commit step picked up 02-01's unstaged Task-1 deletions (`sim/world_loader.py`, `scripts/bench_reid_callback.py`) into commit `cd26780`, and Task-2's `vision_branches.py` alias edit into commit `f923870`. Task 3 (CLEAN-10) was committed cleanly as `0b40abd` via targeted `git add <file>`. Success criteria all met; attribution drift recorded in `02-01-SUMMARY.md` deviations. Lesson for future parallel waves: spawn each plan agent into its own `git worktree add`-managed worktree, or have agents use `git add <file>` (never `git add .`) and stagger commits tightly enough that sibling unstaged work isn't visible.
 
+### Phase 2 decisions (2026-05-14, 02-04 execute)
+
+- **Shape A chosen for CLEAN-13 (keep both dict caches, fan out from one task).** `_telemetry_position_task` now takes both `telemetry_cache` and `altitude_cache` and writes both from a single `drone.telemetry.position()` subscription. Shape B (drop `altitude_cache` entirely and read `telemetry_cache["rel_alt"]` from `live_control_loop`) is cleaner but touches `live_control_loop`'s signature at lines 438/512/553 — deferred to Phase 3 where the `MavsdkDroneAdapter` cut already touches that signature. Per RESEARCH § CLEAN-13 recommendation.
+- **`altitude_cache` hoisted to `run_live_drone` entry; `_start_altitude_telemetry` deleted.** Pre-edit, `alt_cache = {}` was created lazily inside `_start_altitude_telemetry`, returned via `nonlocal alt_task` + `return alt_cache`, and re-bound at the caller. With one merged task, that closure dance is obsolete — the cache now lives next to `telemetry_cache` at the top of the try-block. Eager population is safe because altitude-hold only runs inside `live_control_loop`, which gates on its own conditions. `alt_task` local + its finally-block cleanup also removed.
+- **`_reap_mavsdk_server` lives in `mavsdk_drone.py`, re-exported via `drone_api/__init__.py`.** Both call sites — `DetachedMavsdkServer.__enter__` (before respawn, to release UDP 14540 / TCP 50051) and `robot_follow_app.py` finally (when `drone_thread.join(timeout=5)` expires and `__exit__` never runs) — call the helper. `time.sleep(0.3)` settle stays inline in `__enter__` only (specific to the respawn flow, not needed in the finally path). `subprocess` import dropped from `robot_follow_app.py` (line 448 was its only user; `os` import stays for `os.path`/`os.environ` use).
+- **Parallel-wave staging hygiene held via explicit pathspec.** Each commit on 02-04 used `git commit -m "..." -- <files>` instead of `git add` + `git commit`. Sibling unstaged work from parallel plan 02-06 (`follow_api/config.py`, `servers/web_server.py`, `servers/openhd_bridge.py`, `tests/test_config_persistence.py`) was never picked up by 02-04's commits. Mirrors the Wave-2 lessons-learned (`feedback_parallel_wave_worktree_isolation.md`).
+
 ### Phase 2 decisions (2026-05-14, 02-06 execute)
 
 - **CLEAN-14 schema lives on `ControllerConfig` as a classmethod; `TunableField` is a minimal `(py_type, mavlink_id|None)` NamedTuple.** Considered adding `display_name` / `bounds` fields up front, but NamedTuple's positional construction means any new field touches every existing constructor — the cleaner play is to keep the schema minimal in Phase 2 and grow it only when there's a real consumer. Inline docstring on `TunableField` captures this.
@@ -131,6 +138,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T17:21:48.118Z
-Stopped at: Completed 02-06-PLAN.md — CLEAN-14 landed (Wave 3 parallel with 02-04)
+Last session: 2026-05-14T17:22:56.726Z
+Stopped at: Completed 02-04-PLAN.md — CLEAN-11/13 landed (Wave 3 parallel with 02-06)
 Resume file: None
