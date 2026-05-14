@@ -29,7 +29,7 @@ class TestSharedDetectionState:
     def test_update_and_get(self):
         state = SharedDetectionState()
         d = _det(cx=0.7, cy=0.3)
-        state.update(d)
+        state.update(d, available_ids=set())
         det, count = state.get_latest()
         assert det is d
         assert count == 1
@@ -37,33 +37,33 @@ class TestSharedDetectionState:
     def test_frame_count_increments(self):
         state = SharedDetectionState()
         for i in range(10):
-            state.update(_det())
+            state.update(_det(), available_ids=set())
         _, count = state.get_latest()
         assert count == 10
 
     def test_none_clears_detection(self):
         state = SharedDetectionState()
-        state.update(_det())
-        state.update(None)
+        state.update(_det(), available_ids=set())
+        state.update(None, available_ids=set())
         det, count = state.get_latest()
         assert det is None
         assert count == 2
 
     def test_only_latest_detection_kept(self):
         state = SharedDetectionState()
-        state.update(_det(cx=0.1))
-        state.update(_det(cx=0.2))
-        state.update(_det(cx=0.9))
+        state.update(_det(cx=0.1), available_ids=set())
+        state.update(_det(cx=0.2), available_ids=set())
+        state.update(_det(cx=0.9), available_ids=set())
         det, _ = state.get_latest()
         assert det.center_x == 0.9
 
     def test_get_returns_snapshot(self):
         """get_latest should return consistent data even if update happens after."""
         state = SharedDetectionState()
-        state.update(_det(cx=0.3))
+        state.update(_det(cx=0.3), available_ids=set())
         det, count = state.get_latest()
         # update after get
-        state.update(_det(cx=0.8))
+        state.update(_det(cx=0.8), available_ids=set())
         # original snapshot unchanged
         assert det.center_x == 0.3
         assert count == 1
@@ -79,7 +79,7 @@ class TestSharedDetectionState:
             barrier.wait()
             for i in range(n_updates):
                 cx = (thread_id * n_updates + i) / (n_threads * n_updates)
-                state.update(_det(cx=cx))
+                state.update(_det(cx=cx), available_ids=set())
 
         threads = [threading.Thread(target=writer, args=(t,)) for t in range(n_threads)]
         for t in threads:
@@ -101,7 +101,7 @@ class TestSharedDetectionState:
         def writer():
             for i in range(2000):
                 val = i / 2000.0
-                state.update(_det(cx=val, cy=val, bh=val * 0.5 + 0.1))
+                state.update(_det(cx=val, cy=val, bh=val * 0.5 + 0.1), available_ids=set())
             stop.set()
 
         def reader():

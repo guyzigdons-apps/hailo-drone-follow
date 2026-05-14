@@ -393,10 +393,6 @@ def highlight_target(pad, info, target_state):
     return Gst.PadProbeReturn.OK
 
 
-# Backwards-compat alias — older callers may still import the old name.
-strip_tiles_and_highlight_target = highlight_target
-
-
 def wire_local_meta_probe(pipeline, target_state) -> bool:
     """Attach :func:`highlight_target` to the ``local_meta_id`` identity
     element if it exists in the pipeline.

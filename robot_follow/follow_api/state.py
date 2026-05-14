@@ -16,12 +16,11 @@ class SharedDetectionState:
         self._frame_count: int = 0
         self._available_ids: set = set()
 
-    def update(self, detection: Optional[Detection], available_ids: set = None):
+    def update(self, detection: Optional[Detection], available_ids: set):
         with self._lock:
             self._detection = detection
             self._frame_count += 1
-            if available_ids is not None:
-                self._available_ids = available_ids
+            self._available_ids = available_ids
 
     def get_latest(self):
         with self._lock:
