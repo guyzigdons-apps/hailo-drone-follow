@@ -366,17 +366,6 @@ def _ignore_sigint_during_landing(ignore: bool) -> None:
 # Live Control Loop
 # ---------------------------------------------------------------------------
 
-async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asyncio.Event) -> None:
-    """Background task: stream position and store relative altitude (m) in altitude_cache['m']."""
-    try:
-        async for position in drone.telemetry.position():
-            if shutdown.is_set():
-                return
-            altitude_cache["m"] = position.relative_altitude_m
-    except Exception as e:
-        LOGGER.warning("[drone] Altitude telemetry task failed: %s", e)
-
-
 async def _telemetry_velocity_task(drone, telemetry_cache: dict, shutdown: asyncio.Event) -> None:
     """Background task: stream velocity NED and store in telemetry_cache."""
     try:
@@ -390,8 +379,19 @@ async def _telemetry_velocity_task(drone, telemetry_cache: dict, shutdown: async
         pass
 
 
-async def _telemetry_position_task(drone, telemetry_cache: dict, shutdown: asyncio.Event) -> None:
-    """Background task: stream position and store lat/lon/abs alt in telemetry_cache."""
+async def _telemetry_position_task(drone, telemetry_cache: dict, altitude_cache: dict,
+                                   shutdown: asyncio.Event) -> None:
+    """Background task: stream position once, write both telemetry + altitude caches.
+
+    Single subscription on the MAVSDK position stream that fans out into:
+      - telemetry_cache: lat/lon/abs_alt/rel_alt (used by the 1 Hz telem log task)
+      - altitude_cache: 'm' (relative altitude, used by live_control_loop's
+        altitude-hold P-loop)
+
+    Both dicts carry pos.relative_altitude_m so existing consumers stay
+    untouched; cache consolidation (Shape B in 02-RESEARCH § CLEAN-13) is
+    deferred to Phase 3.
+    """
     try:
         async for pos in drone.telemetry.position():
             if shutdown.is_set():
@@ -400,6 +400,7 @@ async def _telemetry_position_task(drone, telemetry_cache: dict, shutdown: async
             telemetry_cache["lon"] = pos.longitude_deg
             telemetry_cache["abs_alt"] = pos.absolute_altitude_m
             telemetry_cache["rel_alt"] = pos.relative_altitude_m
+            altitude_cache["m"] = pos.relative_altitude_m
     except (ConnectionError, asyncio.CancelledError):
         pass
 
@@ -706,30 +707,25 @@ async def run_live_drone(args, shared_state, shutdown,
 
         armed = False
         vel_api = VelocityCommandAPI(drone, config)
-        alt_task = None
         control_task = None
         watch_task = None
         telemetry_cache: dict = {}
+        # altitude_cache is populated by _telemetry_position_task alongside
+        # telemetry_cache; one position-stream subscription feeds both. The
+        # cache is created eagerly here (instead of inside the old
+        # _start_altitude_telemetry helper) — live_control_loop's
+        # altitude-hold P-loop gates on its own conditions, so populating
+        # the cache before the loop starts is harmless.
+        altitude_cache: dict = {}
         telem_tasks: list = []
         try:
             # Start telemetry streaming tasks for logging
             telem_tasks.append(asyncio.create_task(
                 _telemetry_velocity_task(drone, telemetry_cache, shutdown)))
             telem_tasks.append(asyncio.create_task(
-                _telemetry_position_task(drone, telemetry_cache, shutdown)))
+                _telemetry_position_task(drone, telemetry_cache, altitude_cache, shutdown)))
             telem_tasks.append(asyncio.create_task(
-                _telemetry_log_task(drone, {}, telemetry_cache, shutdown, ui_state=ui_state)))
-
-            async def _start_altitude_telemetry():
-                """Start altitude streaming and upgrade telem log task to include it."""
-                nonlocal alt_task
-                alt_cache: dict = {}
-                alt_task = asyncio.create_task(
-                    _telemetry_altitude_task(drone, alt_cache, shutdown))
-                await _cancel_task(telem_tasks[-1])
-                telem_tasks[-1] = asyncio.create_task(
-                    _telemetry_log_task(drone, alt_cache, telemetry_cache, shutdown, ui_state=ui_state))
-                return alt_cache
+                _telemetry_log_task(drone, altitude_cache, telemetry_cache, shutdown, ui_state=ui_state)))
 
             if manage_takeoff_landing:
                 await drone.action.set_takeoff_altitude(args.target_altitude)
@@ -766,7 +762,6 @@ async def run_live_drone(args, shared_state, shutdown,
                 # control loop starts streaming follow setpoints.
                 await asyncio.sleep(1)
 
-                altitude_cache = await _start_altitude_telemetry()
                 control_task = asyncio.create_task(
                     live_control_loop(drone, shared_state, config, shutdown, altitude_cache,
                                       ui_state=ui_state, target_state=target_state, telemetry_cache=telemetry_cache))
@@ -787,8 +782,6 @@ async def run_live_drone(args, shared_state, shutdown,
                 # sees an offboard signal, then wait for the pilot to switch to
                 # OFFBOARD via GCS/RC.  The app must NEVER command the mode
                 # switch itself — only the pilot decides when to hand over.
-                altitude_cache = await _start_altitude_telemetry()
-
                 while not shutdown.is_set():
                     await _wait_for_offboard_mode(drone, shutdown)
                     if shutdown.is_set():
@@ -845,8 +838,6 @@ async def run_live_drone(args, shared_state, shutdown,
         finally:
             for t in telem_tasks:
                 await _cancel_task(t)
-            if alt_task is not None:
-                await _cancel_task(alt_task)
             if watch_task is not None:
                 await _cancel_task(watch_task)
             if control_task is not None:
