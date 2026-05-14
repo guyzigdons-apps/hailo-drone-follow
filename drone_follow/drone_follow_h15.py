@@ -126,6 +126,10 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument("--dry-run", action="store_true",
                        help="Run control loop without drone connection — logs computed "
                             "velocity commands from live detections")
+    group.add_argument("--record", nargs="?", const="auto", default=None,
+                       metavar="PATH",
+                       help="Record H264 video locally (Matroska container). "
+                            "Optional PATH; if omitted uses /home/root/recordings/drone_<timestamp>.mkv")
 
     return parser
 
@@ -160,11 +164,22 @@ def main():
     # Create shared UI state and H15 pipeline app
     ui_state = SharedUIState()
 
+    # Resolve record path
+    record_path = None
+    if getattr(args, "record", None) is not None:
+        record_path = args.record
+        if record_path == "auto":
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            record_path = f"/home/root/recordings/drone_{ts}.mkv"
+        os.makedirs(os.path.dirname(record_path), exist_ok=True)
+        LOGGER.info("[app] Recording video to %s", record_path)
+
     from drone_follow.pipeline_adapter.hailo15_pipeline import create_h15_app
 
     app = create_h15_app(
         shared_state, target_state=target_state, eos_reached=eos_reached,
-        ui_state=ui_state)
+        ui_state=ui_state, record_path=record_path)
 
     # Start follow server
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
@@ -280,7 +295,8 @@ def main():
     finally:
         if not shutdown.is_set():
             shutdown.set()
-        drone_thread.join(timeout=5.0)
+        # _land_safely does an 8s sleep after issuing land(); give it room
+        drone_thread.join(timeout=20.0)
         follow_server.stop()
         web_server.stop()
 

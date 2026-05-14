@@ -192,9 +192,11 @@ class Hailo15PipelineApp:
     """
 
     def __init__(self, shared_state, target_state=None, ui_state=None,
-                 eos_reached=None, options_menu=None):
+                 eos_reached=None, options_menu=None, record_path=None):
         self.shared_state = shared_state
         self.target_state = target_state
+        self._record_path = record_path
+        self._rec_first_pts = None  # for PTS normalization on recording branch
         self.ui_state = ui_state
         self._eos_reached = eos_reached
         self.options_menu = options_menu
@@ -275,13 +277,28 @@ class Hailo15PipelineApp:
         sink_parts = []
         for i in range(n_streams):
             if i == 1 and encoder_path:
-                # 720p → H264 encode → UDP for viewing
+                # 720p → H264 encode → tee: UDP (for live viewing) + optional file recording
+                record_branch = ""
+                if self._record_path:
+                    # Name h264parse so we can attach a pad probe to normalize PTS.
+                    # hailoencodebin emits buffers with absolute system PTS; if we
+                    # write that to the container, players see invalid durations.
+                    record_branch = (
+                        f" enc_tee. ! queue leaky=downstream max-size-buffers=200 ! "
+                        f"h264parse name=rec_h264parse config-interval=1 ! "
+                        f"matroskamux ! "
+                        f"filesink location={self._record_path} sync=false"
+                    )
+                    LOGGER.info("[h15] Recording H264 to %s", self._record_path)
                 sink_parts.append(
                     f"src.src_{i} ! queue leaky=downstream max-size-buffers=3 ! "
                     f"hailoencodebin name=enc config-file-path={encoder_path} ! "
+                    f"tee name=enc_tee "
+                    f"enc_tee. ! queue leaky=downstream max-size-buffers=3 ! "
                     f"h264parse config-interval=-1 ! "
                     f"rtph264pay ! "
                     f"udpsink host={UDP_HOST} port={UDP_PORT} sync=false"
+                    + record_branch
                 )
             elif i == 2:
                 if self.ui_state is not None:
@@ -324,6 +341,49 @@ class Hailo15PipelineApp:
         raw_sink = self.pipeline.get_by_name("raw_sink")
         if raw_sink:
             raw_sink.connect("new-sample", self._on_raw_web_sample)
+
+        # Attach PTS-normalization pad probe to the recording branch
+        if self._record_path:
+            rec_parse = self.pipeline.get_by_name("rec_h264parse")
+            if rec_parse:
+                self._rec_first_pts = None
+                src_pad = rec_parse.get_static_pad("src")
+                src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_record_probe)
+
+    def _on_record_probe(self, pad, info):
+        """Pad probe: rewrite buffer PTS/DTS so the recording starts at 0.
+
+        hailoencodebin emits buffers timestamped with absolute system time
+        and may emit out-of-order buffers (B-frames, config). We track the
+        minimum PTS/DTS seen and subtract it. Drops any buffer that would
+        go negative after subtraction.
+        """
+        buf = info.get_buffer()
+        if buf is None:
+            return Gst.PadProbeReturn.OK
+        pts = buf.pts
+        dts = buf.dts
+        if pts == Gst.CLOCK_TIME_NONE:
+            return Gst.PadProbeReturn.OK
+
+        # Track lowest timestamp seen (handles out-of-order/config buffers)
+        base = self._rec_first_pts
+        if base is None or pts < base:
+            self._rec_first_pts = pts
+            base = pts
+            LOGGER.info("[h15] Recording PTS base updated to %d ns", base)
+
+        # Compute new timestamps; skip if would go negative
+        new_pts = pts - base
+        if new_pts < 0:
+            return Gst.PadProbeReturn.DROP
+        buf.pts = new_pts
+        if dts != Gst.CLOCK_TIME_NONE:
+            new_dts = dts - base
+            if new_dts < 0:
+                return Gst.PadProbeReturn.DROP
+            buf.dts = new_dts
+        return Gst.PadProbeReturn.OK
 
     def _ensure_jpeg_encoder(self, width, height):
         """Create a persistent GStreamer pipeline for NV12→JPEG encoding."""
@@ -637,11 +697,27 @@ class Hailo15PipelineApp:
             self.loop.quit()
 
     def stop(self):
-        """Stop the pipeline and clean up."""
+        """Stop the pipeline and clean up. Sends EOS first if recording so the
+        muxer finalizes; otherwise tears down immediately so the drone thread
+        has full time to land.
+        """
+        if self.pipeline:
+            if self._record_path:
+                # Recording: need EOS for matroskamux to write Duration/Cues
+                LOGGER.info("[h15] Sending EOS, waiting for pipeline to flush...")
+                self.pipeline.send_event(Gst.Event.new_eos())
+                bus = self.pipeline.get_bus()
+                msg = bus.timed_pop_filtered(
+                    3 * Gst.SECOND,
+                    Gst.MessageType.EOS | Gst.MessageType.ERROR
+                )
+                if msg is None:
+                    LOGGER.warning("[h15] EOS not received within 3s — recording may be incomplete")
+                else:
+                    LOGGER.info("[h15] Pipeline flushed cleanly")
+            self.pipeline.set_state(Gst.State.NULL)
         if self._jpeg_enc:
             self._jpeg_enc.set_state(Gst.State.NULL)
-        if self.pipeline:
-            self.pipeline.set_state(Gst.State.NULL)
         if self.loop:
             self.loop.quit()
         if self._configured_model:
@@ -660,7 +736,7 @@ class Hailo15PipelineApp:
 # ---------------------------------------------------------------------------
 
 def create_h15_app(shared_state, target_state=None, eos_reached=None,
-                   ui_state=None, parser=None, **kwargs):
+                   ui_state=None, parser=None, record_path=None, **kwargs):
     """Create a Hailo15 pipeline app.
 
     Provides the same interface as pipeline_adapter.create_app() so
@@ -678,6 +754,7 @@ def create_h15_app(shared_state, target_state=None, eos_reached=None,
         target_state=target_state,
         ui_state=ui_state,
         eos_reached=eos_reached,
+        record_path=record_path,
         options_menu=args,
     )
     return app
