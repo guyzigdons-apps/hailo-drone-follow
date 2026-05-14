@@ -18,7 +18,6 @@ DEFAULT_CONFIG_PATH = os.path.normpath(
 @dataclass
 class ControllerConfig:
     hfov: float = 66.0
-    vfov: float = 41.0
     # --- Yaw (horizontal centering): center_x → yawspeed ---
     kp_yaw: float = 4
     dead_zone_deg: float = 2.0
@@ -169,7 +168,6 @@ class ControllerConfig:
 
         # Framing and target geometry
         group.add_argument("--hfov", type=float, default=defaults.hfov)
-        group.add_argument("--vfov", type=float, default=defaults.vfov)
         group.add_argument("--target-bbox-height", type=float, default=None,
                            help=f"Target bbox height (0-1) for distance control. "
                                 f"Used as the pre-lock default; when a target is locked (manual click or AUTO "
@@ -275,7 +273,6 @@ class ControllerConfig:
 
         return cls(
             hfov=_arg("hfov", default=defaults.hfov),
-            vfov=_arg("vfov", default=defaults.vfov),
             kp_yaw=_arg("kp_yaw", "yaw_gain", default=defaults.kp_yaw),
             target_bbox_height=_arg("target_bbox_height", default=defaults.target_bbox_height),
             kp_distance=_arg("kp_distance", "distance_gain", default=defaults.kp_distance),

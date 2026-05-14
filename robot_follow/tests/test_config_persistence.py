@@ -168,3 +168,10 @@ def test_forward_velocity_deadband_in_web_server_fields():
     """Web UI /config endpoint exposes forward_velocity_deadband."""
     from robot_follow.servers.web_server import _WebHandler
     assert "forward_velocity_deadband" in _WebHandler._CONFIG_FIELDS
+
+
+def test_vfov_field_removed():
+    """CLEAN-03: `vfov` is gone from ControllerConfig (no readers anywhere)."""
+    from dataclasses import fields
+    from robot_follow.follow_api.config import ControllerConfig
+    assert "vfov" not in {f.name for f in fields(ControllerConfig)}
