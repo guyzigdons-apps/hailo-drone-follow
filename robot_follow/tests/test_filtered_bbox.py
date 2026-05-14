@@ -9,7 +9,7 @@ than the raw input across frames with injected jitter.
 
 import numpy as np
 
-from drone_follow.pipeline_adapter.byte_tracker import ByteTrackerAdapter
+from robot_follow.pipeline_adapter.byte_tracker import ByteTrackerAdapter
 
 
 def _det(x, y, w, h, score=0.9, scale=1000.0):

@@ -1,6 +1,6 @@
 # Drone Control Architecture
 
-How `drone-follow` turns a camera stream into drone motion — from a person detection to a MAVLink velocity setpoint — and the parameters that shape every step.
+How `robot-follow` turns a camera stream into drone motion — from a person detection to a MAVLink velocity setpoint — and the parameters that shape every step.
 
 Audience: someone who wants to understand or tune the control loop, not someone onboarding to the codebase generally.
 

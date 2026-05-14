@@ -24,7 +24,7 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from drone_follow.follow_api.state import FollowTargetState
+from robot_follow.follow_api.state import FollowTargetState
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class FollowServerHandler(BaseHTTPRequestHandler):
                 if h is None:
                     return None
                 # Avoid an import cycle: import locally
-                from drone_follow.pipeline_adapter.hailo_drone_detection_manager import (
+                from robot_follow.pipeline_adapter.hailo_drone_detection_manager import (
                     capture_bbox_setpoint_from_height,
                 )
                 return capture_bbox_setpoint_from_height(self.controller_config, h, source="CLICK")

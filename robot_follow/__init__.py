@@ -1,4 +1,4 @@
-"""Drone Follow — visual-servoing pipeline app for Hailo AI processors.
+"""Robot Follow — visual-servoing pipeline app for Hailo AI processors.
 
 Architecture:
     follow_api/         Pure domain logic (types, config, state, controller math)
@@ -6,7 +6,7 @@ Architecture:
     pipeline_adapter/   Hailo/GStreamer pipeline adapter + ByteTracker
     servers/            HTTP servers (follow target API, web UI)
     tools/              Standalone utilities (video bridge)
-    drone_follow_app.py Composition root and CLI entrypoint
+    robot_follow_app.py Composition root and CLI entrypoint
 """
 
 from .follow_api import (

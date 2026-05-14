@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Drone Follow — composition root and CLI entrypoint.
+Robot Follow — composition root and CLI entrypoint.
 
 Wires together follow_api (pure domain logic), drone_api (MAVSDK adapter),
 and pipeline_adapter (Hailo/GStreamer) into a running application.
@@ -9,7 +9,7 @@ The parser is assembled here from each domain's add_*_args() function,
 so no module sees arguments it doesn't own.
 
 Usage:
-    python drone_follow_app.py --input rpi  # live mode with camera + drone
+    python robot_follow_app.py --input rpi  # live mode with camera + drone
 
 Pipeline options (--input, --input-codec, etc.) are passed through to the tiling pipeline.
 """
@@ -27,11 +27,11 @@ import signal
 import subprocess
 import threading
 import time
-from drone_follow.follow_api import ControllerConfig, SharedDetectionState
-from drone_follow.follow_api.state import FollowTargetState
-from drone_follow.drone_api import run_live_drone
-from drone_follow.drone_api.mavsdk_drone import add_drone_args
-from drone_follow.servers import FollowServer, OpenHDBridge
+from robot_follow.follow_api import ControllerConfig, SharedDetectionState
+from robot_follow.follow_api.state import FollowTargetState
+from robot_follow.drone_api import run_live_drone
+from robot_follow.drone_api.mavsdk_drone import add_drone_args
+from robot_follow.servers import FollowServer, OpenHDBridge
 
 LOGGER = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                             "can be toggled mid-run from the web UI / OpenHD.")
     group.add_argument("--record-output", type=str, default=None,
                        help="Path for the recorded .mkv file. Default: "
-                            "drone_follow/recordings/rec_<timestamp>.mkv")
+                            "robot_follow/recordings/rec_<timestamp>.mkv")
     group.add_argument("--record-bitrate", type=int, default=5000,
                        help="x264enc bitrate in kbps for the recording branch (default: 5000)")
 
@@ -165,8 +165,14 @@ def _build_parser() -> argparse.ArgumentParser:
       - app (this file):   UI/server ports
     """
     from hailo_apps.python.core.common.core import get_pipeline_parser
-    from drone_follow.pipeline_adapter import add_tracker_args
+    from robot_follow.pipeline_adapter import add_tracker_args
     parser = get_pipeline_parser()
+
+    # Pin the program name in --help output so the `robot-follow` and
+    # `drone-follow` console-script aliases produce byte-identical
+    # `--help` output (Phase 1 success criterion 2). Without this,
+    # argparse derives prog from sys.argv[0] and the two aliases diverge.
+    parser.prog = "robot-follow"
 
     ControllerConfig.add_args(parser)
     add_drone_args(parser)
@@ -179,7 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ``--tiles-x`` etc. and would clobber any ``set_defaults`` made
     # here). See ``DroneFollowTilingApp._add_tiling_arguments`` in
     # ``hailo_drone_detection_manager.py`` for the override; the values
-    # live in ``drone_follow/pipeline_defaults.py``.
+    # live in ``robot_follow/pipeline_defaults.py``.
 
     # Camera is mounted right-side up: no mirroring needed.
     # The library defines --horizontal-mirror/--vertical-mirror (store_true, default=False).
@@ -230,7 +236,7 @@ def main():
     #
     # The valve gates frames at runtime, so building the branch when no
     # toggle source exists wastes CPU; building it when one does lets
-    # operators flip recording on/off without restarting drone-follow.
+    # operators flip recording on/off without restarting robot-follow.
     record_branch_enabled = (
         ui_pre_args.record
         or ui_pre_args.webui
@@ -239,18 +245,18 @@ def main():
 
     # Always create SharedUIState — the OpenHD bridge needs it for bbox
     # messages even when the web UI is disabled.
-    from drone_follow.servers import SharedUIState
+    from robot_follow.servers import SharedUIState
     ui_state = SharedUIState()
 
     web_server = None
     if ui_pre_args.webui:
-        from drone_follow.servers import WebServer
+        from robot_follow.servers import WebServer
         # Check that the UI has been built
         _ui_build_index = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "ui", "build", "index.html")
         if not os.path.isfile(_ui_build_index):
             LOGGER.error("Web UI has not been built yet.")
-            LOGGER.error("  cd drone_follow/ui")
+            LOGGER.error("  cd robot_follow/ui")
             LOGGER.error("  npm install")
             LOGGER.error("  npm run build")
             raise SystemExit(1)
@@ -285,7 +291,7 @@ def main():
 
     reid_manager = None
     if not reid_pre_args.no_reid and reid_pre_args.reid_model:
-        from drone_follow.pipeline_adapter.reid_manager import ReIDManager
+        from robot_follow.pipeline_adapter.reid_manager import ReIDManager
         reid_manager = ReIDManager(
             hef_path=reid_pre_args.reid_model,
             update_interval=reid_pre_args.update_interval,
@@ -299,10 +305,10 @@ def main():
             dump_embeddings_path=reid_pre_args.reid_dump_embeddings,
         )
 
-    from drone_follow.pipeline_adapter import create_app
+    from robot_follow.pipeline_adapter import create_app
 
     # Pre-parse --tracker to pass to create_app
-    from drone_follow.pipeline_adapter.tracker_factory import TRACKER_CHOICES, DEFAULT_TRACKER
+    from robot_follow.pipeline_adapter.tracker_factory import TRACKER_CHOICES, DEFAULT_TRACKER
     tracker_pre = argparse.ArgumentParser(add_help=False)
     tracker_pre.add_argument("--tracker", default=DEFAULT_TRACKER, choices=TRACKER_CHOICES)
     tracker_pre_args, _ = tracker_pre.parse_known_args()

@@ -19,9 +19,9 @@ from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 from mavsdk.telemetry import FlightMode
 
-from drone_follow.follow_api.types import VelocityCommand
-from drone_follow.follow_api.config import ControllerConfig
-from drone_follow.follow_api.controller import (
+from robot_follow.follow_api.types import VelocityCommand
+from robot_follow.follow_api.config import ControllerConfig
+from robot_follow.follow_api.controller import (
     compute_velocity_command,
 )
 
@@ -383,7 +383,7 @@ async def _telemetry_position_task(drone, telemetry_cache: dict, shutdown: async
 async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict,
                                shutdown: asyncio.Event, ui_state=None) -> None:
     """Background task: log drone telemetry at 1 Hz for flight debugging."""
-    telem_logger = logging.getLogger("drone_follow.telemetry")
+    telem_logger = logging.getLogger("robot_follow.telemetry")
     interval = 1.0
     while not shutdown.is_set():
         await asyncio.sleep(interval)

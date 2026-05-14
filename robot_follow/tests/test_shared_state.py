@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from drone_follow.follow_api import (
+from robot_follow.follow_api import (
     Detection,
     SharedDetectionState,
 )

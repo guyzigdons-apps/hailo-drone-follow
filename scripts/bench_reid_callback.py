@@ -33,8 +33,8 @@ APP_ROOT = HERE.parent
 sys.path.insert(0, str(APP_ROOT))
 
 import hailo
-from drone_follow.pipeline_adapter.reid_manager import ReIDManager
-from drone_follow.pipeline_adapter.reid_worker import ReIDWorker
+from robot_follow.pipeline_adapter.reid_manager import ReIDManager
+from robot_follow.pipeline_adapter.reid_worker import ReIDWorker
 
 
 def synth_frame(width: int, height: int) -> np.ndarray:

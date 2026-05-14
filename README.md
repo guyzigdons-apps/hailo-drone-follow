@@ -1,10 +1,12 @@
-# Drone Follow
+# Robot Follow
 
-AI-powered person-following drone application using Hailo NPU for real-time detection, ByteTracker for multi-object tracking, and MAVSDK for PX4 flight control. Includes ReID (re-identification) to recover a lost target by appearance.
+AI-powered person-following robot application using Hailo NPU for real-time detection, ByteTracker for multi-object tracking, and MAVSDK for PX4 flight control. Includes ReID (re-identification) to recover a lost target by appearance.
 
 Runs on Raspberry Pi 5 + Hailo-8L or on an x86_64 dev machine with a Hailo-8 PCIe card.
 
 For complete setup and deployment instructions with OpenHD, see [SETUP_GUIDE.md](SETUP_GUIDE.md).
+
+> **Note:** As of v1.1 the Python package is `robot_follow` (formerly `drone_follow`) and the primary CLI is `robot-follow`. The `drone-follow` console-script alias is preserved permanently — it maps to the same `main()` entry point so the boot service, `~/Desktop/drone-follow.conf`, and existing field deployments keep working unchanged. Both `robot-follow --help` and `drone-follow --help` produce identical output.
 
 ## Installation
 
@@ -63,14 +65,14 @@ Flags:
 
 ```bash
 source setup_env.sh              # activates ./hailo-apps/venv_hailo_apps, loads .env
-drone-follow --help
+robot-follow --help
 ```
 
 To run the test suite (optional, dev-only — `pytest` is not in the default venv):
 
 ```bash
 pip install pytest
-pytest drone_follow/tests/
+pytest robot_follow/tests/
 ```
 
 ### Step 5: OpenHD radio link (air + ground)
@@ -122,13 +124,13 @@ These remove `/usr/local/bin/openhd`, `/usr/local/bin/openhd_sys_utils`, `/usr/l
 source setup_env.sh
 
 # Dev machine with USB camera + flight controller over serial:
-drone-follow --input usb --serial --webui
+robot-follow --input usb --serial --webui
 
 # RPi with camera + Cube Orange+ over USB serial:
-drone-follow --input rpi --serial --webui
+robot-follow --input rpi --serial --webui
 
 # Simulation (Gazebo camera + PX4 SITL):
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
+robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 
 # Real drone with OpenHD (starts OpenHD air + drone-follow):
 ./scripts/start_air.sh
@@ -160,7 +162,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 | `--no-reid` | off | Disable ReID re-identification |
 | `--reid-timeout` | `20.0` | Seconds to search via ReID before returning to auto mode |
 
-Run `drone-follow --help` for the full list.
+Run `robot-follow --help` for the full list.
 
 ## Web UI
 
@@ -250,7 +252,7 @@ sim/start_sim.sh --bridge --world 2_person_world
 
 # Terminal 2 — Run drone-follow:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
+robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
 
 **Key ports:** `14540/udp` (MAVLink), `5600/udp` (video from Gazebo)
@@ -264,7 +266,7 @@ sim/start_sim.sh --remote <DRONE_APP_IP> --world 2_person_world
 
 # Drone-follow machine:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
+robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
 
 **Simulation configs** in `sim/configs/`: `simulation.json` (yaw-only), `simulation_follow.json` (full follow with reduced speeds).
@@ -276,7 +278,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 For FPV video with detection overlays streamed to an OpenHD ground station:
 
 ```bash
-drone-follow --input shm:///tmp/openhd_raw_video --openhd --webui --serial
+robot-follow --input shm:///tmp/openhd_raw_video --openhd --webui --serial
 ```
 
 ### Real drone with OpenHD (air unit)
@@ -284,7 +286,7 @@ drone-follow --input shm:///tmp/openhd_raw_video --openhd --webui --serial
 The air unit pairs drone-follow with OpenHD wifibroadcast for long-range telemetry/video to a ground station running QOpenHD. `scripts/start_air.sh` launches both side-by-side; the typical CLI is:
 
 ```bash
-drone-follow --input rpi --openhd \
+robot-follow --input rpi --openhd \
     --connection tcpout://127.0.0.1:5760 \
     --tiles-x 1 --tiles-y 1
 ```
@@ -301,10 +303,10 @@ Store controller settings in JSON instead of CLI flags:
 
 ```bash
 # Save current defaults
-drone-follow --save-config my_config.json
+robot-follow --save-config my_config.json
 
 # Run with a config file (CLI flags still override)
-drone-follow --config configs/outdoor_follow.json --input rpi --serial --webui
+robot-follow --config configs/outdoor_follow.json --input rpi --serial --webui
 ```
 
 ### Bundled Presets
@@ -390,13 +392,13 @@ Uninstall: `sudo scripts/boot/uninstall.sh`
 ## Architecture
 
 ```
-drone_follow/
+robot_follow/
   follow_api/          Pure domain logic (no HW deps) — types, config, controller math, shared state
   drone_api/           MAVSDK flight controller adapter — offboard velocity commands, takeoff/landing
   pipeline_adapter/    Hailo/GStreamer pipeline, ByteTracker, ReID manager
   servers/             HTTP/UDP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001), OpenHD parameter bridge (UDP 5510/5511)
   ui/                  React web dashboard
-  drone_follow_app.py  Composition root and CLI entrypoint
+  robot_follow_app.py  Composition root and CLI entrypoint
 reid_analysis/         ReID embedding extraction and gallery matching strategies
 configs/               Real-drone controller presets (outdoor_follow, etc.)
 sim/

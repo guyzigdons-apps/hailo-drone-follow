@@ -73,7 +73,7 @@ ss -tunlp 2>/dev/null | grep -E ":5600|:14540"   # both should be empty
 
 Order:
 1. **Plugin .cpp/.hpp changed?** → `hailo-compile-postprocess install` + `rm -f ~/.cache/gstreamer-1.0/registry.x86_64.bin`. See `../../memory/hailotilecropper_dynamic.md`.
-2. **Web UI files changed?** → `cd drone_follow/ui && nvm use 20 && npm install && npm run build`. See `../../memory/webui_build.md`.
+2. **Web UI files changed?** → `cd robot_follow/ui && nvm use 20 && npm install && npm run build`. See `../../memory/webui_build.md`.
 3. **Just Python changed?** → No rebuild. Just restart `drone-follow`.
 
 ## Don't do

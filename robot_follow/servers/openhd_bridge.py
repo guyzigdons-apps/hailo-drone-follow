@@ -279,7 +279,7 @@ class OpenHDBridge:
         """
         if not value:
             return
-        from drone_follow.follow_api.config import DEFAULT_CONFIG_PATH
+        from robot_follow.follow_api.config import DEFAULT_CONFIG_PATH
         try:
             self._config.save_json(DEFAULT_CONFIG_PATH)
             LOGGER.info("[openhd_bridge] Config saved → %s", DEFAULT_CONFIG_PATH)
@@ -291,7 +291,7 @@ class OpenHDBridge:
         """Momentary trigger — on value=1, live-reload ControllerConfig from disk."""
         if not value:
             return
-        from drone_follow.follow_api.config import DEFAULT_CONFIG_PATH
+        from robot_follow.follow_api.config import DEFAULT_CONFIG_PATH
         try:
             changed = self._config.load_from_file(DEFAULT_CONFIG_PATH)
             LOGGER.info("[openhd_bridge] Config loaded ← %s (%d changed)",

@@ -16,8 +16,8 @@ from typing import Optional
 import hailo
 import numpy as np
 
-from drone_follow.follow_api.types import Detection
-from drone_follow.perf_tracker import PerfTracker
+from robot_follow.follow_api.types import Detection
+from robot_follow.perf_tracker import PerfTracker
 
 from .tracker import MetricsTracker
 from .tracker_factory import create_tracker
@@ -780,7 +780,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             ``--tiles-x N`` to override per-run.
             """
             super()._add_tiling_arguments(parser)
-            from drone_follow.pipeline_defaults import TILE_DEFAULTS
+            from robot_follow.pipeline_defaults import TILE_DEFAULTS
             parser.set_defaults(**TILE_DEFAULTS)
 
         def __init__(self, app_callback, user_data, parser=None, eos_reached=None,

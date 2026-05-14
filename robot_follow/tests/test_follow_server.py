@@ -8,8 +8,8 @@ from http.client import HTTPConnection
 
 import pytest
 
-from drone_follow.follow_api.state import FollowTargetState, SharedDetectionState
-from drone_follow.servers import FollowServer
+from robot_follow.follow_api.state import FollowTargetState, SharedDetectionState
+from robot_follow.servers import FollowServer
 
 
 def _find_free_port():

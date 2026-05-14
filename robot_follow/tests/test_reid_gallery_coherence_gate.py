@@ -22,7 +22,7 @@ breaks too.
 
 import numpy as np
 
-from drone_follow.tests._reid_gate import REID_PAIR_MEAN, REID_PAIR_MIN
+from robot_follow.tests._reid_gate import REID_PAIR_MEAN, REID_PAIR_MIN
 
 
 def _normalize(x):

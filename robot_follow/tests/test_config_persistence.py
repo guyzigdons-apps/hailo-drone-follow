@@ -15,7 +15,7 @@ import tempfile
 
 import pytest
 
-from drone_follow.follow_api.config import ControllerConfig, DEFAULT_CONFIG_PATH
+from robot_follow.follow_api.config import ControllerConfig, DEFAULT_CONFIG_PATH
 
 
 def test_default_config_path_in_repo_root():
@@ -130,13 +130,13 @@ def test_kp_alt_hold_in_df_params():
 
 def test_kp_alt_hold_in_openhd_bridge_params():
     """OpenHD MAVLink bridge exposes kp_alt_hold so QOpenHD can set it."""
-    from drone_follow.servers.openhd_bridge import _CONFIG_PARAMS
+    from robot_follow.servers.openhd_bridge import _CONFIG_PARAMS
     assert "kp_alt_hold" in _CONFIG_PARAMS
 
 
 def test_kp_alt_hold_in_web_server_fields():
     """Web UI /config endpoint exposes kp_alt_hold."""
-    from drone_follow.servers.web_server import _WebHandler
+    from robot_follow.servers.web_server import _WebHandler
     assert "kp_alt_hold" in _WebHandler._CONFIG_FIELDS
 
 
@@ -160,11 +160,11 @@ def test_forward_velocity_deadband_in_df_params():
 
 def test_forward_velocity_deadband_in_openhd_bridge_params():
     """OpenHD MAVLink bridge exposes forward_velocity_deadband so QOpenHD can set it."""
-    from drone_follow.servers.openhd_bridge import _CONFIG_PARAMS
+    from robot_follow.servers.openhd_bridge import _CONFIG_PARAMS
     assert "forward_velocity_deadband" in _CONFIG_PARAMS
 
 
 def test_forward_velocity_deadband_in_web_server_fields():
     """Web UI /config endpoint exposes forward_velocity_deadband."""
-    from drone_follow.servers.web_server import _WebHandler
+    from robot_follow.servers.web_server import _WebHandler
     assert "forward_velocity_deadband" in _WebHandler._CONFIG_FIELDS

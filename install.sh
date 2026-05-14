@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# drone-follow standalone installer.
+# robot-follow standalone installer.
 #
 # Bootstraps hailo-apps-infra as a git submodule at ./hailo-apps, runs the
 # parent installer to lay down the venv + system bits, then installs the
-# drone-follow Python package editable into that venv, downloads ReID HEFs,
+# robot-follow Python package editable into that venv, downloads ReID HEFs,
 # and builds the React UI.
+#
+# Legacy note: the `drone-follow` console-script alias is preserved permanently
+# (see pyproject.toml [project.scripts]) so the boot service unit, the
+# ~/Desktop/drone-follow.conf file, and existing deployed units keep working
+# unchanged. `pip uninstall drone-follow -y` runs below to clear stale metadata
+# from the legacy `drone-follow` distribution name on already-deployed units.
 #
 # Idempotent: re-running picks up missing steps and skips ones already done.
 #
@@ -85,6 +91,13 @@ python -c "import hailo_apps" >/dev/null 2>&1 || {
 }
 
 if ! $SKIP_PYTHON; then
+  # Idempotent: remove any prior installation of the legacy 'drone-follow'
+  # distribution so pip metadata + the old `drone-follow` console-script shim
+  # don't linger after the v1.1 rename. No-op on fresh installs. Runs as the
+  # invoking user (we're inside the activated venv from above).
+  echo "==> Removing any prior 'drone-follow' distribution (legacy name)"
+  pip uninstall drone-follow -y >/dev/null 2>&1 || true
+
   echo "==> [3/5] pip install -e $SCRIPT_DIR"
   pip install --upgrade pip
   pip install -e "$SCRIPT_DIR"
@@ -117,7 +130,7 @@ fi
 if ! $SKIP_UI; then
   echo "==> [5/5] React UI"
   if command -v npm >/dev/null 2>&1; then
-    pushd "$SCRIPT_DIR/drone_follow/ui" >/dev/null
+    pushd "$SCRIPT_DIR/robot_follow/ui" >/dev/null
     if [[ ! -f build/index.html ]] || [[ src/App.jsx -nt build/index.html ]]; then
       npm install
       npm run build
@@ -131,6 +144,6 @@ if ! $SKIP_UI; then
 fi
 
 echo
-echo "==> drone-follow install done. Next:"
+echo "==> robot-follow install done. Next:"
 echo "    source setup_env.sh"
-echo "    drone-follow --help"
+echo "    robot-follow --help    # 'drone-follow --help' (alias) also works"

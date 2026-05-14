@@ -422,7 +422,7 @@ class _WebHandler(BaseHTTPRequestHandler):
         if cfg is None:
             self.send_error(404, "No controller config available")
             return
-        from drone_follow.follow_api.config import DEFAULT_CONFIG_PATH
+        from robot_follow.follow_api.config import DEFAULT_CONFIG_PATH
         try:
             cfg.save_json(DEFAULT_CONFIG_PATH)
         except OSError as e:
@@ -436,7 +436,7 @@ class _WebHandler(BaseHTTPRequestHandler):
         if cfg is None:
             self.send_error(404, "No controller config available")
             return
-        from drone_follow.follow_api.config import DEFAULT_CONFIG_PATH
+        from robot_follow.follow_api.config import DEFAULT_CONFIG_PATH
         try:
             changed = cfg.load_from_file(DEFAULT_CONFIG_PATH)
         except FileNotFoundError:

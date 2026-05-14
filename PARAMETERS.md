@@ -181,7 +181,7 @@ There are **three related JSON files** to keep straight:
 |---|---|---|---|---|
 | `df_params.json` | **Schema** — field defs, labels, groups, slider min/max/step, initial defaults. Read by OpenHD C++ at startup to register MAVLink parameters and by QOpenHD to render the slider tab. | Repo copy (`~/hailo-drone-follow/df_params.json`) and **deployed** copy (`/usr/local/share/openhd/df_params.json`) on both air and ground. | ✅ committed | When a developer adds/edits a param, followed by manual `sudo cp` + restart. |
 | `df_config.example.json` | **Starter template** — a dump of `ControllerConfig()` defaults. Committed so newcomers can bootstrap without running the app. Never read at runtime; exists purely to be copied. | Repo root: `~/hailo-drone-follow/df_config.example.json`. | ✅ committed | When `ControllerConfig` defaults change and a maintainer regenerates it (see below). |
-| `df_config.json` | **Live tuned values** — what `start_air.sh` auto-loads and what Save writes. Per-operator tuning. | **Air unit only**, at the repo root. | ❌ `.gitignore`-d | Each time the operator presses Save (web UI / QOpenHD) or runs `drone-follow --save-config`. |
+| `df_config.json` | **Live tuned values** — what `start_air.sh` auto-loads and what Save writes. Per-operator tuning. | **Air unit only**, at the repo root. | ❌ `.gitignore`-d | Each time the operator presses Save (web UI / QOpenHD) or runs `robot-follow --save-config`. |
 
 The ground station has **no persistent store** for DF_* values. All persistence happens on the air unit.
 
@@ -201,7 +201,7 @@ When `ControllerConfig` gets new fields or changed defaults, regenerate the temp
 
 ```bash
 source setup_env.sh
-python -c 'from drone_follow.follow_api.config import ControllerConfig; \
+python -c 'from robot_follow.follow_api.config import ControllerConfig; \
            ControllerConfig().save_json("df_config.example.json")'
 git add df_config.example.json && git commit -m "chore: regen df_config.example.json"
 ```
@@ -222,7 +222,7 @@ git add df_config.example.json && git commit -m "chore: regen df_config.example.
 
 ### Flow — CLI boot
 
-`drone-follow --config ~/hailo-drone-follow/df_config.json --input rpi --openhd ...`
+`robot-follow --config ~/hailo-drone-follow/df_config.json --input rpi --openhd ...`
 - Loads the saved file as the pre-CLI defaults.
 - CLI flags still override. No QOpenHD / UI action needed for the initial values to take effect on startup.
 

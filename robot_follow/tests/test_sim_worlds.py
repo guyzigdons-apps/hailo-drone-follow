@@ -25,7 +25,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SIM_SCRIPT = REPO_ROOT / "sim" / "start_sim.sh"
 SETUP_ENV = REPO_ROOT / "setup_env.sh"
-RECORDINGS_DIR = REPO_ROOT / "drone_follow" / "recordings"
+RECORDINGS_DIR = REPO_ROOT / "robot_follow" / "recordings"
 
 WARMUP_S = 3
 RUN_S = 60
@@ -169,8 +169,8 @@ def sim_run(tmp_path, request):
                 f"sim exited early (code={sim.returncode}); see {sim_log_path}"
             )
 
-        # Tile / multi-scale shape comes from drone-follow's own defaults
-        # (drone_follow/pipeline_defaults.py). Tests can still override
+        # Tile / multi-scale shape comes from robot-follow's own defaults
+        # (robot_follow/pipeline_defaults.py). Tests can still override
         # by passing --tiles-x etc. via extra_args (CLI beats default).
         extra = (" " + " ".join(extra_args)) if extra_args else ""
         reid_flag = "" if reid else " --no-reid"
@@ -278,7 +278,7 @@ MIN_FRAMES_WITH_DETECTION = 120
 # Pairwise cosine-similarity gate for the ReID gallery dump lives in
 # _reid_gate.py so test_reid_gallery_coherence_gate.py reads the same
 # thresholds and can prove the gate catches a swapped gallery.
-from drone_follow.tests._reid_gate import REID_PAIR_MEAN, REID_PAIR_MIN
+from robot_follow.tests._reid_gate import REID_PAIR_MEAN, REID_PAIR_MIN
 
 
 # ---------------------------------------------------------------------------
@@ -289,11 +289,11 @@ def test_person_in_front_holds_one_id(sim_run):
     """Static single person facing the camera — one ByteTracker ID expected."""
     # Tile shape (3x2 + 1x1 multi-scale) comes from sim_run's TILE_FLAGS
     # default — same shape that ``scripts/start_air.sh`` uses in
-    # production. Source: ``drone_follow/pipeline_defaults.py``.
+    # production. Source: ``robot_follow/pipeline_defaults.py``.
     log = _read_jsonl(sim_run("person_in_front"))
     s = _summarize("person_in_front", log)
 
-    assert s["n"] > 0, "no log lines written — drone-follow likely never started"
+    assert s["n"] > 0, "no log lines written — robot-follow likely never started"
     assert s["n_det"] > MIN_FRAMES_WITH_DETECTION, (
         f"only {s['n_det']}/{s['n']} frames had detections "
         f"— sim or video bridge probably failed to feed frames"

@@ -3,7 +3,7 @@
 import inspect
 from dataclasses import fields
 
-from drone_follow.follow_api import VelocityCommand
+from robot_follow.follow_api import VelocityCommand
 
 
 def test_velocity_command_has_three_fields():

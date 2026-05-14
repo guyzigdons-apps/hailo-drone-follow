@@ -5,12 +5,12 @@ import time
 
 import pytest
 
-from drone_follow.follow_api import (
+from robot_follow.follow_api import (
     ControllerConfig,
     Detection,
     VelocityCommand,
 )
-from drone_follow.drone_api import VelocityCommandAPI
+from robot_follow.drone_api import VelocityCommandAPI
 
 
 def _det(cx=0.5, cy=0.5, bh=0.3):

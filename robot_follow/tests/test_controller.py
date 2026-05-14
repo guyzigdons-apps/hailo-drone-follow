@@ -5,12 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from drone_follow.follow_api import (
+from robot_follow.follow_api import (
     Detection,
     ControllerConfig,
     compute_velocity_command,
 )
-from drone_follow.drone_api import VelocityCommandAPI
+from robot_follow.drone_api import VelocityCommandAPI
 
 
 def _det(cx=0.5, cy=0.5, bh=0.3):
@@ -208,7 +208,7 @@ class TestForwardLowPass:
             smooth_forward=True, smooth_yaw=False, smooth_down=False,
         )
         api = VelocityCommandAPI(drone=None, config=cfg)
-        from drone_follow.follow_api import VelocityCommand
+        from robot_follow.follow_api import VelocityCommand
         # Step from 0 → 1.0 m/s; after one send, output should be alpha * step = 0.07
         first = asyncio.run(api.send(VelocityCommand(1.0, 0.0, 0.0)))
         assert first.forward_m_s == pytest.approx(0.07, abs=1e-6)
@@ -225,7 +225,7 @@ class TestForwardLowPass:
             smooth_forward=True, smooth_yaw=False, smooth_down=False,
         )
         api = VelocityCommandAPI(drone=None, config=cfg)
-        from drone_follow.follow_api import VelocityCommand
+        from robot_follow.follow_api import VelocityCommand
         # Settle at +1.0
         for _ in range(100):
             asyncio.run(api.send(VelocityCommand(1.0, 0.0, 0.0)))

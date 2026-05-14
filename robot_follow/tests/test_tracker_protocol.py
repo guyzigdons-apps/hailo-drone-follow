@@ -4,9 +4,9 @@ import inspect
 
 import pytest
 
-from drone_follow.pipeline_adapter.byte_tracker import ByteTrackerAdapter
-from drone_follow.pipeline_adapter.fast_tracker import FastTrackerAdapter
-from drone_follow.pipeline_adapter.tracker import MetricsTracker
+from robot_follow.pipeline_adapter.byte_tracker import ByteTrackerAdapter
+from robot_follow.pipeline_adapter.fast_tracker import FastTrackerAdapter
+from robot_follow.pipeline_adapter.tracker import MetricsTracker
 
 
 @pytest.mark.parametrize("cls", [ByteTrackerAdapter, FastTrackerAdapter, MetricsTracker])

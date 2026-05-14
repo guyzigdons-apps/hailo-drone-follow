@@ -9,9 +9,9 @@ type: project
 When the user reports "tracking lost target", "wrong person locked", or "ReID misbehaving" — these are the first places to look.
 
 ## Where the per-frame logic lives
-- `drone_follow/pipeline_adapter/hailo_drone_detection_manager.py` — the user_callback. Drives ByteTracker, ReID gallery decisions, raw-detection fallback, AUTO/LOCKED/IDLE state machine.
-- `drone_follow/pipeline_adapter/vision_branches.py` — output-stage assembly (display / record / openhd / webui) AND a `highlight_target` pad probe that mutates the ROI on the local-display branch.
-- `drone_follow/pipeline_adapter/reid_manager.py` — gallery, drift gate, reacquire.
+- `robot_follow/pipeline_adapter/hailo_drone_detection_manager.py` — the user_callback. Drives ByteTracker, ReID gallery decisions, raw-detection fallback, AUTO/LOCKED/IDLE state machine.
+- `robot_follow/pipeline_adapter/vision_branches.py` — output-stage assembly (display / record / openhd / webui) AND a `highlight_target` pad probe that mutates the ROI on the local-display branch.
+- `robot_follow/pipeline_adapter/reid_manager.py` — gallery, drift gate, reacquire.
 - Algorithm doc: `docs/tracking-reid-algorithm.md` (full per-frame flow).
 
 ## Fragile patterns to audit on changes

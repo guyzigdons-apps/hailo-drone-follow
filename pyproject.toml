@@ -1,7 +1,7 @@
 [project]
-name = "drone-follow"
-version = "0.1.0"
-description = "Autonomous drone-follow using Hailo AI tiling detection"
+name = "robot-follow"
+version = "1.1.0.dev0"
+description = "Autonomous robot-follow using Hailo AI tiling detection (drone + rover)"
 requires-python = ">=3.10"
 dependencies = [
     "mavsdk",
@@ -20,8 +20,10 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["drone_follow*", "reid_analysis*"]
+include = ["robot_follow*", "reid_analysis*"]
 exclude = ["configs", "configs.*"]
 
 [project.scripts]
-drone-follow = "drone_follow.drone_follow_app:main"
+robot-follow = "robot_follow.robot_follow_app:main"
+# alias for boot service + muscle memory (preserved permanently; see RENAME-02)
+drone-follow = "robot_follow.robot_follow_app:main"

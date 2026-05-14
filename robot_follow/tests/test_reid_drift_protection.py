@@ -12,7 +12,7 @@ exercise the full decision logic without Hailo NPU calls.
 import numpy as np
 import pytest
 
-from drone_follow.pipeline_adapter.reid_manager import (
+from robot_follow.pipeline_adapter.reid_manager import (
     ACTION_ADDED,
     ACTION_BOOTSTRAP,
     ACTION_NOOP,

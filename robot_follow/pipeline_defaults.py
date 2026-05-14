@@ -21,7 +21,7 @@ Note: ``--multi-scale`` is a ``store_true`` action upstream, so there is
 no ``--no-multi-scale`` CLI escape hatch. If you need to disable
 multi-scale, set ``multi_scale=False`` here and rerun.
 
-Separation from :class:`drone_follow.follow_api.config.ControllerConfig`:
+Separation from :class:`robot_follow.follow_api.config.ControllerConfig`:
 that owns *follow-controller* tuning (gains, dead-zones, smoothing),
 which is loaded from JSON at runtime; this module owns
 *pipeline-shape* flags, which are CLI-only and never reload.

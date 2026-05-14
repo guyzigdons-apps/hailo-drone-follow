@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from drone_follow.follow_api.state import FollowTargetState
+from robot_follow.follow_api.state import FollowTargetState
 
 
 class TestFollowTargetState:
