@@ -64,9 +64,6 @@ _CONFIG_PARAMS = {
     "smooth_down":              ("DF_SMTH_DN",    bool),
 }
 
-# Fields where value 0 maps to Python None
-_NULLABLE_FIELDS = set()
-
 # Special params for follow target control (not in ControllerConfig)
 _FOLLOW_ID_PARAM = "follow_id"
 _ACTIVE_ID_PARAM = "active_id"
@@ -307,9 +304,7 @@ class OpenHDBridge:
         _, py_type = _CONFIG_PARAMS[param_name]
 
         # Convert to Python type
-        if param_name in _NULLABLE_FIELDS and value == 0:
-            py_value = None
-        elif py_type is bool:
+        if py_type is bool:
             py_value = bool(int(value))
         elif py_type is float:
             py_value = float(value)
@@ -356,9 +351,7 @@ class OpenHDBridge:
         params = {}
         for param_name, (_, py_type) in _CONFIG_PARAMS.items():
             py_value = getattr(self._config, param_name, None)
-            if param_name in _NULLABLE_FIELDS and py_value is None:
-                params[param_name] = 0.0
-            elif py_type is bool:
+            if py_type is bool:
                 params[param_name] = int(py_value) if py_value is not None else 0
             elif py_type is float:
                 params[param_name] = float(py_value) if py_value is not None else 0.0

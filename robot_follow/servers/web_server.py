@@ -322,7 +322,6 @@ class _WebHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, "Invalid JSON")
             return
-        _NULLABLE_FIELDS = set()
         changed_keys = {}
         for key, value in payload.items():
             if key not in self._CONFIG_FIELDS:
@@ -330,10 +329,7 @@ class _WebHandler(BaseHTTPRequestHandler):
             expected = self._CONFIG_FIELDS[key]
             try:
                 changed_keys[key] = getattr(cfg, key)
-                if key in _NULLABLE_FIELDS and (value is None or value == 0):
-                    setattr(cfg, key, None)
-                else:
-                    setattr(cfg, key, expected(value))
+                setattr(cfg, key, expected(value))
             except (TypeError, ValueError):
                 changed_keys.pop(key, None)
                 continue
