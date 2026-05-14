@@ -12,9 +12,9 @@ Package rename `drone_follow` → `robot_follow`. Mechanical, atomic. `drone-fol
 
 - [x] **RENAME-01**: Package directory `drone_follow/` renamed to `robot_follow/`; all internal imports updated to `from robot_follow.*`.
 - [x] **RENAME-02**: `pyproject.toml` package name is `robot_follow`; console scripts: `robot-follow` (primary) and `drone-follow` (alias pointing at same `main()`).
-- [ ] **RENAME-03**: `setup_env.sh`, `install.sh`, and `scripts/start_air.sh` updated to reference the new package path; existing functionality preserved.
-- [ ] **RENAME-04**: `drone-follow-boot.service` systemd unit + `~/Desktop/drone-follow.conf` config name preserved (so existing field deployments keep working); only the underlying binary path changes.
-- [ ] **RENAME-05**: README, CLAUDE.md, TROUBLESHOOTING.md, `docs/*.md`, and `.claude/memory/*.md` updated to reflect the rename (drone-follow examples still valid via the alias).
+- [x] **RENAME-03**: `setup_env.sh`, `install.sh`, and `scripts/start_air.sh` updated to reference the new package path; existing functionality preserved.
+- [x] **RENAME-04**: `drone-follow-boot.service` systemd unit + `~/Desktop/drone-follow.conf` config name preserved (so existing field deployments keep working); only the underlying binary path changes.
+- [x] **RENAME-05**: README, CLAUDE.md, TROUBLESHOOTING.md, `docs/*.md`, and `.claude/memory/*.md` updated to reflect the rename (drone-follow examples still valid via the alias).
 
 ### Cleanup
 
@@ -145,9 +145,9 @@ Tracked but not in current roadmap. All require physical hardware to exercise.
 |-------------|-------|--------|
 | RENAME-01 | Phase 1 | Complete |
 | RENAME-02 | Phase 1 | Complete |
-| RENAME-03 | Phase 1 | Pending |
-| RENAME-04 | Phase 1 | Pending |
-| RENAME-05 | Phase 1 | Pending |
+| RENAME-03 | Phase 1 | Complete |
+| RENAME-04 | Phase 1 | Complete |
+| RENAME-05 | Phase 1 | Complete |
 | CLEAN-01 | Phase 2 | Pending |
 | CLEAN-02 | Phase 2 | Pending |
 | CLEAN-03 | Phase 2 | Pending |

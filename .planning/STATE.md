@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-05-14T14:07:25.008Z"
-last_activity: "2026-05-14 — 01-01 executed: forward-compatible smoke test landed (commit 0869454)."
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-05-14T15:26:07.021Z"
+last_activity: "2026-05-14 — 01-02 executed: atomic rename landed (commit 5850558); 77 files renamed/modified."
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 3
-  completed_plans: 1
-  percent: 33
+  completed_plans: 2
+  percent: 67
 ---
 
 # Project State
@@ -27,28 +27,33 @@ See: `.planning/PROJECT.md` (updated 2026-05-12)
 ## Current Position
 
 Phase: 1 of 6 (Rename)
-Plan: 1 of 3 complete (Wave 0 — smoke test gate landed)
-Current Plan: 2
+Plan: 2 of 3 complete (Wave 1 — atomic rename landed)
+Current Plan: 3
 Total Plans in Phase: 3
 Status: In progress
-Last activity: 2026-05-14 — 01-01 executed: forward-compatible smoke test landed (commit 0869454).
+Last activity: 2026-05-14 — 01-02 executed: atomic rename landed (commit 5850558); 77 files renamed/modified.
 
-Progress: [███░░░░░░░] 33%
+Progress: [███████░░░] 67%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 1 min
-- Total execution time: 0 h
+- Total plans completed: 2
+- Average duration: 37 min
+- Total execution time: 74 min (1.2 h)
 
 **By Phase:**
 
-| Phase     | Plans | Total | Avg/Plan |
-|-----------|-------|-------|----------|
-| 01-rename | 1     | 1 min | 1 min    |
+| Phase     | Plans | Total  | Avg/Plan |
+|-----------|-------|--------|----------|
+| 01-rename | 2     | 74 min | 37 min   |
 
 *Updated after each plan completion*
+
+| Plan record         | Duration | Tasks    | Files     |
+|---------------------|----------|----------|-----------|
+| Phase 01-rename P01 | 1 min    | 1 task   | 1 file    |
+| Phase 01-rename P02 | 73 min   | 3 tasks  | 77 files  |
 
 ## Accumulated Context
 
@@ -66,6 +71,12 @@ Progress: [███░░░░░░░] 33%
 - **Skip-guards land in 01-01 and get stripped in 01-02.** A single forward-compatible test file (`drone_follow/tests/test_install_smoke.py`) is mutated across two commits — Wave 0 adds `_skip_if_pre_rename()` guards, Wave 1 strips them in the same commit as the dir rename. Avoids the duplicate-then-delete sprawl of a parallel "renamed" test file.
 - **`drone-follow` console-script alias is always-on (no skip-guard).** Same `drone-follow --help` contract pre- and post-rename — pre-rename it's the real script, post-rename it's a pyproject.toml alias entry point. `scripts/start_air.sh`, the boot service, and user muscle memory all invoke `drone-follow`, so a skip-guard window would be a regression risk.
 
+### Phase 1 decisions (2026-05-14, 01-02 execute)
+
+- **Atomic single-commit rename landed as `5850558`.** Per CONTEXT-locked decision: dir rename + 48 imports + pyproject + install.sh + docs + skip-guard strip + parser.prog pin all in ONE commit (`refactor(01-02): rename drone_follow -> robot_follow`). Every commit on `feature/rover-support` stays buildable; `git bisect` survives every intermediate state. 77 files renamed/modified, +232/-241 lines.
+- **Pin `parser.prog="robot-follow"` to make --help byte-identical across aliases.** Auto-fix during Task 3: argparse derives `prog` from `sys.argv[0]`, so `robot-follow --help` and `drone-follow --help` differed by their `usage:` line. Pinning `prog` in `_build_parser()` immediately after `get_pipeline_parser()` returns guarantees byte-identical output regardless of invocation name. Required for Phase 1 success criterion 2.
+- **Console-script alias semantics confirmed.** Both `robot-follow` and `drone-follow` declared in `pyproject.toml [project.scripts]` mapping to `robot_follow.robot_follow_app:main`. After `pip install -e .`, both shims embed identical `from robot_follow.robot_follow_app import main`. With parser.prog pinned, runtime behavior is indistinguishable — the alias is a pure entry-point rename, not a separate code path.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -77,6 +88,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T14:07:25.006Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-05-14T15:25:23.932Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
