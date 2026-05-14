@@ -38,7 +38,10 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   2. `drone-follow --help` and `robot-follow --help` produce identical output (same `main()` entry point).
   3. `scripts/start_air.sh` on a fresh checkout runs without path errors; boot service unit file is unchanged on disk.
   4. All documentation examples using `drone-follow` still work via the alias; no internal import of `drone_follow` remains in the source tree.
-**Plans**: TBD
+**Plans**: 3 plans
+  - [ ] 01-01-PLAN.md — Wave 0: rewrite test_install_smoke.py as forward-compatible Phase 1 gate
+  - [ ] 01-02-PLAN.md — Wave 1: atomic rename commit (git mv + sed + pyproject + docs + reinstall + verify)
+  - [ ] 01-03-PLAN.md — Wave 2: manual-only verifications (install.sh re-run, boot service on disk)
 
 ### Phase 2: Cleanup
 **Goal**: Dead code is deleted, duplications are merged, hot-path races are fixed; codebase is clean before structural changes.
@@ -106,7 +109,7 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 1. Rename | v1.1 | 0/TBD | Not started | - |
+| 1. Rename | v1.1 | 0/3 | Not started | - |
 | 2. Cleanup | v1.1 | 0/TBD | Not started | - |
 | 3. Abstraction | v1.1 | 0/TBD | Not started | - |
 | 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
