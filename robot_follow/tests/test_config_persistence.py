@@ -175,3 +175,25 @@ def test_vfov_field_removed():
     from dataclasses import fields
     from robot_follow.follow_api.config import ControllerConfig
     assert "vfov" not in {f.name for f in fields(ControllerConfig)}
+
+
+def test_tunable_fields_source_of_truth():
+    """CLEAN-14: ControllerConfig.tunable_fields() is the single schema source.
+
+    Replaces the historic web_server._CONFIG_FIELDS and
+    openhd_bridge._CONFIG_PARAMS dicts. Every entry must be a TunableField
+    with a Python type; mavlink_id may be None (web-UI-only) or a
+    <=16 char string.
+    """
+    from robot_follow.follow_api.config import ControllerConfig, TunableField
+    tf = ControllerConfig.tunable_fields()
+    assert isinstance(tf, dict)
+    assert len(tf) >= 24, f"expected at least 24 tunable fields, got {len(tf)}"
+    for k, v in tf.items():
+        assert isinstance(v, TunableField), f"{k} schema is not TunableField: {v!r}"
+        assert isinstance(v.py_type, type), f"{k} py_type is not a type"
+        assert v.mavlink_id is None or (
+            isinstance(v.mavlink_id, str) and len(v.mavlink_id) <= 16
+        ), f"{k} mavlink_id invalid: {v.mavlink_id!r}"
+        # Every tunable field must be an actual attribute on the dataclass.
+        assert hasattr(ControllerConfig(), k), f"{k} not a real ControllerConfig field"

@@ -4,6 +4,21 @@ import argparse
 import json
 import os
 from dataclasses import dataclass, fields, asdict
+from typing import NamedTuple, Optional
+
+
+class TunableField(NamedTuple):
+    """Schema entry for runtime-mutable ControllerConfig fields.
+
+    py_type: Python type used to coerce inbound values (web_server JSON or
+        OpenHD MAVLink params).
+    mavlink_id: short OpenHD param ID (<= 16 chars); None means web-UI-only
+        (no MAVLink exposure). Extending the OpenHD MAVLink schema requires
+        a C++ patch on the OpenHD side (see OpenHD/HAILO_INTEGRATION.md) —
+        deferred to v1.2.
+    """
+    py_type: type
+    mavlink_id: Optional[str]
 
 # Default path for live save/load from the web UI and QOpenHD triggers.
 # Lives at the repo root next to the schema `df_params.json` so the pair is
@@ -102,6 +117,60 @@ class ControllerConfig:
             raise ValueError(
                 f"target_altitude ({self.target_altitude}) must be >= min_altitude ({self.min_altitude})"
             )
+
+    # ── Tunable-field schema (single source of truth) ───────────────
+
+    @classmethod
+    def tunable_fields(cls) -> "dict[str, TunableField]":
+        """Single source of truth for runtime-mutable controller fields.
+
+        web_server reads `.py_type` for coercion of inbound JSON payloads;
+        openhd_bridge reads both `.py_type` and `.mavlink_id`, skipping
+        entries where `mavlink_id is None`.
+
+        Web-UI-only fields (currently `top_margin_safety`,
+        `bottom_margin_safety`) have `mavlink_id=None` and are NOT exposed
+        to OpenHD — extending the OpenHD MAVLink schema would require a
+        C++ patch on the OpenHD side (see OpenHD/HAILO_INTEGRATION.md),
+        deferred to v1.2.
+
+        Replaces the historic `_CONFIG_FIELDS` (web_server) and
+        `_CONFIG_PARAMS` (openhd_bridge) dicts, which had drifted apart
+        by 2 keys.
+        """
+        return {
+            # Entries with MAVLink IDs (exposed to both web UI and OpenHD).
+            # IDs and types copied verbatim from the historic
+            # openhd_bridge._CONFIG_PARAMS dict.
+            "kp_yaw":                    TunableField(float, "DF_KP_YAW"),
+            "max_forward":               TunableField(float, "DF_MAX_FWD"),
+            "max_backward":              TunableField(float, "DF_MAX_BACK"),
+            "max_forward_accel":         TunableField(float, "DF_MAX_ACC"),
+            "dead_zone_deg":             TunableField(float, "DF_DZ_YAW"),
+            "kp_distance":               TunableField(float, "DF_KP_DIST"),
+            "kp_distance_back":          TunableField(float, "DF_KP_DIST_B"),
+            "target_bbox_height":        TunableField(float, "DF_TGT_BH"),
+            "dead_zone_bbox_percent":    TunableField(float, "DF_DZ_BH_PCT"),
+            "max_climb_speed":           TunableField(float, "DF_MAX_CLM"),
+            "max_yawspeed":              TunableField(float, "DF_MAX_YAW"),
+            "kp_alt_hold":               TunableField(float, "DF_KP_ALT_H"),
+            "min_altitude":              TunableField(float, "DF_MIN_ALT"),
+            "max_altitude":              TunableField(float, "DF_MAX_ALT"),
+            "yaw_alpha":                 TunableField(float, "DF_YAW_ALPHA"),
+            "forward_alpha":             TunableField(float, "DF_FWD_ALPHA"),
+            "forward_velocity_deadband": TunableField(float, "DF_FWD_DB"),
+            "target_altitude":           TunableField(float, "DF_TGT_ALT"),
+            "yaw_only":                  TunableField(bool,  "DF_YAW_ONLY"),
+            "auto_select":               TunableField(bool,  "DF_AUTO_SEL"),
+            "smooth_yaw":                TunableField(bool,  "DF_SMTH_YAW"),
+            "smooth_forward":            TunableField(bool,  "DF_SMTH_FWD"),
+            "down_alpha":                TunableField(float, "DF_DN_ALPHA"),
+            "smooth_down":               TunableField(bool,  "DF_SMTH_DN"),
+            # Web-UI-only entries (mavlink_id=None — openhd_bridge skips these).
+            # Adding MAVLink IDs requires an OpenHD C++ patch; deferred to v1.2.
+            "top_margin_safety":         TunableField(float, None),
+            "bottom_margin_safety":      TunableField(float, None),
+        }
 
     # ── JSON serialization ──────────────────────────────────────────
 
