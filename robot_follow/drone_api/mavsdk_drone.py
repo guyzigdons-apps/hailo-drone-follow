@@ -644,7 +644,7 @@ async def _wait_for_connection(drone: System) -> bool:
     return False
 
 
-async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
+async def run_live_drone(args, shared_state, shutdown,
                          config=None, ui_state=None, target_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
@@ -653,20 +653,6 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
     """
     if config is None:
         config = ControllerConfig.from_args(args)
-
-    if shutdown_read_fd is not None:
-        loop = asyncio.get_running_loop()
-        def _on_shutdown_pipe():
-            try:
-                os.read(shutdown_read_fd, 1)
-            except (OSError, BlockingIOError):
-                pass
-            try:
-                loop.remove_reader(shutdown_read_fd)
-            except (OSError, ValueError):
-                pass
-            shutdown.set()
-        loop.add_reader(shutdown_read_fd, _on_shutdown_pipe)
 
     manage_takeoff_landing = getattr(args, 'takeoff_landing', False)
 
