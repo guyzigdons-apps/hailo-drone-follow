@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 5
+current_plan: 7
 status: executing
-stopped_at: Completed 02-02-PLAN.md — CLEAN-03/07/09 landed (Wave 1B parallel with 02-01 and 02-03)
-last_updated: "2026-05-14T17:13:08.157Z"
+stopped_at: Completed 02-06-PLAN.md — CLEAN-14 landed (Wave 3 parallel with 02-04)
+last_updated: "2026-05-14T17:21:48.119Z"
 last_activity: 2026-05-14
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 11
-  completed_plans: 7
+  completed_plans: 9
   percent: 64
 ---
 
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 Phase: 2 of 6 (Cleanup) — **in progress, Wave 1 complete (02-01, 02-02, 02-03 all landed)**
 Plan: 4 of 8 complete (02-00 + 02-01 + 02-02 + 02-03)
-Current Plan: 5
+Current Plan: 7
 Total Plans in Phase: 8
 Status: In progress
 Last activity: 2026-05-14
@@ -60,6 +60,8 @@ Progress: [██████░░░░] 64%
 | Phase 02-cleanup P03 | 3 min | 3 tasks tasks | 3 files files |
 | Phase 02-cleanup P02 | 4 min | 3 tasks | 6 files |
 | Phase 02-cleanup P01 | 5 min | 3 tasks | 4 files |
+| Phase 02-cleanup P04 | 5 min | 2 tasks tasks | 3 files files |
+| Phase 02-cleanup P06 | 5 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -111,6 +113,12 @@ Progress: [██████░░░░] 64%
 - **`DroneFollowUserData.controller_config` attribute kept (init to `None`) even after removing the constructor kwarg.** The callback at `hailo_drone_detection_manager.py:278` reads `user_data.controller_config`; the real value is attached post-construction at `robot_follow_app.py:340`. Removing the attribute outright would `AttributeError` before the attach landed. Only the dead constructor kwarg path got stripped.
 - **Parallel-plan working-tree race accepted as Rule-3 deviation.** Plans 02-01, 02-02, and 02-03 ran concurrently in the same working tree. 02-02's commit step picked up 02-01's unstaged Task-1 deletions (`sim/world_loader.py`, `scripts/bench_reid_callback.py`) into commit `cd26780`, and Task-2's `vision_branches.py` alias edit into commit `f923870`. Task 3 (CLEAN-10) was committed cleanly as `0b40abd` via targeted `git add <file>`. Success criteria all met; attribution drift recorded in `02-01-SUMMARY.md` deviations. Lesson for future parallel waves: spawn each plan agent into its own `git worktree add`-managed worktree, or have agents use `git add <file>` (never `git add .`) and stagger commits tightly enough that sibling unstaged work isn't visible.
 
+### Phase 2 decisions (2026-05-14, 02-06 execute)
+
+- **CLEAN-14 schema lives on `ControllerConfig` as a classmethod; `TunableField` is a minimal `(py_type, mavlink_id|None)` NamedTuple.** Considered adding `display_name` / `bounds` fields up front, but NamedTuple's positional construction means any new field touches every existing constructor — the cleaner play is to keep the schema minimal in Phase 2 and grow it only when there's a real consumer. Inline docstring on `TunableField` captures this.
+- **Web-only fields stay web-only in Phase 2; `mavlink_id=None` is the carrier signal.** `top_margin_safety` and `bottom_margin_safety` are the 2-key delta between the historic `_CONFIG_FIELDS` (26) and `_CONFIG_PARAMS` (24) — RESEARCH guessed ~3, actual is 2. Exposing them to OpenHD would require a C++ patch on the OpenHD side (parameter table in `OpenHD/HAILO_INTEGRATION.md`); deferred to v1.2. `openhd_bridge` filters via a private `_openhd_tunable_fields()` helper that drops `mavlink_id=None` entries — keeping the OpenHD-specific filter policy out of `ControllerConfig`.
+- **Parallel-wave hygiene held — Wave 3 didn't repeat the Wave 1B mistake.** Plans 02-04 (touches `mavsdk_drone.py` / `robot_follow_app.py`) and 02-06 (touches `follow_api/config.py` / `servers/`) ran in parallel in the same working tree with zero file overlap. Both Task 1 and Task 2 committed with explicit pathspec (`git commit -m "..." -- <files>`), so the parallel agent's unstaged sibling work never crossed into 02-06's commits. `git log` shows clean alternation: `5511f11` (02-06 T1) → `d0d4afb` (02-04) → `fc111c4` (02-04) → `fed0db7` (02-06 T2). No deviation needed.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -123,6 +131,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T17:13:08.155Z
-Stopped at: Completed 02-02-PLAN.md — CLEAN-03/07/09 landed (Wave 1B parallel with 02-01 and 02-03)
+Last session: 2026-05-14T17:21:48.118Z
+Stopped at: Completed 02-06-PLAN.md — CLEAN-14 landed (Wave 3 parallel with 02-04)
 Resume file: None

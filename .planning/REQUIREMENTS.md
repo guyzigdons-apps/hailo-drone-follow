@@ -38,7 +38,7 @@ Audit-confirmed dead code, duplication merges, and hot-path wins identified pre-
 - [ ] **CLEAN-11**: MAVSDK-server `pkill` reaper unified into a single helper in the adapter module; called from both the adapter's context-manager and the composition root's shutdown path.
 - [ ] **CLEAN-12**: CLI pre-parsing in `drone_follow_app.py` collapsed from 3 throwaway parsers (`ui_pre`, `reid_pre`, `tracker_pre`) into a single pre-parse pass.
 - [ ] **CLEAN-13**: `_telemetry_position_task` and `_telemetry_altitude_task` in `mavsdk_drone.py` merged (both subscribe to `drone.telemetry.position()` and write a cache).
-- [ ] **CLEAN-14**: `web_server._CONFIG_FIELDS` and `openhd_bridge._CONFIG_PARAMS` replaced with a single `ControllerConfig.tunable_fields()` source-of-truth iterated by both consumers.
+- [x] **CLEAN-14**: `web_server._CONFIG_FIELDS` and `openhd_bridge._CONFIG_PARAMS` replaced with a single `ControllerConfig.tunable_fields()` source-of-truth iterated by both consumers.
 - [ ] **CLEAN-15**: Branch-decision tree (which output branches to build given `--display`/`--record`/`--webui`/`--openhd`) centralised in `vision_branches`; implicit-display rule defined in one place instead of three.
 
 #### Hot-path wins
@@ -161,7 +161,7 @@ Tracked but not in current roadmap. All require physical hardware to exercise.
 | CLEAN-11 | Phase 2 | Pending |
 | CLEAN-12 | Phase 2 | Pending |
 | CLEAN-13 | Phase 2 | Pending |
-| CLEAN-14 | Phase 2 | Pending |
+| CLEAN-14 | Phase 2 | Complete |
 | CLEAN-15 | Phase 2 | Pending |
 | CLEAN-16 | Phase 2 | Pending |
 | CLEAN-17 | Phase 2 | Pending |
