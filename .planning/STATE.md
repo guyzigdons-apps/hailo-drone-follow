@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 3
-status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-05-14T15:26:07.021Z"
-last_activity: "2026-05-14 — 01-02 executed: atomic rename landed (commit 5850558); 77 files renamed/modified."
+current_plan: 4
+status: ready_for_verification
+stopped_at: "Completed 01-03-PLAN.md — Phase 1 ready for /gsd:verify-work"
+last_updated: "2026-05-14T15:53:45.164Z"
+last_activity: "2026-05-14 — 01-03 completed (A passed, B+C deferred with mitigations). Phase 1 ready for goal-verification."
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 2
-  percent: 67
+  completed_plans: 3
+  percent: 100
 ---
 
 # Project State
@@ -26,27 +26,27 @@ See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 ## Current Position
 
-Phase: 1 of 6 (Rename)
-Plan: 2 of 3 complete (Wave 1 — atomic rename landed)
-Current Plan: 3
+Phase: 1 of 6 (Rename) — **complete, ready for /gsd:verify-work**
+Plan: 3 of 3 complete (Wave 2 — manual verifications resolved)
+Current Plan: 4 (Phase 1 done; Phase 2 unblocked)
 Total Plans in Phase: 3
-Status: In progress
-Last activity: 2026-05-14 — 01-02 executed: atomic rename landed (commit 5850558); 77 files renamed/modified.
+Status: Ready for verification
+Last activity: 2026-05-14 — 01-03 completed (A passed, B+C deferred with mitigations). Phase 1 ready for goal-verification.
 
-Progress: [███████░░░] 67%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 37 min
-- Total execution time: 74 min (1.2 h)
+- Total plans completed: 3
+- Average duration: 32 min
+- Total execution time: 96 min (1.6 h)
 
 **By Phase:**
 
 | Phase     | Plans | Total  | Avg/Plan |
 |-----------|-------|--------|----------|
-| 01-rename | 2     | 74 min | 37 min   |
+| 01-rename | 3     | 96 min | 32 min   |
 
 *Updated after each plan completion*
 
@@ -54,6 +54,7 @@ Progress: [███████░░░] 67%
 |---------------------|----------|----------|-----------|
 | Phase 01-rename P01 | 1 min    | 1 task   | 1 file    |
 | Phase 01-rename P02 | 73 min   | 3 tasks  | 77 files  |
+| Phase 01-rename P03 | 22 min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,11 @@ Progress: [███████░░░] 67%
 - **Pin `parser.prog="robot-follow"` to make --help byte-identical across aliases.** Auto-fix during Task 3: argparse derives `prog` from `sys.argv[0]`, so `robot-follow --help` and `drone-follow --help` differed by their `usage:` line. Pinning `prog` in `_build_parser()` immediately after `get_pipeline_parser()` returns guarantees byte-identical output regardless of invocation name. Required for Phase 1 success criterion 2.
 - **Console-script alias semantics confirmed.** Both `robot-follow` and `drone-follow` declared in `pyproject.toml [project.scripts]` mapping to `robot_follow.robot_follow_app:main`. After `pip install -e .`, both shims embed identical `from robot_follow.robot_follow_app import main`. With parser.prog pinned, runtime behavior is indistinguishable — the alias is a pure entry-point rename, not a separate code path.
 
+### Phase 1 decisions (2026-05-14, 01-03 execute)
+
+- **Verification A executed by operator in their own venv shell on the x86_64 dev box.** `./install.sh --skip-apps --skip-hefs --skip-ui` re-runs cleanly post-rename: legacy-uninstall banner present at `install.sh:98`, final `pip install -e .` reports `Successfully installed robot-follow-1.1.0.dev0`, post-run pip metadata is exclusive (`pip show robot-follow` exits 0, `pip show drone-follow` exits non-zero), `diff <(robot-follow --help) <(drone-follow --help)` is empty, and `head -5 "$(which drone-follow)"` shows `from robot_follow.robot_follow_app import main`. Idempotency confirmed (the run was the second post-rename install on this dev box; first uninstalled the prior `robot-follow-1.1.0.dev0`, then reinstalled cleanly).
+- **Verifications B and C deferred per operator scope; mitigations cited on disk.** Verification B (deployed-RPi boot-service ExecStart path check) deferred because no air-unit RPi was reachable from this dev box at execution time. Mitigation: Plan 01-02 Task 1 Step 4 ran `git diff 5850558 scripts/boot/` and found the diff empty — `scripts/boot/drone-follow-boot.service` and `scripts/boot/drone-follow-boot.sh` were not touched by the rename commit, so the deployed `ExecStart` path is mechanically unchanged. Verification C (full pytest suite on a Hailo-capable host) deferred because the dev box has no Hailo HW. Mitigation: Plan 01-02 ran `pytest robot_follow/tests/test_install_smoke.py -v` to 10/10 PASSED, covering the RENAME-01..05 surface that's testable without Hailo HW. Both deferrals become regression smoke steps at the next field deployment / Hailo-host sync, not open Phase-1 blockers.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -88,6 +94,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T15:25:23.932Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-05-14T15:53:45.163Z
+Stopped at: Completed 01-03-PLAN.md — Phase 1 ready for /gsd:verify-work
 Resume file: None

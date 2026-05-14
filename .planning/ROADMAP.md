@@ -20,7 +20,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
 
 **Milestone Goal:** Generalize the app from drone-only to robot-generic — drone path unchanged, ROS 2 cmd_vel rover adapter shipped, Gazebo rover sim runs end-to-end follow-the-person.
 
-- [ ] **Phase 1: Rename** - Mechanical `drone_follow` → `robot_follow` package rename with `drone-follow` alias preserved
+- [x] **Phase 1: Rename** - Mechanical `drone_follow` → `robot_follow` package rename with `drone-follow` alias preserved (3/3 plans complete; ready for `/gsd:verify-work`)
 - [ ] **Phase 2: Cleanup** - Delete confirmed dead code, merge duplications, fix hot-path races
 - [ ] **Phase 3: Abstraction** - `Robot` protocol + `Capabilities`, drone adapter behind protocol; CRITICAL GATE before rover work
 - [ ] **Phase 4: Rover adapter** - ROS 2 Humble rclpy node publishing `geometry_msgs/Twist`; parallel with Phase 5
@@ -41,7 +41,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
 **Plans**: 3 plans
   - [x] 01-01-PLAN.md — Wave 0: rewrite test_install_smoke.py as forward-compatible Phase 1 gate
   - [x] 01-02-PLAN.md — Wave 1: atomic rename commit (git mv + sed + pyproject + docs + reinstall + verify)
-  - [ ] 01-03-PLAN.md — Wave 2: manual-only verifications (install.sh re-run, boot service on disk)
+  - [x] 01-03-PLAN.md — Wave 2: manual-only verifications (install.sh re-run, boot service on disk)
 
 ### Phase 2: Cleanup
 **Goal**: Dead code is deleted, duplications are merged, hot-path races are fixed; codebase is clean before structural changes.
@@ -109,7 +109,7 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 1. Rename | v1.1 | 2/3 | In Progress | - |
+| 1. Rename | v1.1 | 3/3 | Complete | 2026-05-14 |
 | 2. Cleanup | v1.1 | 0/TBD | Not started | - |
 | 3. Abstraction | v1.1 | 0/TBD | Not started | - |
 | 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
