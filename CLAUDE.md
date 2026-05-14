@@ -38,6 +38,7 @@ A Hailo-based robot-follow application that uses an AI pipeline (GStreamer + Hai
 - `--takeoff-landing` — Enable auto arm/takeoff/land (default: off — drone must already be airborne)
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Held by a fixed-altitude P loop; also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–0.25 (default: 0.25). Drives forward/backward distance. Adjustable mid-flight via UI "Target Size" slider.
+- `--mission-duration SECONDS` — Mission watchdog timeout (default: 300.0 = 5 min). With `--takeoff-landing`, the drone auto-lands at expiry. Without `--takeoff-landing`, the control loop restarts (process keeps running, MAVSDK reconnects). Pass a large value (e.g. `86400` for 24 h) to effectively disable the watchdog. Note: silent auto-land at 300 s is a surprise hazard — set explicitly for long flights.
 - `--yaw-only` / `--no-yaw-only` — Yaw only mode (default: on). Use `--no-yaw-only` for full follow with forward/backward movement.
 - `--horizontal-mirror` / `--vertical-mirror` — Both default to off (camera right-side up). Pass both flags for 180° rotation if camera is mounted upside-down. The pipeline also passes `mirror_image=False` to `SOURCE_PIPELINE()`.
 - `--webui` / `--webui-port` / `--webui-fps` — Enable the web UI (port 5001 default, 10 FPS MJPEG default). Live video, click-to-follow, and slider-based controller tuning. Mutually exclusive with `--openhd`.

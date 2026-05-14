@@ -44,7 +44,12 @@ def add_drone_args(parser) -> None:
                        help="Enable auto arm/takeoff/land (default: off — drone must already be airborne)")
     group.add_argument("--target-altitude", type=float, default=3.0,
                        help="Target altitude in metres (default: 3.0). Also used as takeoff height with --takeoff-landing.")
-    group.add_argument("--mission-duration", type=float, default=300.0)
+    group.add_argument("--mission-duration", type=float, default=300.0,
+                       help="Maximum mission duration in seconds. Default 300.0 (5 min). "
+                            "With --takeoff-landing: triggers an automatic land at expiry. "
+                            "Without --takeoff-landing: triggers a control-loop restart "
+                            "(the app keeps running; the loop reconnects). "
+                            "Set to a large value (e.g. 86400) for unbounded missions.")
 
 
 # ---------------------------------------------------------------------------
