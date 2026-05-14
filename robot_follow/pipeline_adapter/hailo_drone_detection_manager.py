@@ -692,7 +692,7 @@ def _udp_h264_source_pipeline(video_source, video_width, video_height, frame_rat
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
                parser: Optional[argparse.ArgumentParser] = None,
                record_enabled=False, record_dir=None, reid_manager=None,
-               reid_search_timeout: float = 20.0, controller_config=None,
+               reid_search_timeout: float = 20.0,
                tracker_name=None, log_perf=False):
     """Create the tiling pipeline app with drone-follow callback.
 
@@ -728,7 +728,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     class DroneFollowUserData(app_callback_class):
         def __init__(self, shared_state, target_state=None, ui_state=None,
                      tracker=None, reid_manager=None, reid_search_timeout=20.0,
-                     controller_config=None, log_perf=False):
+                     log_perf=False):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
@@ -736,7 +736,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self.tracker = tracker
             self.reid_manager = reid_manager
             self.reid_search_timeout = reid_search_timeout
-            self.controller_config = controller_config
+            # controller_config is attached post-construction by robot_follow_app.py:340
+            # (kept as attribute so callback site at line 278 can read it).
+            self.controller_config = None
             self.perf = PerfTracker(
                 log_perf=log_perf,
                 tracker_metrics=tracker.metrics if tracker is not None else None,
@@ -1282,7 +1284,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, tracker=tracker,
         reid_manager=reid_manager, reid_search_timeout=reid_search_timeout,
-        controller_config=controller_config, log_perf=log_perf,
+        log_perf=log_perf,
     )
     # ui_enabled means "build the MJPEG/web-UI branch" — pre-parse the
     # parser so we read the actual --webui flag instead of just whether
