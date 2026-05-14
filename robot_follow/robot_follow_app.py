@@ -24,12 +24,11 @@ import argparse
 import asyncio
 import logging
 import signal
-import subprocess
 import threading
 import time
 from robot_follow.follow_api import ControllerConfig, SharedDetectionState
 from robot_follow.follow_api.state import FollowTargetState
-from robot_follow.drone_api import run_live_drone
+from robot_follow.drone_api import run_live_drone, _reap_mavsdk_server
 from robot_follow.drone_api.mavsdk_drone import add_drone_args
 from robot_follow.servers import FollowServer, OpenHDBridge
 
@@ -442,13 +441,8 @@ def main():
             # against a sim that's already gone). Its `with DetachedMavsdkServer`
             # __exit__ won't run, and start_new_session=True means mavsdk_server
             # would survive us — leaving UDP 14540 + TCP 50051 bound and blocking
-            # the next run. Reap it by name now while we still own a shell;
-            # scope to the current uid so we don't touch another user's server.
-            try:
-                subprocess.run(["pkill", "-9", "-u", str(os.getuid()), "-f", "mavsdk_server"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+            # the next run. Reap it by name now while we still own a shell.
+            _reap_mavsdk_server()
         if reid_manager is not None:
             reid_manager.dump_embeddings()
             reid_manager.release()

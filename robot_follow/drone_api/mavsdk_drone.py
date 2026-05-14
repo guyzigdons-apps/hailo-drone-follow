@@ -53,6 +53,33 @@ def add_drone_args(parser) -> None:
 
 
 # ---------------------------------------------------------------------------
+# mavsdk_server process management
+# ---------------------------------------------------------------------------
+
+def _reap_mavsdk_server() -> None:
+    """Kill any straggler mavsdk_server processes scoped to current uid.
+
+    Used in two places:
+      1. DetachedMavsdkServer.__enter__ — reap stale server from a prior run
+         before binding UDP 14540 / TCP 50051 for a fresh start.
+      2. robot_follow_app.py finally-block — reap a survivor when the drone
+         thread hangs (typically a MAVSDK land/offboard timeout against a
+         dead sim) and __exit__ never runs.
+
+    Scoped to the current uid so shared hosts don't see cross-user kills.
+    """
+    try:
+        subprocess.run(
+            ["pkill", "-9", "-u", str(os.getuid()), "-f", "mavsdk_server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Velocity Command API – clamps maximums & low-pass filters yaw
 # ---------------------------------------------------------------------------
 
@@ -221,18 +248,10 @@ class DetachedMavsdkServer:
         # means the server survives Ctrl+C, and if our previous shutdown timed
         # out (e.g. the drone_thread join expired during a stuck land/offboard
         # call), __exit__ never ran. The leftover keeps UDP 14540 + TCP 50051
-        # bound, which blocks the next run from connecting to PX4. Kill by name
-        # so we cover both ports regardless of which one was held; scope to the
-        # current uid so we don't touch other users' mavsdk_server processes
-        # on shared hosts.
-        try:
-            subprocess.run(
-                ["pkill", "-9", "-u", str(os.getuid()), "-f", "mavsdk_server"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
-            )
-            time.sleep(0.3)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        # bound, which blocks the next run from connecting to PX4.
+        _reap_mavsdk_server()
+        # Brief settle so the OS releases the bound ports before we respawn.
+        time.sleep(0.3)
 
         cmd = [server_path, "-p", str(self.port), self.connection_url]
         LOGGER.info("[drone] Starting detached mavsdk_server: %s", " ".join(cmd))

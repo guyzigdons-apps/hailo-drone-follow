@@ -9,10 +9,12 @@ from .mavsdk_drone import (
     VelocityCommandAPI,
     run_live_drone,
     add_drone_args,
+    _reap_mavsdk_server,
 )
 
 __all__ = [
     "VelocityCommandAPI",
     "run_live_drone",
     "add_drone_args",
+    "_reap_mavsdk_server",
 ]
