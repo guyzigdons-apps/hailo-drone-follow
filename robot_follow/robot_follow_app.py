@@ -51,7 +51,7 @@ def _configure_logging(verbosity: str) -> None:
 def _resolve_serial_connection(args):
     """If --serial is given, override --connection with a serial:// URI."""
     if getattr(args, "serial", None) is not None:
-        baud = getattr(args, "serial_baud", 115200)
+        baud = args.serial_baud
         args.connection = f"serial://{args.serial}:{baud}"
         LOGGER.info("[drone] Serial mode: connection = %s", args.connection)
 
