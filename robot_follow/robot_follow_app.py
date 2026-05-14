@@ -30,6 +30,7 @@ from robot_follow.follow_api import ControllerConfig, SharedDetectionState
 from robot_follow.follow_api.state import FollowTargetState
 from robot_follow.drone_api import run_live_drone, _reap_mavsdk_server
 from robot_follow.drone_api.mavsdk_drone import add_drone_args
+from robot_follow.pipeline_adapter.vision_branches import decide_branches
 from robot_follow.servers import FollowServer, OpenHDBridge
 
 LOGGER = logging.getLogger(__name__)
@@ -245,29 +246,32 @@ def main():
     pre.add_argument("--tracker", default=DEFAULT_TRACKER, choices=TRACKER_CHOICES)
     pre_args, _ = pre.parse_known_args()
 
-    if pre_args.openhd and pre_args.webui:
-        raise SystemExit("error: --openhd and --webui are mutually exclusive "
-                         "(only one network encoder may run at a time)")
-
-    if not pre_args.openhd and not pre_args.webui:
-        pre_args.display = True
+    # Single source of truth for output-branch policy
+    # (mutex + implicit-display + record-branch gating in one helper).
+    # ``decide_branches`` raises ValueError on the --openhd/--webui mutex;
+    # surface it as a SystemExit so the CLI fails fast at pre-parse time
+    # before any heavy pipeline construction.
+    try:
+        decision = decide_branches(
+            openhd=pre_args.openhd,
+            webui=pre_args.webui,
+            display=pre_args.display,
+            record=pre_args.record,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
+    # Write the resolved values back to pre_args so downstream code that
+    # reads pre_args.display / pre_args.webui / pre_args.openhd sees the
+    # post-implicit-rule state.
+    pre_args.display = decision.display
 
     # Build the recording branch whenever there's a control surface that
-    # can toggle it remotely:
-    #
-    #   --record  : auto-start recording at launch.
-    #   --webui   : the web UI's Record button can toggle mid-flight.
-    #   --openhd  : QOpenHD's Record button (via the OpenHD bridge) can
-    #               toggle mid-flight.
-    #
-    # The valve gates frames at runtime, so building the branch when no
-    # toggle source exists wastes CPU; building it when one does lets
-    # operators flip recording on/off without restarting robot-follow.
-    record_branch_enabled = (
-        pre_args.record
-        or pre_args.webui
-        or pre_args.openhd
-    )
+    # can toggle it remotely (--record auto-start, --webui mid-flight
+    # toggle, --openhd mid-flight toggle via QOpenHD). The valve gates
+    # frames at runtime, so building the branch when no toggle source
+    # exists wastes CPU; building it when one does lets operators flip
+    # recording on/off without restarting robot-follow.
+    record_branch_enabled = decision.record_branch_enabled
 
     # Always create SharedUIState — the OpenHD bridge needs it for bbox
     # messages even when the web UI is disabled.
@@ -316,13 +320,11 @@ def main():
                      tracker_name=pre_args.tracker,
                      log_perf=pre_args.log_perf)
     args = app.options_menu
-    if getattr(args, "openhd", False) and getattr(args, "webui", False):
-        raise SystemExit("error: --openhd and --webui are mutually exclusive")
-    # Implicit-display rule: enabled when neither --openhd nor --webui is
-    # set. Mirror the pre-parse logic so the pipeline string builder reads
-    # the same display state.
-    if not getattr(args, "openhd", False) and not getattr(args, "webui", False):
-        args.display = True
+    # Propagate the pre-parse branch decision onto the full-parser args
+    # namespace so the pipeline-string builder reads the post-implicit-rule
+    # display state. The mutex check + implicit-display rule already ran in
+    # ``decide_branches`` above; no duplicate logic here.
+    args.display = decision.display
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
 

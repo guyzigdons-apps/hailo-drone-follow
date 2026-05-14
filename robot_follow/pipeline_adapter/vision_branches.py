@@ -36,11 +36,57 @@ import logging
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from typing import Optional
 
 import hailo
 
 LOGGER = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Branch-decision policy (single source of truth)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class BranchDecision:
+    """Resolved output-branch flags after applying the implicit-display rule
+    and the record-branch gating rule.
+
+    Consumed by ``robot_follow_app.main()`` (pre-parser writeback to ``args``)
+    and by ``hailo_drone_detection_manager._build_pipeline`` (via
+    ``args.display``).
+    """
+    display: bool
+    record_branch_enabled: bool
+    webui: bool
+    openhd: bool
+
+
+def decide_branches(*, openhd: bool, webui: bool, display: bool,
+                    record: bool) -> BranchDecision:
+    """Single source of truth for the display/record/webui/openhd branch
+    decision.
+
+    Applies the implicit-display rule (no UI flag set -> display defaults on)
+    and the record-branch gating rule (record auto-on when webui or openhd
+    is on). Raises ``ValueError`` when ``openhd`` and ``webui`` are both
+    set (mutually exclusive network encoders).
+    """
+    if openhd and webui:
+        raise ValueError(
+            "--openhd and --webui are mutually exclusive "
+            "(only one network encoder may run at a time)"
+        )
+    if not openhd and not webui:
+        display = True
+    record_branch_enabled = record or webui or openhd
+    return BranchDecision(
+        display=display,
+        record_branch_enabled=record_branch_enabled,
+        webui=webui,
+        openhd=openhd,
+    )
 
 # Sentinel class_id used to retag the locked/auto target detection on
 # the local branch. The YAML style-config maps this to a thicker green

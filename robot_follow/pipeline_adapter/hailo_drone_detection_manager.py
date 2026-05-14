@@ -1162,11 +1162,11 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             openhd = getattr(self.options_menu, 'openhd', False)
             webui = self._ui_enabled
             record = self._record_enabled
+            # ``args.display`` is authoritative here — the pre-parser in
+            # robot_follow_app.main() already applied the implicit-display
+            # rule via vision_branches.decide_branches() and wrote the
+            # resolved value back to options_menu.display.
             display = getattr(self.options_menu, 'display', False)
-            # Implicit-display rule: when neither --openhd nor --webui is
-            # set, default the local display window on.
-            if not openhd and not webui:
-                display = True
             is_shm = str(self.video_source).startswith('shm://')
             is_udp = str(self.video_source).startswith('udp://')
 
