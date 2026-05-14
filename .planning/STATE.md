@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 02-04-PLAN.md — CLEAN-11/13 landed (Wave 3 parallel with 02-06)
-last_updated: "2026-05-14T17:22:56.728Z"
+stopped_at: Completed 02-05-PLAN.md — CLEAN-12 pre-parser collapse + CLEAN-15 decide_branches single source of truth; 18 xfails flipped to passes
+last_updated: "2026-05-14T17:53:38.152Z"
 last_activity: 2026-05-14
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 11
-  completed_plans: 9
+  completed_plans: 10
   percent: 82
 ---
 
@@ -28,7 +28,7 @@ See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 Phase: 2 of 6 (Cleanup) — **in progress, Waves 1-3 mostly complete (02-01..04 + 02-06 all landed; 02-05 + 02-07 remain)**
 Plan: 6 of 8 complete (02-00 + 02-01 + 02-02 + 02-03 + 02-04 + 02-06)
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 8
 Status: In progress
 Last activity: 2026-05-14
@@ -62,6 +62,7 @@ Progress: [████████░░] 82%
 | Phase 02-cleanup P01 | 5 min | 3 tasks | 4 files |
 | Phase 02-cleanup P04 | 5 min | 2 tasks tasks | 3 files files |
 | Phase 02-cleanup P06 | 5 min | 2 tasks | 4 files |
+| Phase 02-cleanup P05 | 17 min | 2 tasks tasks | 5 files files |
 
 ## Accumulated Context
 
@@ -126,6 +127,13 @@ Progress: [████████░░] 82%
 - **Web-only fields stay web-only in Phase 2; `mavlink_id=None` is the carrier signal.** `top_margin_safety` and `bottom_margin_safety` are the 2-key delta between the historic `_CONFIG_FIELDS` (26) and `_CONFIG_PARAMS` (24) — RESEARCH guessed ~3, actual is 2. Exposing them to OpenHD would require a C++ patch on the OpenHD side (parameter table in `OpenHD/HAILO_INTEGRATION.md`); deferred to v1.2. `openhd_bridge` filters via a private `_openhd_tunable_fields()` helper that drops `mavlink_id=None` entries — keeping the OpenHD-specific filter policy out of `ControllerConfig`.
 - **Parallel-wave hygiene held — Wave 3 didn't repeat the Wave 1B mistake.** Plans 02-04 (touches `mavsdk_drone.py` / `robot_follow_app.py`) and 02-06 (touches `follow_api/config.py` / `servers/`) ran in parallel in the same working tree with zero file overlap. Both Task 1 and Task 2 committed with explicit pathspec (`git commit -m "..." -- <files>`), so the parallel agent's unstaged sibling work never crossed into 02-06's commits. `git log` shows clean alternation: `5511f11` (02-06 T1) → `d0d4afb` (02-04) → `fc111c4` (02-04) → `fed0db7` (02-06 T2). No deviation needed.
 
+### Phase 2 decisions (2026-05-14, 02-05 execute)
+
+- **`decide_branches` lives in `vision_branches.py`, not a new `branch_policy.py` module.** The helper is a 10-line pure function + a 4-field frozen dataclass; co-locating with `assemble_output_stage` (which already owns the GStreamer launch-string assembly for the same branches) keeps the policy boundary inside the module that already owns the implementation. A new module would over-engineer the boundary for one phase's worth of consolidation. Per PLAN-02-05 § interfaces decision (RESEARCH § Open Questions Q4).
+- **Pre-parser writeback + closure capture — `decide_branches()` is called ONCE.** `pre_args.display = decision.display` runs before `create_app` (so recording-branch wiring + UI-state setup see the resolved flag). After `create_app` populates `args = app.options_menu`, `args.display = decision.display` propagates via the captured `decision` from the enclosing scope. Calling `decide_branches` twice would split the mutex/implicit-rule logic across two sites again, defeating the consolidation that this plan exists to land.
+- **`ValueError` raised by the helper, `SystemExit` raised by the CLI caller.** The helper is a pure function — it raises `ValueError("--openhd and --webui are mutually exclusive ...")` so unit tests can assert via `pytest.raises(ValueError, match="mutually exclusive")`. The CLI layer (`robot_follow_app.main`) catches and re-raises as `SystemExit(f"error: {exc}")` to preserve the byte-identical CLI exit-error format. Both layers are correct in isolation; one tests cleanly, the other surfaces cleanly.
+- **xfail strip discipline: nothing left behind.** When the production helper landed, the lazy `_decide()` shim was GONE, every `@pytest.mark.xfail` decorator was GONE, and `XFAIL_REASON` was GONE. The test module docstring was rewritten to describe the post-fix world (no "marked xfail until plan X" language). `grep -c "@pytest.mark.xfail" robot_follow/tests/test_vision_branches.py` returns `0` post-strip. Pattern for future Wave-N xfail-flips: strip ALL of the scaffolding, not just the decorators.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -138,6 +146,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T17:22:56.726Z
-Stopped at: Completed 02-04-PLAN.md — CLEAN-11/13 landed (Wave 3 parallel with 02-06)
+Last session: 2026-05-14T17:53:38.150Z
+Stopped at: Completed 02-05-PLAN.md — CLEAN-12 pre-parser collapse + CLEAN-15 decide_branches single source of truth; 18 xfails flipped to passes
 Resume file: None
