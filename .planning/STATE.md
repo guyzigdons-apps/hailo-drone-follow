@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 3
+current_plan: 5
 status: executing
-stopped_at: Completed 02-03-PLAN.md — Wave 1C edits (CLEAN-04 docs, CLEAN-05/-08 dead-code removal) in mavsdk_drone.py + robot_follow_app.py
-last_updated: "2026-05-14T17:10:14.809Z"
+stopped_at: Completed 02-01-PLAN.md — CLEAN-01/02/06/10 landed (Tasks 1 and 2 swept into parallel 02-02 commits; Task 3 clean as 0b40abd)
+last_updated: "2026-05-14T17:12:35.625Z"
 last_activity: 2026-05-14
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 11
-  completed_plans: 5
-  percent: 36
+  completed_plans: 7
+  percent: 64
 ---
 
 # Project State
@@ -26,14 +26,14 @@ See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 ## Current Position
 
-Phase: 2 of 6 (Cleanup) — **in progress, Wave 0 complete**
-Plan: 1 of 8 complete (02-00 Wave 0 xfail scaffolds landed)
-Current Plan: 3
+Phase: 2 of 6 (Cleanup) — **in progress, Wave 1 complete (02-01, 02-02, 02-03 all landed)**
+Plan: 4 of 8 complete (02-00 + 02-01 + 02-02 + 02-03)
+Current Plan: 5
 Total Plans in Phase: 8
 Status: In progress
 Last activity: 2026-05-14
 
-Progress: [████░░░░░░] 36%
+Progress: [██████░░░░] 64%
 
 ## Performance Metrics
 
@@ -58,6 +58,8 @@ Progress: [████░░░░░░] 36%
 | Phase 01-rename P03 | 22 min | 2 tasks | 1 files |
 | Phase 02-cleanup P00 | 2 min | 2 tasks | 2 files |
 | Phase 02-cleanup P03 | 3 min | 3 tasks tasks | 3 files files |
+| Phase 02-cleanup P02 | 4 min | 3 tasks | 6 files |
+| Phase 02-cleanup P01 | 5 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -98,6 +100,11 @@ Progress: [████░░░░░░] 36%
 - **CLEAN-05's outer `getattr(args, "serial", None) is not None` guard is real and kept.** Only the inner `getattr(args, "serial_baud", 115200)` was unreachable (the `--serial-baud` registration at `mavsdk_drone.py:41` has `default=57600`, and the parser builds before `_resolve_serial_connection` runs). The `--serial` field genuinely has a `None` default, so the outer guard is testing whether the operator passed the flag — keep it.
 - **CLEAN-08 keeps `import os` at the top of `mavsdk_drone.py`.** Other sites use `os.getuid()` (line 230), `os.path.join` / `os.path.exists` (lines 212, 216), and `os.environ`. Removing the import together with the pipe-reader block would have introduced a `NameError`. Lesson: when stripping the only visible user of a stdlib import, grep the whole file for other call sites before pulling the import too.
 
+### Phase 2 decisions (2026-05-14, 02-01 execute)
+
+- **`DroneFollowUserData.controller_config` attribute kept (init to `None`) even after removing the constructor kwarg.** The callback at `hailo_drone_detection_manager.py:278` reads `user_data.controller_config`; the real value is attached post-construction at `robot_follow_app.py:340`. Removing the attribute outright would `AttributeError` before the attach landed. Only the dead constructor kwarg path got stripped.
+- **Parallel-plan working-tree race accepted as Rule-3 deviation.** Plans 02-01, 02-02, and 02-03 ran concurrently in the same working tree. 02-02's commit step picked up 02-01's unstaged Task-1 deletions (`sim/world_loader.py`, `scripts/bench_reid_callback.py`) into commit `cd26780`, and Task-2's `vision_branches.py` alias edit into commit `f923870`. Task 3 (CLEAN-10) was committed cleanly as `0b40abd` via targeted `git add <file>`. Success criteria all met; attribution drift recorded in `02-01-SUMMARY.md` deviations. Lesson for future parallel waves: spawn each plan agent into its own `git worktree add`-managed worktree, or have agents use `git add <file>` (never `git add .`) and stagger commits tightly enough that sibling unstaged work isn't visible.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -110,6 +117,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T17:10:14.807Z
-Stopped at: Completed 02-03-PLAN.md — Wave 1C edits (CLEAN-04 docs, CLEAN-05/-08 dead-code removal) in mavsdk_drone.py + robot_follow_app.py
+Last session: 2026-05-14T17:11:54.358Z
+Stopped at: Completed 02-01-PLAN.md — CLEAN-01/02/06/10 landed (Tasks 1 and 2 swept into parallel 02-02 commits; Task 3 clean as 0b40abd)
 Resume file: None

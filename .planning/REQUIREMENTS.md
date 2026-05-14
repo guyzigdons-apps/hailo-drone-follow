@@ -22,16 +22,16 @@ Audit-confirmed dead code, duplication merges, and hot-path wins identified pre-
 
 #### Confirmed dead code (delete)
 
-- [ ] **CLEAN-01**: `sim/world_loader.py` removed (orphan; `start_sim.sh` uses `PX4_GZ_WORLD`).
-- [ ] **CLEAN-02**: `scripts/bench_reid_callback.py` removed (imports non-existent `reid_worker`).
-- [ ] **CLEAN-03**: `follow_api/config.py` `vfov` field + `--vfov` flag removed (defined end-to-end but never read).
+- [x] **CLEAN-01**: `sim/world_loader.py` removed (orphan; `start_sim.sh` uses `PX4_GZ_WORLD`).
+- [x] **CLEAN-02**: `scripts/bench_reid_callback.py` removed (imports non-existent `reid_worker`).
+- [x] **CLEAN-03**: `follow_api/config.py` `vfov` field + `--vfov` flag removed (defined end-to-end but never read).
 - [x] **CLEAN-04**: `mavsdk_drone.py:47` `--mission-duration` flag removed or documented (silently lands after 5 min, undocumented surprise hazard).
 - [x] **CLEAN-05**: `drone_follow_app.py:54` `getattr(args, "serial_baud", 115200)` fallback replaced with direct `args.serial_baud` access (fallback unreachable; would lie if it fired).
-- [ ] **CLEAN-06**: `vision_branches.py:397` `strip_tiles_and_highlight_target` alias removed (no callers).
-- [ ] **CLEAN-07**: `follow_api/state.py:23` `available_ids=None` default + branch removed (every caller passes a set).
+- [x] **CLEAN-06**: `vision_branches.py:397` `strip_tiles_and_highlight_target` alias removed (no callers).
+- [x] **CLEAN-07**: `follow_api/state.py:23` `available_ids=None` default + branch removed (every caller passes a set).
 - [x] **CLEAN-08**: `mavsdk_drone.py:642` `shutdown_read_fd` param + pipe-reader block removed (unreachable from caller).
-- [ ] **CLEAN-09**: `_NULLABLE_FIELDS = set()` removed from `web_server.py` and `openhd_bridge.py` along with the dead `value == 0 → None` branches it gates.
-- [ ] **CLEAN-10**: `create_app(controller_config=...)` kwarg removed from `hailo_drone_detection_manager.py` (no caller passes it; attached later as attribute).
+- [x] **CLEAN-09**: `_NULLABLE_FIELDS = set()` removed from `web_server.py` and `openhd_bridge.py` along with the dead `value == 0 → None` branches it gates.
+- [x] **CLEAN-10**: `create_app(controller_config=...)` kwarg removed from `hailo_drone_detection_manager.py` (no caller passes it; attached later as attribute).
 
 #### Duplication (merge)
 
@@ -148,16 +148,16 @@ Tracked but not in current roadmap. All require physical hardware to exercise.
 | RENAME-03 | Phase 1 | Complete |
 | RENAME-04 | Phase 1 | Complete |
 | RENAME-05 | Phase 1 | Complete |
-| CLEAN-01 | Phase 2 | Pending |
-| CLEAN-02 | Phase 2 | Pending |
-| CLEAN-03 | Phase 2 | Pending |
+| CLEAN-01 | Phase 2 | Complete |
+| CLEAN-02 | Phase 2 | Complete |
+| CLEAN-03 | Phase 2 | Complete |
 | CLEAN-04 | Phase 2 | Complete |
 | CLEAN-05 | Phase 2 | Complete |
-| CLEAN-06 | Phase 2 | Pending |
-| CLEAN-07 | Phase 2 | Pending |
+| CLEAN-06 | Phase 2 | Complete |
+| CLEAN-07 | Phase 2 | Complete |
 | CLEAN-08 | Phase 2 | Complete |
-| CLEAN-09 | Phase 2 | Pending |
-| CLEAN-10 | Phase 2 | Pending |
+| CLEAN-09 | Phase 2 | Complete |
+| CLEAN-10 | Phase 2 | Complete |
 | CLEAN-11 | Phase 2 | Pending |
 | CLEAN-12 | Phase 2 | Pending |
 | CLEAN-13 | Phase 2 | Pending |
