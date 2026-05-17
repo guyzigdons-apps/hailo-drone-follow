@@ -320,14 +320,21 @@ class OpenHDBridge:
     # -- Reporter: Python -> OpenHD ------------------------------------------
 
     def _send_immediate_report(self):
-        """Send a one-shot report on a transient socket (callable from any thread)."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        """Send a one-shot report by reusing the listener socket (CLEAN-17).
+
+        `self._sock` is the listener UDP socket bound to
+        `127.0.0.1:listen_port` for `recvfrom` in `_listen_loop`. UDP sockets
+        are bidirectional; `sendto` is atomic on Linux for messages < MTU
+        and Python's `socket.socket` is thread-safe for `sendto` calls. The
+        destination is `127.0.0.1:report_port` (different port — no
+        self-loopback). The 4 call sites are all inside `_apply_*` handlers
+        invoked from `_listen_loop` (the thread that owns `self._sock`), so
+        the socket is always alive when this method runs.
+        """
         try:
-            self._send_report(sock)
+            self._send_report(self._sock)
         except OSError:
             pass
-        finally:
-            sock.close()
 
     def _report_loop(self):
         """Periodically send current config values to OpenHD for read-back sync."""
