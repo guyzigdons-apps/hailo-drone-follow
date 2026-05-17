@@ -76,6 +76,10 @@ def _update_ui(ui_state, persons, person_to_id, following_id, paused=False):
     """
     if ui_state is None:
         return
+    # Precompute id(p) -> p lookup once (O(n)) so the dedup loop below uses
+    # O(1) dict access instead of the previous O(n) `next((q for q in
+    # persons if id(q) == prev), None)` linear scan — CLEAN-18.
+    person_by_obj_id = {id(p): p for p in persons}
     keep_obj_id_by_tid: dict = {}
     for p in persons:
         tid = person_to_id.get(id(p))
@@ -85,7 +89,7 @@ def _update_ui(ui_state, persons, person_to_id, following_id, paused=False):
         if prev is None:
             keep_obj_id_by_tid[tid] = id(p)
         else:
-            prev_p = next((q for q in persons if id(q) == prev), None)
+            prev_p = person_by_obj_id.get(prev)
             if prev_p is not None and p.get_confidence() > prev_p.get_confidence():
                 keep_obj_id_by_tid[tid] = id(p)
     keep_obj_ids = set(keep_obj_id_by_tid.values())
