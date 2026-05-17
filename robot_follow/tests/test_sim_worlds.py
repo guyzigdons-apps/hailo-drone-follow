@@ -32,10 +32,37 @@ RUN_S = 60
 SHUTDOWN_S = 10
 PROGRESS_TICK_S = 5
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_SIM_TESTS") != "1",
-    reason="set RUN_SIM_TESTS=1 to run simulation integration tests",
-)
+
+def _hailo_available():
+    # Pre-flight check before burning a minute on warmup+capture only to fail
+    # with the misleading "no detections written" message when the real cause
+    # is a missing PCIe card. Cheap kernel-device check first; hailortcli only
+    # if a device file exists.
+    if not list(Path("/dev").glob("hailo*")):
+        return False
+    try:
+        return subprocess.run(
+            ["hailortcli", "fw-control", "identify"],
+            capture_output=True, timeout=2,
+        ).returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("RUN_SIM_TESTS") != "1",
+        reason="set RUN_SIM_TESTS=1 to run simulation integration tests",
+    ),
+    pytest.mark.skipif(
+        not _hailo_available(),
+        reason=(
+            "no Hailo accelerator detected (/dev/hailo* missing or "
+            "`hailortcli fw-control identify` fails) — sim tests need real "
+            "Hailo HW; skipping cleanly instead of timing out after warmup"
+        ),
+    ),
+]
 
 
 # ---------------------------------------------------------------------------
