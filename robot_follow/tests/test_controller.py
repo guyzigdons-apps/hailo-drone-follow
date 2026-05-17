@@ -266,12 +266,13 @@ class TestDistanceForward:
     def test_center_y_is_ignored(self, config):
         """center_y must not influence forward (within frame-edge safety
         margins — see TestFrameEdgeSafety for the edges)."""
-        # bh=0.3, top_margin=bottom_margin=0.05 by default → safe cy ∈ [0.20, 0.80]
+        # bh=0.25 (target), top_margin=0.10, bottom_margin=0.25 by default
+        # → safe cy ∈ [top + bh/2, 1 - bottom - bh/2] = [0.225, 0.625]
         cmd_top = compute_velocity_command(
-            _det(cy=0.25, bh=config.target_bbox_height), config
+            _det(cy=0.30, bh=config.target_bbox_height), config
         )
         cmd_bot = compute_velocity_command(
-            _det(cy=0.75, bh=config.target_bbox_height), config
+            _det(cy=0.55, bh=config.target_bbox_height), config
         )
         assert cmd_top.forward_m_s == 0.0
         assert cmd_bot.forward_m_s == 0.0
@@ -290,7 +291,14 @@ class TestDistanceForward:
 
     def test_clamped_to_max_forward(self):
         """Very small bbox with a high gain should saturate at max_forward."""
-        cfg = ControllerConfig(yaw_only=False, kp_distance=100.0)  # force saturation
+        # Edge-safety margins zeroed so the assertion is about clamping only.
+        # With defaults, bbox_bottom=0.5005 sits in the bottom-margin fade zone
+        # ([1-2m, 1-m] = [0.5, 0.75] for bottom_margin=0.25), shaving ~0.2% off
+        # the clamped forward — see _apply_frame_edge_safety. Edge safety is
+        # exercised in TestFrameEdgeSafety; here we only test the clamp.
+        cfg = ControllerConfig(yaw_only=False, kp_distance=100.0,
+                               top_margin_safety=0.0,
+                               bottom_margin_safety=0.0)  # isolate clamp
         cmd = compute_velocity_command(_det(bh=0.001), cfg)
         assert cmd.forward_m_s == cfg.max_forward
 
