@@ -43,6 +43,13 @@ class SharedUIState:
 
     def __init__(self):
         self._lock = threading.Lock()
+        # Shares the same underlying lock — `with self._cond:` and
+        # `with self._lock:` are interchangeable. Only `update_frame` and
+        # `wait_*` need the Condition (for notify_all / wait_for); other
+        # writers (`update_detections`, `update_velocity`, `update_perf`,
+        # `push_log`) keep `with self._lock:` because they don't notify.
+        self._cond = threading.Condition(self._lock)
+        self._frame_seq: int = 0  # monotonic; consumers track their own last_seen
         self._detections: list = []
         self._following_id: Optional[int] = None
         self._paused: bool = False
@@ -56,7 +63,6 @@ class SharedUIState:
             "ts": time.time(),
         }
         self._perf = {}
-        self._frame_event = threading.Event()
         self._logs: deque = deque(maxlen=200)
         self._log_counter: int = 0
 
@@ -72,9 +78,12 @@ class SharedUIState:
         """Called from appsink callback with pre-encoded JPEG bytes.
 
         Atomically snapshots the current detections alongside the frame
-        so the SSE endpoint can push frame-synced bounding boxes.
+        so the SSE endpoint can push frame-synced bounding boxes. Each
+        frame increments `_frame_seq` under the Condition's lock; the
+        `notify_all()` wakes every consumer, each of which re-checks the
+        predicate `frame_seq > last_seen` to decide whether to return.
         """
-        with self._lock:
+        with self._cond:
             self._frame_jpeg = jpeg_bytes
             self._frame_snapshot = {
                 "detections": list(self._detections),
@@ -83,8 +92,8 @@ class SharedUIState:
                 "velocity": dict(self._velocity),
                 "perf": dict(self._perf),
             }
-        self._frame_event.set()
-        self._frame_event.clear()
+            self._frame_seq += 1
+            self._cond.notify_all()
 
     def get_detections(self) -> dict:
         """Return current detections and following state."""
@@ -131,17 +140,34 @@ class SharedUIState:
         with self._lock:
             return [entry for entry in self._logs if entry["id"] > since_id]
 
-    def wait_frame(self, timeout: float = 1.0) -> Optional[bytes]:
-        """Block until a new frame is available (for MJPEG streaming)."""
-        self._frame_event.wait(timeout=timeout)
-        with self._lock:
-            return self._frame_jpeg
+    def wait_frame(self, last_seen: int, timeout: float = 1.0):
+        """Block until `frame_seq > last_seen`; return (jpeg_bytes, seq).
 
-    def wait_frame_with_detections(self, timeout: float = 1.0):
-        """Block until a new frame; return (jpeg_bytes, snapshot_dict)."""
-        self._frame_event.wait(timeout=timeout)
-        with self._lock:
-            return self._frame_jpeg, self._frame_snapshot
+        Each consumer (MJPEG / SSE / arbitrary debug client) tracks its own
+        monotonic `last_seen` so missed frame edges (CLEAN-16: the old
+        `Event.set()/clear()` race) are impossible — a consumer that hasn't
+        yet entered `wait_for` when the producer notifies will simply find
+        the predicate already True on next call and return immediately with
+        the latest frame. Returns `(None, last_seen)` on timeout so the
+        caller's loop can `continue` without advancing.
+        """
+        with self._cond:
+            ok = self._cond.wait_for(
+                lambda: self._frame_seq > last_seen, timeout=timeout
+            )
+            if not ok:
+                return None, last_seen
+            return self._frame_jpeg, self._frame_seq
+
+    def wait_frame_with_detections(self, last_seen: int, timeout: float = 1.0):
+        """Block until `frame_seq > last_seen`; return (jpeg, snapshot, seq)."""
+        with self._cond:
+            ok = self._cond.wait_for(
+                lambda: self._frame_seq > last_seen, timeout=timeout
+            )
+            if not ok:
+                return None, None, last_seen
+            return self._frame_jpeg, self._frame_snapshot, self._frame_seq
 
 
 class _WebHandler(BaseHTTPRequestHandler):
@@ -208,9 +234,10 @@ class _WebHandler(BaseHTTPRequestHandler):
         self._cors_headers()
         self.end_headers()
 
+        last_seen = 0
         try:
             while True:
-                jpeg = self.ui_state.wait_frame(timeout=2.0)
+                jpeg, last_seen = self.ui_state.wait_frame(last_seen, timeout=2.0)
                 if jpeg is None:
                     continue
                 header = (
@@ -235,9 +262,12 @@ class _WebHandler(BaseHTTPRequestHandler):
         self._cors_headers()
         self.end_headers()
 
+        last_seen = 0
         try:
             while True:
-                _jpeg, snapshot = self.ui_state.wait_frame_with_detections(timeout=2.0)
+                _jpeg, snapshot, last_seen = self.ui_state.wait_frame_with_detections(
+                    last_seen, timeout=2.0
+                )
                 if snapshot is None:
                     continue
                 self.wfile.write(f"data: {json.dumps(snapshot)}\n\n".encode())
