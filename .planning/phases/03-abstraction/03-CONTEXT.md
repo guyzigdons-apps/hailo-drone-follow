@@ -32,9 +32,12 @@ In `follow_api/types.py`:
   class SafetyContext:
       bbox_bottom_normalized: float    # 0..1, for bottom-margin checks
       bbox_size_normalized: float      # bbox_height, for size-based safety
-      target_lost: bool                # convenience flag
+      target_lost: bool                # convenience flag (TRUE → adapter must short-circuit)
       last_target_x: Optional[float]   # for search direction
   ```
+  **Lock from research Q6:** when `safety_ctx.target_lost == True`, the adapter MUST early-return before reading any other `safety_ctx.*` fields. Sentinel bbox values for the lost case are intentionally unspecified — adapters that respect the flag never see them. This avoids the "sentinel `(1.0, 0.0)` would trigger `-max_backward` in `_apply_retreat_from_tilt`" trap surfaced by research. `SafetyContext.lost()` constructor sets `target_lost=True` and zeros the other fields by convention; the values are ignored.
+
+  **Lock from research Q5 (resolves contradiction with ROVER-06 wording):** `RobotCommand.yaw_rate` is in `caps.yaw_unit`. The controller emits in the unit declared by `caps.yaw_unit` (drone: deg/s; rover: rad/s). NO adapter performs yaw-unit conversion — each adapter assigns the value directly to its wire type. ROVER-06 has been updated to reflect this; older language ("converted to rad/s in adapter") is wrong.
 
 In `robot_api/robot.py` (types-free except for protocol):
 - `Robot` protocol methods: `connect`, `start_session`, `send_command`, `send_zero`, `on_target_lost`, `shutdown`. Plus `caps: Capabilities` attribute.
