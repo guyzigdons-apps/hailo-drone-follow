@@ -21,7 +21,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
 **Milestone Goal:** Generalize the app from drone-only to robot-generic — drone path unchanged, ROS 2 cmd_vel rover adapter shipped, Gazebo rover sim runs end-to-end follow-the-person.
 
 - [x] **Phase 1: Rename** - Mechanical `drone_follow` → `robot_follow` package rename with `drone-follow` alias preserved (3/3 plans complete; ready for `/gsd:verify-work`)
-- [ ] **Phase 2: Cleanup** - Delete confirmed dead code, merge duplications, fix hot-path races
+- [x] **Phase 2: Cleanup** - Delete confirmed dead code, merge duplications, fix hot-path races
 - [ ] **Phase 3: Abstraction** - `Robot` protocol + `Capabilities`, drone adapter behind protocol; CRITICAL GATE before rover work
 - [ ] **Phase 4: Rover adapter** - ROS 2 Humble rclpy node publishing `geometry_msgs/Twist`; parallel with Phase 5
 - [ ] **Phase 5: Rover sim** - Gazebo Garden rover SDF + cmd_vel bridge + video_bridge.py camera path; parallel with Phase 4
@@ -54,14 +54,14 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   4. A single `ControllerConfig.tunable_fields()` call drives both `web_server` and `openhd_bridge` field lists; no parallel altitude knob lists remain (CLEAN-14).
   5. Branch-decision tree (display/record/webui/openhd selection) is defined in one place in `vision_branches`; implicit-display rule appears exactly once (CLEAN-15).
 **Plans**: 8 plans
-  - [ ] 02-00-PLAN.md — Wave 1: xfail test scaffolds for CLEAN-15 and CLEAN-16 (gates for waves 4/5)
-  - [ ] 02-01-PLAN.md — Wave 2: dead-code deletes (CLEAN-01, CLEAN-02, CLEAN-06, CLEAN-10)
-  - [ ] 02-02-PLAN.md — Wave 2: config/state/NULLABLE cleanup (CLEAN-03, CLEAN-07 atomic, CLEAN-09)
-  - [ ] 02-03-PLAN.md — Wave 2: mavsdk_drone + app edits (CLEAN-04 doc, CLEAN-05 getattr, CLEAN-08 pipe-reader)
-  - [ ] 02-04-PLAN.md — Wave 3: mavsdk_drone duplication merges (CLEAN-11 reaper helper, CLEAN-13 telemetry merge Shape A)
-  - [ ] 02-05-PLAN.md — Wave 4: pre-parser collapse + decide_branches (CLEAN-12, CLEAN-15 — closes xfail)
-  - [ ] 02-06-PLAN.md — Wave 3: ControllerConfig.tunable_fields() source of truth (CLEAN-14)
-  - [ ] 02-07-PLAN.md — Wave 5: hot-path fixes (CLEAN-16 SSE race — closes xfail, CLEAN-17 socket reuse, CLEAN-18 lookup dict)
+  - [x] 02-00-PLAN.md — Wave 1: xfail test scaffolds for CLEAN-15 and CLEAN-16 (gates for waves 4/5)
+  - [x] 02-01-PLAN.md — Wave 2: dead-code deletes (CLEAN-01, CLEAN-02, CLEAN-06, CLEAN-10)
+  - [x] 02-02-PLAN.md — Wave 2: config/state/NULLABLE cleanup (CLEAN-03, CLEAN-07 atomic, CLEAN-09)
+  - [x] 02-03-PLAN.md — Wave 2: mavsdk_drone + app edits (CLEAN-04 doc, CLEAN-05 getattr, CLEAN-08 pipe-reader)
+  - [x] 02-04-PLAN.md — Wave 3: mavsdk_drone duplication merges (CLEAN-11 reaper helper, CLEAN-13 telemetry merge Shape A)
+  - [x] 02-05-PLAN.md — Wave 4: pre-parser collapse + decide_branches (CLEAN-12, CLEAN-15 — closes xfail)
+  - [x] 02-06-PLAN.md — Wave 3: ControllerConfig.tunable_fields() source of truth (CLEAN-14)
+  - [x] 02-07-PLAN.md — Wave 5: hot-path fixes (CLEAN-16 SSE race — closes xfail, CLEAN-17 socket reuse, CLEAN-18 lookup dict)
 
 ### Phase 3: Abstraction
 **Goal**: `Robot` protocol and `Capabilities` are the only actuator boundary; drone path runs end-to-end behind `MavsdkDroneAdapter`; `--robot` CLI flag exists. This is the critical gate — rover work cannot start until this phase passes.
@@ -118,7 +118,7 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. Rename | v1.1 | 3/3 | Complete | 2026-05-14 |
-| 2. Cleanup | v1.1 | 1/8 | In Progress | - |
+| 2. Cleanup | v1.1 | 8/8 | Complete | 2026-05-17 |
 | 3. Abstraction | v1.1 | 0/TBD | Not started | - |
 | 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
 | 5. Rover sim | v1.1 | 0/TBD | Not started | - |

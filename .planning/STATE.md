@@ -4,14 +4,14 @@ milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
 current_plan: 8
 status: executing
-stopped_at: Completed 02-05-PLAN.md — CLEAN-12 pre-parser collapse + CLEAN-15 decide_branches single source of truth; 18 xfails flipped to passes
-last_updated: "2026-05-14T17:53:38.152Z"
-last_activity: 2026-05-14
+stopped_at: Completed 02-07-PLAN.md — CLEAN-16 SSE Condition + frame_seq race fix + CLEAN-17 socket reuse + CLEAN-18 O(1) dedup; Phase 2 done (18/18 CLEAN items closed; 5/5 ROADMAP criteria closed; 3 xfails flipped to passes; 0 xfailed remaining)
+last_updated: "2026-05-17T11:14:23.609Z"
+last_activity: 2026-05-17
 progress:
   total_phases: 6
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 11
-  completed_plans: 10
+  completed_plans: 11
   percent: 82
 ---
 
@@ -31,7 +31,7 @@ Plan: 6 of 8 complete (02-00 + 02-01 + 02-02 + 02-03 + 02-04 + 02-06)
 Current Plan: 8
 Total Plans in Phase: 8
 Status: In progress
-Last activity: 2026-05-14
+Last activity: 2026-05-17
 
 Progress: [████████░░] 82%
 
@@ -63,6 +63,7 @@ Progress: [████████░░] 82%
 | Phase 02-cleanup P04 | 5 min | 2 tasks tasks | 3 files files |
 | Phase 02-cleanup P06 | 5 min | 2 tasks | 4 files |
 | Phase 02-cleanup P05 | 17 min | 2 tasks tasks | 5 files files |
+| Phase 02-cleanup P07 | 5 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -134,6 +135,13 @@ Progress: [████████░░] 82%
 - **`ValueError` raised by the helper, `SystemExit` raised by the CLI caller.** The helper is a pure function — it raises `ValueError("--openhd and --webui are mutually exclusive ...")` so unit tests can assert via `pytest.raises(ValueError, match="mutually exclusive")`. The CLI layer (`robot_follow_app.main`) catches and re-raises as `SystemExit(f"error: {exc}")` to preserve the byte-identical CLI exit-error format. Both layers are correct in isolation; one tests cleanly, the other surfaces cleanly.
 - **xfail strip discipline: nothing left behind.** When the production helper landed, the lazy `_decide()` shim was GONE, every `@pytest.mark.xfail` decorator was GONE, and `XFAIL_REASON` was GONE. The test module docstring was rewritten to describe the post-fix world (no "marked xfail until plan X" language). `grep -c "@pytest.mark.xfail" robot_follow/tests/test_vision_branches.py` returns `0` post-strip. Pattern for future Wave-N xfail-flips: strip ALL of the scaffolding, not just the decorators.
 
+### Phase 2 decisions (2026-05-17, 02-07 execute)
+
+- **CLEAN-16 — `Condition(self._lock)` shares the underlying lock; only `update_frame` + `wait_*` migrate to `with self._cond:`, other writers stay on `with self._lock:`.** `notify_all()` runs INSIDE the cond-block (Python docs are explicit; notification outside the lock races with `wait_for`'s predicate re-check). `wait_for` predicate is strict `frame_seq > last_seen` — a no-new-frame call returns `(None, last_seen)` so the caller loop can `continue` without advancing. Each MJPEG/SSE consumer keeps its own `last_seen` local in the request handler; no per-consumer state on `SharedUIState`. The Wave-0 `test_web_server_sse.py` xfail markers + `XFAIL_REASON` constant + `pytest` import were all stripped together (same discipline as 02-05's CLEAN-15 strip).
+- **CLEAN-17 — Option A (reuse listener `self._sock`) chosen per RESEARCH § Open Question 5.** UDP `sendto` is atomic on Linux for sub-MTU messages and Python's `socket.socket` is thread-safe for `sendto`; destination is `:report_port` (different port from the listener bind), so no self-loopback. The 4 call sites all run on `_listen_loop` which OWNS `self._sock`, so the socket is always alive when `_send_immediate_report` fires. `_report_loop`'s own `report_sock` was left in place — out of scope for this plan; future cleanup could consolidate.
+- **CLEAN-18 — `person_by_obj_id = {id(p): p for p in persons}` dict built ONCE at the top of `_update_ui`; O(n²) worst-case (n persons all sharing one tid via multi-scale tile duplicates) collapses to O(n) construction + O(1) lookup.** Identical semantics; the lookup dict is just a precomputed inverse of the same `id(p) -> p` mapping the old `next((q for q in persons if id(q) == prev), None)` recomputed inside its predicate.
+- **Phase 2 closes with `0 xfailed` in the full suite.** Two Wave-0 scaffolds — `test_vision_branches.py` (CLEAN-15, plan 02-05) and `test_web_server_sse.py` (CLEAN-16, this plan) — both flipped from xfail to pass without their markers. Manual two-tab browser CLEAN-16 smoke is deferred to the operator's phase-gate run (not pytestable). `DEFER-02-00-A` baseline (2 controller failures) persists unchanged into Phase 3; recommended action is a CLEAN-19 / Phase-2.5 patch before Phase 3 begins.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -146,6 +154,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-14T17:53:38.150Z
-Stopped at: Completed 02-05-PLAN.md — CLEAN-12 pre-parser collapse + CLEAN-15 decide_branches single source of truth; 18 xfails flipped to passes
+Last session: 2026-05-17T11:14:23.607Z
+Stopped at: Completed 02-07-PLAN.md — CLEAN-16 SSE Condition + frame_seq race fix + CLEAN-17 socket reuse + CLEAN-18 O(1) dedup; Phase 2 done (18/18 CLEAN items closed; 5/5 ROADMAP criteria closed; 3 xfails flipped to passes; 0 xfailed remaining)
 Resume file: None

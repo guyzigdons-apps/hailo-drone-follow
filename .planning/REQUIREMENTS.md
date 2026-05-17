@@ -43,9 +43,9 @@ Audit-confirmed dead code, duplication merges, and hot-path wins identified pre-
 
 #### Hot-path wins
 
-- [ ] **CLEAN-16**: `web_server.py:84` `_frame_event.set()` then immediate `clear()` race fixed — replace with monotonic counter + `Condition.notify_all()` (or per-consumer queue) so SSE readers don't fall through to the 2 s timeout under multi-client load.
-- [ ] **CLEAN-17**: `openhd_bridge.py:332` `_send_immediate_report` reuses the listener thread's existing socket instead of opening a fresh `socket.socket(...)` per call.
-- [ ] **CLEAN-18**: `hailo_drone_detection_manager.py:88` linear-scan dedup over `persons` (`next(q for q in persons if id(q) == prev)`) replaced with a one-shot `{id(p): p}` lookup dict built once per callback.
+- [x] **CLEAN-16**: `web_server.py:84` `_frame_event.set()` then immediate `clear()` race fixed — replace with monotonic counter + `Condition.notify_all()` (or per-consumer queue) so SSE readers don't fall through to the 2 s timeout under multi-client load.
+- [x] **CLEAN-17**: `openhd_bridge.py:332` `_send_immediate_report` reuses the listener thread's existing socket instead of opening a fresh `socket.socket(...)` per call.
+- [x] **CLEAN-18**: `hailo_drone_detection_manager.py:88` linear-scan dedup over `persons` (`next(q for q in persons if id(q) == prev)`) replaced with a one-shot `{id(p): p}` lookup dict built once per callback.
 
 ### Abstraction
 
@@ -163,9 +163,9 @@ Tracked but not in current roadmap. All require physical hardware to exercise.
 | CLEAN-13 | Phase 2 | Complete |
 | CLEAN-14 | Phase 2 | Complete |
 | CLEAN-15 | Phase 2 | Complete |
-| CLEAN-16 | Phase 2 | Pending |
-| CLEAN-17 | Phase 2 | Pending |
-| CLEAN-18 | Phase 2 | Pending |
+| CLEAN-16 | Phase 2 | Complete |
+| CLEAN-17 | Phase 2 | Complete |
+| CLEAN-18 | Phase 2 | Complete |
 | ABS-01 | Phase 3 | Pending |
 | ABS-02 | Phase 3 | Pending |
 | ABS-03 | Phase 3 | Pending |
