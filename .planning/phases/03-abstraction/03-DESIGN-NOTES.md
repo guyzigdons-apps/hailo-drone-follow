@@ -21,8 +21,12 @@ Companion to `03-CONTEXT.md`. Diagram + change summary + risks for the abstracti
    │  ├── state.py            │                        │  ├── state.py            │
    │  ├── config.py           │                        │  ├── config.py           │
    │  ├── types.py            │                        │  ├── types.py            │
-   │  │   VelocityCommand     │ ◄── DELETED            │  │   (Detection only;   │
-   │  │   Detection           │                        │  │    no actuator type) │
+   │  │   VelocityCommand     │ ◄── DELETED            │  │   Detection           │
+   │  │   Detection           │                        │  │   Axis                │ ◄── moved here
+   │                          │                        │  │   Capabilities       │ ◄── (kept follow_api
+   │                          │                        │  │   RobotCommand       │     pure-leaf;
+   │                          │                        │  │   SafetyContext      │     was originally
+   │                          │                        │  │   (NEW from review)  │     in robot_api/)
    │  └── controller.py       │                        │  └── controller.py       │
    │      ┌─ yaw P            │                        │      ┌─ yaw P            │
    │      ├─ forward P        │                        │      ├─ forward P        │
@@ -80,14 +84,61 @@ Companion to `03-CONTEXT.md`. Diagram + change summary + risks for the abstracti
 
 ---
 
+## Design revisions from adversarial review (2026-05-17)
+
+Five revisions to the original diagram + change list after stress-testing the design against pan-tilt cameras, holonomic rovers, robot arms, swarms, and indoor drones. Diagram above is now PARTIALLY stale — the corrections below supersede.
+
+### R1. Types move to `follow_api/types.py` (not `robot_api/robot.py`)
+
+**Was:** `Axis`, `Capabilities`, `RobotCommand` defined in `robot_api/robot.py`. `follow_api/controller.py` imports from `robot_api`.
+**Now:** `Axis`, `Capabilities`, `RobotCommand`, `SafetyContext` all in `follow_api/types.py`. `robot_api/robot.py` only contains the `Robot` protocol class and imports types from `follow_api`.
+**Why:** Original placement inverted the dependency direction — `follow_api` was supposed to be the pure-domain leaf. Putting the types where they belong (shared domain types) restores `follow_api` as the no-third-party-imports core, with `robot_api` as the actuator-boundary layer that depends on `follow_api`.
+
+### R2. `send_zero(last_detection)` split into `send_zero()` + `on_target_lost(last_detection)`
+
+**Was:** Single overloaded method doing two jobs (actuator-at-rest + search behavior).
+**Now:** Two methods on `Robot`:
+- `send_zero()` — true actuator quiescent. No args. Called once on shutdown.
+- `on_target_lost(last_detection)` — adapter's lost-target reaction. Per tick when target is gone past `search_enter_delay_s`. Drone spins; rover sends `Twist(0,0,0)`; pan-tilt holds.
+**Why:** Original conflated two concerns. Adapter implementers will misuse it.
+
+### R3. Orchestrator owns explicit search-mode / hold-velocity state machine
+
+**Was:** "Orchestrator calls `robot.send_zero(last_detection)` when detection is None" — handwave.
+**Now:** Explicit pseudocode in CONTEXT § Orchestrator state machine: fixed 10 Hz tick, hold-velocity for the first `search_enter_delay_s` after target-lost, then `on_target_lost`. `send_zero()` runs in the `finally` block on shutdown only.
+**Why:** Original CONTEXT didn't say where today's `last_detection` / `search_active` / `hold_velocity` plumbing went. Now spelled out.
+
+### R4. `send_command(cmd, safety_ctx)` — not `send_command(cmd, detection)`
+
+**Was:** Adapter receives raw `Detection` and reads `.center_y`, `.bbox_height`.
+**Now:** Adapter receives `SafetyContext` (small struct: `bbox_bottom_normalized`, `bbox_size_normalized`, `target_lost`, `last_target_x`). Controller derives it from `Detection` once.
+**Why:** Decouples adapter from `Detection`-shape changes (v1.2 may add depth, multi-camera, multi-target). Every adapter changing every time Detection grows a field is friction we can avoid for the price of one small dataclass.
+
+### R5. Adapter unit-test plan (new)
+
+**Was:** Snapshot test was the only test. `MavsdkDroneAdapter` internals untested.
+**Now:** Pure-function extracts (`_apply_altitude_p`, `_apply_retreat_from_tilt`, `_apply_smoothing`, `_compute_search_yawspeed`) + `test_mavsdk_drone_adapter.py` with ~30 unit tests. Snapshot test stays but is marked Phase-3-only (delete or archive after verifier passes; replace with property-based invariants for ongoing protection).
+**Why:** Without adapter unit tests, future refactors of the adapter (which now owns a lot of drone-specific behavior) have no safety net.
+
+### Other findings (acknowledged, not changed)
+
+- **`Axis = {FORWARD, YAW, ALTITUDE}` is drone-shaped.** Doesn't cover PITCH (pan-tilt), LATERAL (holonomic), ROLL (submarine), or position-control (robot arm). Scope note added to CONTEXT; consider renaming `Robot` → `BodyVelocityRobot` in v1.2 if a non-velocity actuator surfaces.
+- **`Capabilities` is launch-time fixed.** No runtime degradation path (a drone losing altimetry mid-flight still advertises ALTITUDE). Out of v1.1 scope; `Robot.refresh_caps()` is v1.2+.
+- **Emergency safety in controller gated on `Axis.FORWARD in caps.axes`.** Robots without FORWARD (pan-tilt) must override at adapter via clamp.
+- **`add_common_args(parser)` for shared CLI flags.** Two-pass argparse: pre-parser parses `--robot`; `add_common_args` registers shared flags (`--input`, `--webui`, ...); `add_drone_args` / `add_rover_args` only register robot-specific flags. Plan-checker enforces no flag in both robot-specific loaders.
+- **ROS env-leak verification step added** to Phase 3 plans: on a ROS-equipped dev box, confirm `drone-follow --robot drone` produces identical behavior with and without ROS sourced (existing risk #10 made testable).
+- **Connection-failure semantics documented** in CONTEXT: `connect()` raises on hard failure, `start_session()` honors `start_session_timeout_s`, `shutdown()` is idempotent in `finally`.
+
+---
+
 ## Change summary
 
 | # | Change | Why | Where |
 |---|--------|-----|-------|
-| 1 | Introduce `robot_api/` package with `robot.py` + `orchestrator.py` + `adapters/` | Establish the actuator-boundary seam Phases 4–6 plug into | new dir |
-| 2 | Define `Robot` protocol (`connect`, `start_session`, `send_command`, `send_zero`, `shutdown`, `caps`) | Unified actuator interface for drone today, rover tomorrow | `robot_api/robot.py` |
-| 3 | Define `Capabilities = {axes: frozenset[Axis], yaw_unit}` (axes-only) | Controller must not know robot type; only mechanical info (which axes, what units) | `robot_api/robot.py` |
-| 4 | Define `RobotCommand(forward_m_s, yaw_rate, down_m_s)` replacing `VelocityCommand` | `yaw_rate` is in `caps.yaw_unit`; `down_m_s` only used if `Axis.ALTITUDE in caps.axes` | `robot_api/robot.py` |
+| 1 | Introduce `robot_api/` package with `robot.py` (protocol only) + `orchestrator.py` + `adapters/` | Establish the actuator-boundary seam Phases 4–6 plug into | new dir |
+| 2 | Define `Robot` protocol (`connect`, `start_session`, `send_command`, `send_zero`, `on_target_lost`, `shutdown`, `caps`) | Unified actuator interface for drone today, rover tomorrow. **`send_zero` and `on_target_lost` are SEPARATE** (revision R2 — was originally one overloaded method) | `robot_api/robot.py` |
+| 3 | Define `Capabilities = {axes: frozenset[Axis], yaw_unit}` (axes-only) in **`follow_api/types.py`** | Controller must not know robot type; only mechanical info (which axes, what units). Lives in `follow_api/types.py` (revision R1) so `follow_api` stays the pure-leaf core | `follow_api/types.py` |
+| 4 | Define `RobotCommand(forward_m_s, yaw_rate, down_m_s)` + `SafetyContext(bbox_bottom_normalized, bbox_size_normalized, target_lost, last_target_x)` in `follow_api/types.py` | `yaw_rate` is in `caps.yaw_unit`; `down_m_s` only used if `Axis.ALTITUDE in caps.axes`. `SafetyContext` (revision R4) decouples adapter from `Detection` shape | `follow_api/types.py` |
 | 5 | Move `drone_api/mavsdk_drone.py` → `robot_api/adapters/mavsdk_drone.py` (as `MavsdkDroneAdapter`) | Drone is one robot type; lives behind the Robot protocol | file move + rename |
 | 6 | Move altitude-hold P-loop from `live_control_loop` → `MavsdkDroneAdapter.send_command` | Altitude is drone-specific; adapter reads its own `altitude_cache` | `robot_api/adapters/mavsdk_drone.py` |
 | 7 | Move offboard handshake + telemetry tasks → `MavsdkDroneAdapter.start_session()` | Drone lifecycle is adapter-internal; rover's `start_session` is a no-op | `robot_api/adapters/mavsdk_drone.py` |
@@ -97,7 +148,8 @@ Companion to `03-CONTEXT.md`. Diagram + change summary + risks for the abstracti
 | 11 | Rename `run_drone()` → `run_robot()`; dispatch on `--robot` flag | Composition root is robot-agnostic; instantiates the right adapter | `robot_follow_app.py` |
 | 12 | Two-pass argparse: pre-parse `--robot` → load drone or rover args | Rover users don't see drone-only flags in `--help`; reduces confusion | `robot_follow_app.py` |
 | 13 | `setup_env.sh` conditionally sources `/opt/ros/humble/setup.bash` if present | ROS available for rover users; idempotent for drone users; zero new args | `setup_env.sh` |
-| 14 | New snapshot test: `test_robot_command_snapshot.py` (~100 detections) | CI gate for "drone behavior unchanged" — catches silent drift in <1 s | `robot_follow/tests/` |
+| 14 | New snapshot test: `test_robot_command_snapshot.py` (~100 detections) — **Phase-3-only artifact**; archive or delete after verifier passes | CI gate for "drone behavior unchanged" — catches silent drift in <1 s. Property-based tests replace it for ongoing protection | `robot_follow/tests/` |
+| 14b | New adapter unit tests: `test_mavsdk_drone_adapter.py` (revision R5) — pure-function extracts for altitude P, retreat-from-tilt, smoothing, search-yawspeed | Without these, refactoring the adapter has no safety net | `robot_follow/tests/` |
 | 15 | Operator-witnessed SITL run before Phase 3 closes | Catches anything snapshot misses (timing, MAVSDK wire behavior) | manual gate |
 | 16 | `Capabilities` validation: `validate()` skips altitude checks when `Axis.ALTITUDE not in caps.axes` | `ControllerConfig` altitude fields become `Optional[float]` | `follow_api/config.py` |
 

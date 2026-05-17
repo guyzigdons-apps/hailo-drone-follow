@@ -17,13 +17,32 @@ Scope is the actuator boundary refactor. Rover adapter and rover sim are out of 
 <decisions>
 ## Implementation Decisions
 
-### Robot protocol shape (carried forward from earlier phases)
+### Robot protocol shape (carried forward, with adversarial-review revisions 2026-05-17)
 
-- `Capabilities = {axes: frozenset[Axis], yaw_unit: Literal["deg/s", "rad/s"]}`. Axes-only. No behavioral policy fields. Decided 2026-05-14 during design review; see `feedback-robot-abstraction-axes-only` memory.
-- `Axis` enum: `FORWARD`, `YAW`, `ALTITUDE`.
-- `Robot` protocol methods: `connect`, `start_session`, `send_command`, `send_zero`, `shutdown`. Plus `caps: Capabilities` attribute.
-- `RobotCommand(forward_m_s=0.0, yaw_rate=0.0, down_m_s=0.0)`. Controller writes only the channels in `caps.axes`; adapter reads only the channels in `caps.axes`.
-- All robot-specific behaviors live **inside the adapter**, not in `follow_api/`: retreat-from-tilt, slow-near-edge, takeoff/land, yaw-spin-on-loss, offboard handshake.
+**Types live in `follow_api/types.py`** (NOT in `robot_api/robot.py` as originally drafted). Adversarial review caught a layering inversion — making `follow_api` import from `robot_api` would break `follow_api`'s "pure leaf" architectural promise. The types are domain-level (shared between controller and adapter); both packages import from `follow_api/types.py`.
+
+In `follow_api/types.py`:
+- `Detection` (already there; unchanged)
+- `Axis` enum: `FORWARD`, `YAW`, `ALTITUDE` — body-frame velocity axes. **Scope note:** this is drone-shaped (velocity-control-in-body-frame, up-to-3-axes). Pan-tilt, holonomic-rover (LATERAL), submarine (ROLL/PITCH), and robot-arm (position-control) are NOT modeled. `Robot` protocol is `BodyVelocityRobot` in spirit; rename if v1.2 surfaces a non-velocity actuator.
+- `Capabilities = {axes: frozenset[Axis], yaw_unit: Literal["deg/s", "rad/s"]}`. Axes-only. No behavioral policy fields. Decided 2026-05-14 during design review; see `feedback-robot-abstraction-axes-only` memory. **Launch-time fixed; no runtime degradation path.** A drone with degraded altimetry still advertises `Axis.ALTITUDE`. Health/status is a separate concern (not designed).
+- `RobotCommand(forward_m_s=0.0, yaw_rate=0.0, down_m_s=0.0)`. Controller writes only channels in `caps.axes`; adapter reads only channels in `caps.axes`.
+- `SafetyContext` (NEW): minimal struct the controller derives from `Detection` and passes to the adapter alongside the command. Decouples adapter from Detection-shape changes (v1.2 may add depth, multi-camera, etc.).
+  ```python
+  @dataclass
+  class SafetyContext:
+      bbox_bottom_normalized: float    # 0..1, for bottom-margin checks
+      bbox_size_normalized: float      # bbox_height, for size-based safety
+      target_lost: bool                # convenience flag
+      last_target_x: Optional[float]   # for search direction
+  ```
+
+In `robot_api/robot.py` (types-free except for protocol):
+- `Robot` protocol methods: `connect`, `start_session`, `send_command`, `send_zero`, `on_target_lost`, `shutdown`. Plus `caps: Capabilities` attribute.
+- **`send_zero()` and `on_target_lost(last_detection)` are SPLIT** (was originally one method). Rationale: original `send_zero(last_detection)` overloaded "actuator at rest" with "execute search behavior" — two different concerns. Now:
+  - `send_zero()` — actuator quiescent. Called on shutdown, idle mode, pause. No detection arg.
+  - `on_target_lost(last_detection)` — adapter's lost-target reaction. Drone spins yaw based on `last_detection.center_x`; rover sends `Twist(0,0,0)`; pan-tilt holds last pose.
+
+All robot-specific behaviors live **inside the adapter**, not in `follow_api/`: retreat-from-tilt, slow-near-edge, takeoff/land, yaw-spin-on-loss, offboard handshake.
 
 ### live_control_loop migration shape
 
@@ -34,10 +53,67 @@ Scope is the actuator boundary refactor. Rover adapter and rover sim are out of 
 
 ### Controller / adapter boundary contract
 
-- **`robot.send_command(cmd, detection)` signature** — detection passed alongside the command. Adapter inspects detection itself to drive robot-specific reactions (drone reads `bbox.center_y + bbox_height/2` to detect bottom-margin; rover ignores). Keeps the controller stateless and detection-agnostic.
-- **Controller emits `forward_m_s = 0` when bbox is in the bottom safe-zone edge.** No retreat-from-tilt baked into the controller anymore. Drone adapter overlays retreat-from-tilt (porting `_apply_frame_edge_safety`'s fade-zone math from `controller.py`); rover adapter does nothing (`forward_m_s` stays 0). Drone behavior at the wire is unchanged; just relocated.
-- **Target-lost: controller returns `None`.** When detection is `None`, controller doesn't compute. Orchestrator calls `robot.send_zero(last_detection)`. Drone adapter spins yaw based on `last_detection.center_x` (preserving today's search behavior); rover adapter emits `Twist(0, 0, 0)`. Each adapter decides what "zero" means per its capabilities.
-- **Emergency safety (bbox > `max_bbox_height_safety`) stays in controller** as a generic emit-retreat (`forward_m_s = -max_backward` + centering yaw). Works for both drone and rover (both want to back off from a too-close person). NOT robot-shaped; NOT moved to adapter.
+- **`robot.send_command(cmd, safety_ctx)` signature** — `SafetyContext` (small struct) passed instead of raw `Detection`. Controller derives `SafetyContext` from `Detection` once. Adapter never reads `Detection` directly. Decouples adapter from future Detection-shape changes (depth, multi-camera, etc.).
+- **Controller emits `forward_m_s = 0` when bbox is in the bottom safe-zone edge.** No retreat-from-tilt baked into the controller anymore. Drone adapter overlays retreat-from-tilt by inspecting `safety_ctx.bbox_bottom_normalized` (porting `_apply_frame_edge_safety`'s fade-zone math from `controller.py`); rover adapter does nothing (`forward_m_s` stays 0). Drone behavior at the wire is unchanged; just relocated.
+- **Target-lost handled via the orchestrator state machine** (NOT in controller). Controller is only called when a detection exists. The orchestrator owns the lost-target logic per the pseudocode below.
+- **Emergency safety (bbox > `max_bbox_height_safety`) stays in controller** as a generic emit-retreat (`forward_m_s = -max_backward` + centering yaw). Works for both drone and rover with `Axis.FORWARD in caps.axes` and backward-safe motion. Robots without FORWARD (pan-tilt camera) override at the adapter via clamp. NOT moved fully to adapter; controller's emergency-retreat is gated on `Axis.FORWARD in caps.axes`.
+
+### Orchestrator state machine
+
+`robot_api/orchestrator.py`'s `run_robot_loop()` owns the search-mode / hold-velocity / last-detection caching. Pseudocode (the planner expands this into concrete code):
+
+```python
+async def run_robot_loop(robot: Robot, shared_state, config, shutdown):
+    await robot.connect()
+    await robot.start_session()
+
+    last_seen_t   = None
+    last_cmd      = RobotCommand()           # zero
+    last_detection = None
+    tick_dt = 1.0 / config.control_loop_hz   # currently 10 Hz
+
+    try:
+        while not shutdown.is_set():
+            tick_start = time.monotonic()
+            detection = shared_state.current_detection()
+
+            if detection is not None:
+                safety_ctx = SafetyContext.from_detection(detection)
+                cmd = controller.compute(detection, robot.caps, config)
+                await robot.send_command(cmd, safety_ctx)
+                last_seen_t, last_cmd, last_detection = time.monotonic(), cmd, detection
+
+            else:
+                # No detection — decide between hold and search.
+                lost_for = time.monotonic() - last_seen_t if last_seen_t else math.inf
+                if lost_for < config.search_enter_delay_s:
+                    # Hold: keep emitting the last command (briefly bridge gaps).
+                    safety_ctx = SafetyContext.from_detection(last_detection) if last_detection else SafetyContext.lost()
+                    await robot.send_command(last_cmd, safety_ctx)
+                else:
+                    # Search: adapter applies its lost-target behavior.
+                    await robot.on_target_lost(last_detection)
+
+            # Pace the loop.
+            elapsed = time.monotonic() - tick_start
+            await asyncio.sleep(max(0.0, tick_dt - elapsed))
+    finally:
+        await robot.send_zero()
+        await robot.shutdown()
+```
+
+Key invariants:
+- Orchestrator ticks at fixed `control_loop_hz` (today: 10 Hz) regardless of detection cadence.
+- The two "no detection" branches (hold vs. search) are NOT the controller's decision — they're orchestrator state.
+- `send_zero()` runs once in the `finally` block on shutdown (true actuator quiescent).
+- `send_command()` and `on_target_lost()` are the per-tick paths.
+
+### Connection + lifecycle failure semantics
+
+- **`adapter.connect()`** — raises on hard failure (TCP refused, ROS not sourced for rover). Orchestrator catches the exception and exits the loop cleanly. No retry in v1.1; user re-runs `drone-follow`. Documented in protocol docstring.
+- **`adapter.start_session()`** — may block for offboard wait (drone) up to `config.start_session_timeout_s` (new optional config; default 30 s). If shutdown is signaled during the wait, raise `asyncio.CancelledError`; orchestrator catches and unwinds. Rover's `start_session` is sub-second.
+- **`adapter.shutdown()`** — always called in `finally`. Idempotent. Cancels telemetry tasks (drone), destroys rclpy node (rover). Errors logged but not raised.
+- **One adapter instance per `run_robot()` invocation.** Adapter state (e.g., smoothing's `_prev_cmd`, drone's `altitude_cache`) persists across all `send_command` calls. Orchestrator does not re-instantiate.
 
 ### CLI: two-pass argparse + `--robot` dispatch
 
@@ -47,11 +123,23 @@ Scope is the actuator boundary refactor. Rover adapter and rover sim are out of 
 
 ### Regression test strategy
 
-- **Primary gate: synthetic snapshot test at the controller boundary.** New file: `robot_follow/tests/test_robot_command_snapshot.py`.
+- **Primary gate: synthetic snapshot test at the controller boundary.** New file: `robot_follow/tests/test_robot_command_snapshot.py`. **This is a Phase-3-only artifact.** Its job is catching behavioral drift during the refactor. After Phase 3 closes, every future tuning change (rover `kp_yaw` in Phase 6, etc.) will break the snapshot. Plan to either delete it post-verifier or move it to `tests/regression_snapshots/phase3_baseline.py.archived`. Replace with property-based tests for ongoing protection (yaw points toward target, forward inversely proportional to bbox size, etc.).
 - **~100 representative Detection cases** spanning happy path (target-centered, target-offset), edge zones (bbox at top margin, bbox at bottom margin), emergency safety (bbox > max_bbox_height_safety), and search/target-lost (detection=None with various last_detection states).
-- **Snapshot fixture** (`robot_follow/tests/cases/drone_command_baseline.py` or similar) records the OLD `VelocityCommand` output sequence pre-rewrite. The test asserts: `controller.compute(det, drone_caps, config)` + `MavsdkDroneAdapter._translate_cmd(rc, det)` produces equivalent `VelocityBodyYawspeed` outputs for each case.
+- **Snapshot fixture** (`robot_follow/tests/cases/drone_command_baseline.py` or similar) records the OLD `VelocityCommand` output sequence pre-rewrite. The test asserts: `controller.compute(det, drone_caps, config)` + `MavsdkDroneAdapter._translate_cmd(rc, safety_ctx)` produces equivalent `VelocityBodyYawspeed` outputs for each case.
 - **Operator-witnessed SITL run required before phase close.** Pattern from Phase 1's Verification A: operator runs `drone-follow --robot drone --input udp://0.0.0.0:5600 --takeoff-landing --webui` against `sim/start_sim.sh --world walk_across_then_approach`, confirms behavior unchanged. Verifier marks `human_needed` until operator approves.
 - **Existing `test_controller.py` and `test_shared_state.py` must stay green.** No regression in the 176 existing passing tests.
+
+### Adapter unit-test plan (NEW from adversarial review)
+
+The snapshot test covers the controller-boundary contract. The adapter's INTERNAL behavior (altitude P, retreat-from-tilt, smoothing) needs its own safety net so future refactors don't silently break drone behavior.
+
+- **Extract pure functions from `MavsdkDroneAdapter`** so each is testable in isolation:
+  - `_apply_altitude_p(down_m_s, altitude_cache, config) → float` — altitude-hold correction
+  - `_apply_retreat_from_tilt(forward_m_s, safety_ctx, config) → float` — bottom-margin fade + retreat overlay
+  - `_apply_smoothing(cmd, prev_cmd, config) → RobotCommand` — EMA smoothing
+  - `_compute_search_yawspeed(last_detection, config) → float` — yaw-spin direction from last bbox side
+- **New file: `robot_follow/tests/test_mavsdk_drone_adapter.py`** with unit tests for each pure function. Mock-free; ~30 cases.
+- **Adapter integration test** in the same file: instantiate `MavsdkDroneAdapter` with a mock MAVSDK system; assert `send_command` orchestrates the pure functions in the right order with the right state.
 
 ### setup_env.sh ROS sourcing
 
@@ -102,10 +190,11 @@ Scope is the actuator boundary refactor. Rover adapter and rover sim are out of 
 ### Integration Points
 
 - `robot_follow/robot_follow_app.py:main()` — composition root. Becomes `run_robot()`; reads `--robot`, instantiates adapter, calls orchestrator.
-- `robot_follow/follow_api/types.py` — `VelocityCommand` deletion + `Detection` unchanged. `RobotCommand` lives in `robot_api/robot.py` (NOT in `follow_api/types.py`, because `follow_api` should not import from `robot_api`).
+- `robot_follow/follow_api/types.py` — `VelocityCommand` DELETED. `Detection` unchanged. **NEW: `Axis`, `Capabilities`, `RobotCommand`, `SafetyContext` added here** (revised from adversarial review — was originally placed in `robot_api/robot.py` but that inverted the dependency direction; `follow_api/types.py` is the right home as a pure shared-types leaf).
+- `robot_api/robot.py` — only contains the `Robot` protocol class. Imports types from `follow_api.types`. No types defined here.
 - `pyproject.toml` — `[tool.setuptools] packages.include` adds `"robot_api*"`. No version bump needed (still v1.1.0.dev0).
 - `setup_env.sh` — adds the conditional ROS source block after the venv activation.
-- `robot_follow/follow_api/controller.py` — return type changes; internal logic mostly unchanged.
+- `robot_follow/follow_api/controller.py` — return type changes to `RobotCommand`; `compute(detection, caps, config)` signature; internal logic mostly unchanged (yaw, forward, emergency safety stay; retreat-from-tilt + yaw-spin-on-loss removed).
 
 ### Out-of-scope code (does not move/change in Phase 3)
 
