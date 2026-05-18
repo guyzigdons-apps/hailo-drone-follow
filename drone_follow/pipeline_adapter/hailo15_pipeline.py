@@ -197,6 +197,8 @@ class Hailo15PipelineApp:
         self.target_state = target_state
         self._record_path = record_path
         self._rec_first_pts = None  # for PTS normalization on recording branch
+        self._det_log = None         # detections sidecar file (jsonl)
+        self._det_log_t0 = None      # wall-clock time of first detection write
         self.ui_state = ui_state
         self._eos_reached = eos_reached
         self.options_menu = options_menu
@@ -350,39 +352,46 @@ class Hailo15PipelineApp:
                 src_pad = rec_parse.get_static_pad("src")
                 src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_record_probe)
 
+    def _write_detection_log(self, detections, following_id):
+        """Append a detection record (JSONL) with timestamp relative to record start."""
+        import json as _json
+        if self._det_log is None:
+            log_path = self._record_path.rsplit(".", 1)[0] + ".jsonl"
+            self._det_log = open(log_path, "w", buffering=1)  # line-buffered
+            self._det_log_t0 = time.monotonic()
+            LOGGER.info("[h15] Detection log: %s", log_path)
+        t_rel = time.monotonic() - self._det_log_t0
+        rec = {"t": round(t_rel, 4), "following_id": following_id, "detections": detections}
+        self._det_log.write(_json.dumps(rec) + "\n")
+
     def _on_record_probe(self, pad, info):
         """Pad probe: rewrite buffer PTS/DTS so the recording starts at 0.
 
-        hailoencodebin emits buffers timestamped with absolute system time
-        and may emit out-of-order buffers (B-frames, config). We track the
-        minimum PTS/DTS seen and subtract it. Drops any buffer that would
-        go negative after subtraction.
+        hailoencodebin emits buffers timestamped with absolute system time.
+        We use the first DTS as the base (DTS is monotonic in encoded order)
+        and clamp any value that would go negative — never drop buffers,
+        since dropping reference frames breaks the H264 decode chain.
         """
         buf = info.get_buffer()
         if buf is None:
             return Gst.PadProbeReturn.OK
         pts = buf.pts
         dts = buf.dts
-        if pts == Gst.CLOCK_TIME_NONE:
+        # Prefer DTS as the base (monotonic). Fall back to PTS if no DTS.
+        ref = dts if dts != Gst.CLOCK_TIME_NONE else pts
+        if ref == Gst.CLOCK_TIME_NONE:
             return Gst.PadProbeReturn.OK
 
-        # Track lowest timestamp seen (handles out-of-order/config buffers)
+        if self._rec_first_pts is None:
+            self._rec_first_pts = ref
+            LOGGER.info("[h15] Recording timestamp base = %d ns", ref)
         base = self._rec_first_pts
-        if base is None or pts < base:
-            self._rec_first_pts = pts
-            base = pts
-            LOGGER.info("[h15] Recording PTS base updated to %d ns", base)
 
-        # Compute new timestamps; skip if would go negative
-        new_pts = pts - base
-        if new_pts < 0:
-            return Gst.PadProbeReturn.DROP
-        buf.pts = new_pts
+        # Subtract base; clamp to 0 (don't drop, to preserve reference chain)
+        if pts != Gst.CLOCK_TIME_NONE:
+            buf.pts = max(0, pts - base)
         if dts != Gst.CLOCK_TIME_NONE:
-            new_dts = dts - base
-            if new_dts < 0:
-                return Gst.PadProbeReturn.DROP
-            buf.dts = new_dts
+            buf.dts = max(0, dts - base)
         return Gst.PadProbeReturn.OK
 
     def _ensure_jpeg_encoder(self, width, height):
@@ -657,6 +666,11 @@ class Hailo15PipelineApp:
             following_id = self.target_state.get_target() if self.target_state else None
             self.ui_state.update_detections(ui_dets, following_id=following_id)
 
+        # Write detections to sidecar file for post-flight overlay
+        if self._record_path:
+            self._write_detection_log(ui_dets,
+                                      self.target_state.get_target() if self.target_state else None)
+
         if self._frame_count % 30 == 0:
             LOGGER.info("[h15] frame=%d detections=%d", self._frame_count, len(all_detections))
 
@@ -718,6 +732,12 @@ class Hailo15PipelineApp:
             self.pipeline.set_state(Gst.State.NULL)
         if self._jpeg_enc:
             self._jpeg_enc.set_state(Gst.State.NULL)
+        if self._det_log:
+            try:
+                self._det_log.close()
+            except OSError:
+                pass
+            self._det_log = None
         if self.loop:
             self.loop.quit()
         if self._configured_model:

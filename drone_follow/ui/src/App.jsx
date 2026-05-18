@@ -284,7 +284,9 @@ export default function App() {
       })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
-          if (data) setConfig(data);
+          // Merge so fields not in POST response (e.g., follow_server_port)
+          // are preserved from the previous state.
+          if (data) setConfig((prev) => ({ ...prev, ...data }));
         })
         .catch(() => {});
     }, DEBOUNCE_MS);
