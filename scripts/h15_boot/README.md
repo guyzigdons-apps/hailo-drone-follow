@@ -128,16 +128,58 @@ Then open `http://localhost:5001` in the browser.
 
 ## Recordings
 
-When `--record` is set, the service writes two files per run:
-- `/home/root/recordings/drone_<YYYYMMDD_HHMMSS>.mkv` — H264 video (no overlays)
-- `/home/root/recordings/drone_<YYYYMMDD_HHMMSS>.jsonl` — detection data per inference frame
+**Location on target:** `/home/root/recordings/`
 
-To overlay detections on the video post-flight (run on a machine with OpenCV):
+When `--record` is set, the service writes two files per run:
+- `drone_<YYYYMMDD_HHMMSS>.mkv` — H264 video (no overlays)
+- `drone_<YYYYMMDD_HHMMSS>.jsonl` — detection data per inference frame
+
+**List recordings on target:**
 ```bash
-scp root@10.0.0.1:/home/root/recordings/drone_xxx.{mkv,jsonl} .
-./scripts/post_process/overlay_detections.py drone_xxx.mkv
-# → drone_xxx_annotated.mp4
+ssh root@10.0.0.1 "ls -lt /home/root/recordings/"
 ```
+
+**Copy recordings off the target:**
+```bash
+scp 'root@10.0.0.1:/home/root/recordings/drone_*' ./
+```
+
+**Disk usage / free space on target:**
+```bash
+ssh root@10.0.0.1 "df -h /home/root && du -sh /home/root/recordings/"
+```
+
+**Delete old recordings on target:**
+```bash
+ssh root@10.0.0.1 "rm /home/root/recordings/drone_*"
+```
+
+**Generate annotated video (post-flight, on a machine with OpenCV):**
+
+Requires `pip install opencv-python` on the machine running the script.
+
+```bash
+# Pull both files (the .jsonl must be next to the .mkv)
+scp root@10.0.0.1:/home/root/recordings/drone_xxx.{mkv,jsonl} .
+
+# Default: auto-finds drone_xxx.jsonl next to drone_xxx.mkv
+# Writes drone_xxx_annotated.mp4
+./scripts/post_process/overlay_detections.py drone_xxx.mkv
+
+# Explicit detection log file
+./scripts/post_process/overlay_detections.py drone_xxx.mkv path/to/dets.jsonl
+
+# Custom output path
+./scripts/post_process/overlay_detections.py drone_xxx.mkv -o my_overlay.mp4
+
+# Different codec (mp4v default; avc1 for H264; XVID for AVI)
+./scripts/post_process/overlay_detections.py drone_xxx.mkv --codec avc1
+
+# Help
+./scripts/post_process/overlay_detections.py --help
+```
+
+Output: green boxes around the followed target, white boxes around the rest, with `ID N XX%` labels.
 
 ## Logs
 
