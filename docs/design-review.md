@@ -211,9 +211,9 @@ sequenceDiagram
         SDS-->>CL: Detection + frame_count
         Note over CL: Check staleness (0.5s),<br/>search timeout (60s),<br/>IDLE mode
         CL->>CTRL: detection, config
-        Note over CTRL: center_x → yaw (sqrt P)<br/>center_y → forward (sqrt P)<br/>bbox_height → down (plain P)
-        CTRL-->>CL: VelocityCommand(fwd, right, down, yaw)
-        Note over CL: Altitude floor/ceiling clamp<br/>(min_altitude..max_altitude)
+        Note over CTRL: center_x → yaw (sqrt P)<br/>bbox_height → forward (distance P)<br/>down=0 (PX4 alt-hold)
+        CTRL-->>CL: VelocityCommand(fwd, right, 0, yaw)
+        Note over CL: PX4 alt-hold P-loop on (current_alt − target_altitude)<br/>Altitude floor/ceiling clamp<br/>(min_altitude..max_altitude)
         CL->>VAPI: send(cmd)
         Note over VAPI: Clamp all axes<br/>Per-axis EMA in VelocityCommandAPI
         VAPI->>PX4: set_velocity_body(fwd, right, down, yaw)
@@ -324,10 +324,10 @@ graph LR
 
 A single `hailooverlay` sits between `t_pre` and `t_post`, so both the primary output and the recording branch share the same overlay rendering. The MJPEG branch splits off before the overlay (clean frames for web UI SVG overlays).
 
-The primary branch output from `t_post` depends on CLI flags:
-- `--openhd-stream`: x264enc + rtph264pay + udpsink (port 5500)
-- `--no-display`: fakesink
-- default: ximagesink (X11 window)
+The primary branch output depends on CLI flags:
+- `--openhd`: openh264enc/x264enc + rtph264pay + udpsink (port 5500)
+- `--display`: fpsdisplaysink (X11 window)
+- default (no flags): fakesink (the pipeline still needs a sink)
 
 ### Named Elements
 
@@ -396,15 +396,17 @@ The primary branch output from `t_post` depends on CLI flags:
 @dataclass
 class VelocityCommand:
     forward_m_s: float      # +X body (nose)
-    right_m_s: float        # +Y body (starboard)
     down_m_s: float         # +Z body (down positive, NED)
     yawspeed_deg_s: float   # +ve = clockwise from above
 ```
 
-Single 4-DOF output per control tick. No attitude, no position targets, no thrust.
-`down_m_s` is now vision-driven from `bbox_height` (plain P: person too small →
-descend, too big → climb), with floor/ceiling clamping in `live_control_loop`.
-See [control-architecture.md](control-architecture.md) for the control math.
+3-DOF output per control tick. No attitude, no position targets, no thrust.
+The MAVSDK 4-tuple's right (+Y body) slot is a literal 0.0 at the boundary —
+the orbit-era `right_m_s` field was dropped along with the orbit feature.
+`down_m_s` is also a literal 0.0 from the controller; the altitude axis is
+closed in `live_control_loop` by a P-loop on `(current_alt − target_altitude)`
+with gain `kp_alt_hold` and floor/ceiling clamping. See
+[control-architecture.md](control-architecture.md) for the control math.
 
 ---
 
@@ -508,20 +510,15 @@ stateDiagram-v2
     TRACK --> IDLE: operator pauses or lock lost
     IDLE --> TRACK: operator resumes
 
-    TRACK --> ORBIT: follow_mode=orbit
-    ORBIT --> TRACK: follow_mode=follow
-    ORBIT --> SEARCH_WAIT: detection lost
-
     LANDING --> [*]
 ```
 
 | Mode | Behaviour |
 |------|-----------|
-| **TRACK** | Full 4-axis control: yaw (center_x) + forward (center_y) + altitude (bbox_height) + optional orbit |
+| **TRACK** | yaw (center_x → yawspeed) + forward (bbox_height → distance), altitude held by PX4 |
 | **SEARCH_WAIT** | Hold last velocity command (< 2s buffer) |
 | **SEARCH** | Slow yaw spin (10 deg/s) toward last-seen side, dampened forward |
 | **IDLE** | Zero velocity — hover in place |
-| **ORBIT** | TRACK + constant lateral velocity (drone circles subject) |
 | **LANDING** | Shutdown then `action.land()` |
 
 For the control math behind each mode, see
@@ -555,7 +552,7 @@ flowchart TD
     CONF -->|no| SKIP["Exit (no-op)"]
     CONF -->|yes| AIR["scripts/start_air.sh"]
     AIR --> OHD["Start OpenHD --air<br/>(background)"]
-    AIR --> DF["drone-follow<br/>--input rpi --openhd-stream<br/>--connection tcpout://127.0.0.1:5760"]
+    AIR --> DF["drone-follow<br/>--input rpi --openhd<br/>--connection tcpout://127.0.0.1:5760"]
 ```
 
 ### Execution Modes
@@ -563,9 +560,9 @@ flowchart TD
 | Mode | Command | Use case |
 |------|---------|----------|
 | Real drone + OpenHD | `scripts/start_air.sh` | Flight (RPi air unit) |
-| Dev machine + USB camera | `drone-follow --input usb --serial --ui` | Bench testing |
-| Simulation | `sim/start_sim.sh` + `drone-follow --input udp://... --takeoff-landing --ui` | Development |
-| Headless OpenHD | `drone-follow --input rpi --openhd-stream --no-display` | SSH sessions |
+| Dev machine + USB camera | `drone-follow --input usb --serial --webui` | Bench testing |
+| Simulation | `sim/start_sim.sh` + `drone-follow --input udp://... --takeoff-landing --webui` | Development |
+| Headless OpenHD | `drone-follow --input rpi --openhd` | SSH sessions |
 
 ---
 

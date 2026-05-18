@@ -2,6 +2,15 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 const LOG_POLL_INTERVAL = 500; // ms
 const DEBOUNCE_MS = 250;
+// Dead-zone radius for overlay rendering, in normalized frame coords.
+// While the target centre stays within this distance of the rendered
+// position, rendering doesn't move — kills frame-to-frame jitter.
+const OVERLAY_DEAD_ZONE = 0.01;
+// Per-RAF lerp factor pulling the rendered position toward the target.
+const OVERLAY_SMOOTH_ALPHA = 0.25;
+const CROSS_HALF_SIZE = 10; // pixels, half the arm length of the cross
+const CROSS_STROKE = 3;
+const CROSS_HALO_STROKE = 6;
 
 export default function App() {
   const [detections, setDetections] = useState([]);
@@ -18,6 +27,12 @@ export default function App() {
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
   const logEndRef = useRef(null);
+  // Per-id latest target bbox (cx, cy, w, h) and smoothly-interpolated
+  // rendered bbox, both in normalized coords. RAF lerps rendered → target.
+  const targetBoxesRef = useRef(new Map());
+  const renderedBoxesRef = useRef(new Map());
+  // Bumped by the RAF loop to trigger SVG re-renders between detection events.
+  const [, setSmoothTick] = useState(0);
 
   // Frame-synced detections via SSE (replaces polling)
   useEffect(() => {
@@ -58,15 +73,20 @@ export default function App() {
     return () => { active = false; };
   }, []);
 
-  // Fetch config on mount
+  // Fetch config on mount, and refresh on every lock/unlock so the
+  // Target Size slider tracks the bbox setpoint that the server captures
+  // at lock time (manual click *and* AUTO acquisition both rewrite
+  // controller_config.target_bbox_height under the hood).
   useEffect(() => {
+    let aborted = false;
     fetch("/api/config")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data) setConfig(data);
+        if (data && !aborted) setConfig(data);
       })
       .catch(() => {});
-  }, []);
+    return () => { aborted = true; };
+  }, [followingId]);
 
   // Poll logs
   useEffect(() => {
@@ -104,6 +124,64 @@ export default function App() {
       logEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [logs]);
+
+  // Push the latest detection bboxes into the target map; prune ids that
+  // disappeared from this frame. Newly-seen ids seed the rendered box at
+  // the target so they don't glide in from the previous position.
+  useEffect(() => {
+    const targets = targetBoxesRef.current;
+    const rendered = renderedBoxesRef.current;
+    const seen = new Set();
+    for (const det of detections) {
+      if (det.id == null) continue;
+      seen.add(det.id);
+      const cx = det.bbox.x + det.bbox.w / 2;
+      const cy = det.bbox.y + det.bbox.h / 2;
+      targets.set(det.id, { cx, cy, w: det.bbox.w, h: det.bbox.h });
+      if (!rendered.has(det.id)) {
+        rendered.set(det.id, { cx, cy, w: det.bbox.w, h: det.bbox.h });
+      }
+    }
+    for (const k of [...targets.keys()]) if (!seen.has(k)) targets.delete(k);
+    for (const k of [...rendered.keys()]) if (!seen.has(k)) rendered.delete(k);
+  }, [detections]);
+
+  // RAF loop: lerp rendered boxes toward targets; bump tick to re-render.
+  // Centre movement below the dead-zone is ignored so the overlay parks.
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const targets = targetBoxesRef.current;
+      const rendered = renderedBoxesRef.current;
+      let dirty = false;
+      for (const [id, t] of targets) {
+        const cur = rendered.get(id);
+        if (!cur) {
+          rendered.set(id, { ...t });
+          dirty = true;
+          continue;
+        }
+        const dx = t.cx - cur.cx;
+        const dy = t.cy - cur.cy;
+        if (dx * dx + dy * dy >= OVERLAY_DEAD_ZONE * OVERLAY_DEAD_ZONE) {
+          cur.cx += dx * OVERLAY_SMOOTH_ALPHA;
+          cur.cy += dy * OVERLAY_SMOOTH_ALPHA;
+          dirty = true;
+        }
+        const dw = t.w - cur.w;
+        const dh = t.h - cur.h;
+        if (Math.abs(dw) > 1e-4 || Math.abs(dh) > 1e-4) {
+          cur.w += dw * OVERLAY_SMOOTH_ALPHA;
+          cur.h += dh * OVERLAY_SMOOTH_ALPHA;
+          dirty = true;
+        }
+      }
+      if (dirty) setSmoothTick((n) => (n + 1) & 0xffff);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   // MJPEG stream via fetch + ReadableStream → canvas
   useEffect(() => {
@@ -298,26 +376,8 @@ export default function App() {
     postConfig({ [key]: parseFloat(value) });
   };
 
-  const savedForwardGainRef = useRef(null);
-
   const onToggle = (key) => {
     const newVal = !config[key];
-    if (key === "yaw_only") {
-      if (newVal) {
-        // Turning yaw_only ON: save current forward gain, set to 0
-        savedForwardGainRef.current = config.kp_forward;
-        const updated = { ...config, yaw_only: true, kp_forward: 0 };
-        setConfig(updated);
-        postConfig({ yaw_only: true, kp_forward: 0 });
-      } else {
-        // Turning yaw_only OFF: restore saved forward gain
-        const restored = savedForwardGainRef.current ?? 3.0;
-        const updated = { ...config, yaw_only: false, kp_forward: restored };
-        setConfig(updated);
-        postConfig({ yaw_only: false, kp_forward: restored });
-      }
-      return;
-    }
     const updated = { ...config, [key]: newVal };
     setConfig(updated);
     postConfig({ [key]: newVal });
@@ -337,10 +397,7 @@ export default function App() {
         {velocity && (
           <span className="velocity-text">
             {velocity.mode} | Fwd {velocity.forward_m_s.toFixed(2)} m/s
-            {velocity.right_m_s != null && velocity.right_m_s !== 0
-              ? ` | Lat ${velocity.right_m_s.toFixed(2)} m/s`
-              : ""}{" "}
-            | Down {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
+            {" "}| Down {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
             {velocity.yawspeed_deg_s.toFixed(1)} deg/s
           </span>
         )}
@@ -353,22 +410,6 @@ export default function App() {
             {perf.hailo_temp_c > 0 ? ` | ${perf.hailo_temp_c}\u00b0C` : ""}
           </span>
         )}
-        <button
-          className={`record-btn ${recording ? "recording" : ""}`}
-          onClick={handleRecord}
-        >
-          {recording ? "Stop Rec" : "Record"}
-        </button>
-        <button className="clear-btn" onClick={handleClear}>
-          Clear Target
-        </button>
-        <button className="clear-btn" onClick={handleConfigSave} title="Save current config to df_config.json on the air unit">
-          Save Config
-        </button>
-        <button className="clear-btn" onClick={handleConfigLoad} title="Live-reload config from df_config.json on the air unit">
-          Load Config
-        </button>
-        {configStatus && <span className="config-status">{configStatus}</span>}
       </div>
 
       <div className="main-layout">
@@ -382,8 +423,8 @@ export default function App() {
                   <span className="control-label">Target Size</span>
                   <input
                     type="range"
-                    min="0.05"
-                    max="0.9"
+                    min="0.10"
+                    max="0.25"
                     step="0.01"
                     value={config.target_bbox_height}
                     disabled={config.yaw_only}
@@ -398,7 +439,7 @@ export default function App() {
                   <input
                     type="range"
                     min="1"
-                    max="20"
+                    max="8"
                     step="0.5"
                     value={config.target_altitude}
                     onChange={(e) => onSlider("target_altitude", e.target.value)}
@@ -406,35 +447,35 @@ export default function App() {
                   <span className="control-value">{config.target_altitude.toFixed(1)}m</span>
                 </label>
                 <label className="control-row">
-                  <span className="control-label">Target Center Y</span>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="0.9"
-                    step="0.05"
-                    value={config.target_center_y}
-                    onChange={(e) => onSlider("target_center_y", e.target.value)}
-                  />
-                  <span className="control-value">{config.target_center_y.toFixed(2)}</span>
-                </label>
-                <label className="control-row">
-                  <span className="control-label">KP Altitude</span>
+                  <span className="control-label">KP Distance</span>
                   <input
                     type="range"
                     min="0"
-                    max="10"
+                    max="3"
                     step="0.1"
-                    value={config.kp_altitude}
-                    onChange={(e) => onSlider("kp_altitude", e.target.value)}
+                    value={config.kp_distance}
+                    onChange={(e) => onSlider("kp_distance", e.target.value)}
                   />
-                  <span className="control-value">{config.kp_altitude.toFixed(1)}</span>
+                  <span className="control-value">{config.kp_distance.toFixed(1)}</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">KP Dist Back</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="5"
+                    step="0.1"
+                    value={config.kp_distance_back}
+                    onChange={(e) => onSlider("kp_distance_back", e.target.value)}
+                  />
+                  <span className="control-value">{config.kp_distance_back.toFixed(1)}</span>
                 </label>
                 <label className="control-row">
                   <span className="control-label">Min Altitude</span>
                   <input
                     type="range"
                     min="1"
-                    max="10"
+                    max="5"
                     step="0.5"
                     value={config.min_altitude}
                     onChange={(e) => onSlider("min_altitude", e.target.value)}
@@ -445,8 +486,8 @@ export default function App() {
                   <span className="control-label">Max Altitude</span>
                   <input
                     type="range"
-                    min="5"
-                    max="50"
+                    min="3"
+                    max="10"
                     step="1"
                     value={config.max_altitude}
                     onChange={(e) => onSlider("max_altitude", e.target.value)}
@@ -475,79 +516,13 @@ export default function App() {
                     </button>
                   </div>
                 </label>
-                <label className="control-row">
-                  <span className="control-label">Mode</span>
-                  <div className="toggle-wrapper">
-                    <button
-                      className={`toggle-btn ${config.follow_mode === "follow" ? "toggle-on" : ""}`}
-                      onClick={() => {
-                        const updated = { ...config, follow_mode: "follow" };
-                        setConfig(updated);
-                        postConfig({ follow_mode: "follow" });
-                      }}
-                    >
-                      FOLLOW
-                    </button>
-                    <button
-                      className={`toggle-btn ${config.follow_mode === "orbit" ? "toggle-on" : ""}`}
-                      onClick={() => {
-                        const updated = { ...config, follow_mode: "orbit" };
-                        setConfig(updated);
-                        postConfig({ follow_mode: "orbit" });
-                      }}
-                    >
-                      ORBIT
-                    </button>
-                  </div>
-                </label>
-                {config.follow_mode === "orbit" && (
-                  <>
-                    <label className="control-row">
-                      <span className="control-label">Orbit Speed</span>
-                      <input
-                        type="range"
-                        min="0.2"
-                        max="3.0"
-                        step="0.1"
-                        value={config.orbit_speed_m_s}
-                        onChange={(e) => onSlider("orbit_speed_m_s", e.target.value)}
-                      />
-                      <span className="control-value">{config.orbit_speed_m_s.toFixed(1)} m/s</span>
-                    </label>
-                    <label className="control-row">
-                      <span className="control-label">Direction</span>
-                      <div className="toggle-wrapper">
-                        <button
-                          className={`toggle-btn ${config.orbit_direction === 1 ? "toggle-on" : ""}`}
-                          onClick={() => {
-                            const updated = { ...config, orbit_direction: 1 };
-                            setConfig(updated);
-                            postConfig({ orbit_direction: 1 });
-                          }}
-                        >
-                          CW
-                        </button>
-                        <button
-                          className={`toggle-btn ${config.orbit_direction === -1 ? "toggle-on" : ""}`}
-                          onClick={() => {
-                            const updated = { ...config, orbit_direction: -1 };
-                            setConfig(updated);
-                            postConfig({ orbit_direction: -1 });
-                          }}
-                        >
-                          CCW
-                        </button>
-                      </div>
-                    </label>
-                  </>
-                )}
                 {/* --- Tuning parameters --- */}
                 <label className="control-row">
                   <span className="control-label">KP Yaw</span>
                   <input
                     type="range"
                     min="0"
-                    max="20"
+                    max="10"
                     step="0.1"
                     value={config.kp_yaw}
                     onChange={(e) => onSlider("kp_yaw", e.target.value)}
@@ -559,7 +534,7 @@ export default function App() {
                   <input
                     type="range"
                     min="10"
-                    max="360"
+                    max="180"
                     step="5"
                     value={config.max_yawspeed}
                     onChange={(e) => onSlider("max_yawspeed", e.target.value)}
@@ -571,7 +546,7 @@ export default function App() {
                   <input
                     type="range"
                     min="0"
-                    max="15"
+                    max="8"
                     step="0.5"
                     value={config.dead_zone_deg}
                     onChange={(e) => onSlider("dead_zone_deg", e.target.value)}
@@ -579,37 +554,11 @@ export default function App() {
                   <span className="control-value">{config.dead_zone_deg.toFixed(1)}°</span>
                 </label>
                 <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
-                  <span className="control-label">KP Forward</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="20"
-                    step="0.1"
-                    value={config.kp_forward}
-                    disabled={config.yaw_only}
-                    onChange={(e) => onSlider("kp_forward", e.target.value)}
-                  />
-                  <span className="control-value">{config.kp_forward.toFixed(1)}</span>
-                </label>
-                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
-                  <span className="control-label">KP Backward</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="20"
-                    step="0.1"
-                    value={config.kp_backward}
-                    disabled={config.yaw_only}
-                    onChange={(e) => onSlider("kp_backward", e.target.value)}
-                  />
-                  <span className="control-value">{config.kp_backward.toFixed(1)}</span>
-                </label>
-                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
                   <span className="control-label">Max Fwd Accel</span>
                   <input
                     type="range"
                     min="0.1"
-                    max="10"
+                    max="5"
                     step="0.1"
                     value={config.max_forward_accel}
                     disabled={config.yaw_only}
@@ -617,24 +566,12 @@ export default function App() {
                   />
                   <span className="control-value">{config.max_forward_accel.toFixed(1)} m/s²</span>
                 </label>
-                <label className="control-row">
-                  <span className="control-label">Dead Zone Y</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="10"
-                    step="0.5"
-                    value={config.dead_zone_y_deg}
-                    onChange={(e) => onSlider("dead_zone_y_deg", e.target.value)}
-                  />
-                  <span className="control-value">{config.dead_zone_y_deg.toFixed(1)}deg</span>
-                </label>
                 <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
                   <span className="control-label">Dead Zone BBox %</span>
                   <input
                     type="range"
                     min="0"
-                    max="50"
+                    max="25"
                     step="1"
                     value={config.dead_zone_bbox_percent}
                     disabled={config.yaw_only}
@@ -690,31 +627,6 @@ export default function App() {
                   />
                   <span className="control-value">{config.forward_alpha.toFixed(2)}</span>
                 </label>
-                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
-                  <span className="control-label">Right Smooth</span>
-                  <div className="toggle-wrapper">
-                    <button
-                      className={`toggle-btn ${config.smooth_right ? "toggle-on" : ""}`}
-                      disabled={config.yaw_only}
-                      onClick={() => onToggle("smooth_right")}
-                    >
-                      {config.smooth_right ? "ON" : "OFF"}
-                    </button>
-                  </div>
-                </label>
-                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
-                  <span className="control-label">Right Alpha</span>
-                  <input
-                    type="range"
-                    min="0.01"
-                    max="1.0"
-                    step="0.01"
-                    value={config.right_alpha}
-                    disabled={config.yaw_only}
-                    onChange={(e) => onSlider("right_alpha", e.target.value)}
-                  />
-                  <span className="control-value">{config.right_alpha.toFixed(2)}</span>
-                </label>
                 <label className="control-row">
                   <span className="control-label">Down Smooth</span>
                   <div className="toggle-wrapper">
@@ -741,13 +653,119 @@ export default function App() {
               </div>
             </div>
           )}
+        </div>
+
+        <div className="video-column">
+          <div className="video-container">
+        <canvas
+          ref={canvasRef}
+          className="video-feed"
+        />
+        {vw > 0 && vh > 0 && (
+          <svg className="overlay" viewBox={`0 0 ${vw} ${vh}`}>
+            {detections.map((det, i) => {
+              const isFollowing =
+                det.id != null && det.id === followingId;
+              const hasId = det.id != null;
+              // ID-less detections (transient raw boxes) skip smoothing.
+              const smoothed = hasId
+                ? renderedBoxesRef.current.get(det.id)
+                : null;
+              const cx = smoothed ? smoothed.cx : det.bbox.x + det.bbox.w / 2;
+              const cy = smoothed ? smoothed.cy : det.bbox.y + det.bbox.h / 2;
+              const bw = smoothed ? smoothed.w : det.bbox.w;
+              const bh = smoothed ? smoothed.h : det.bbox.h;
+              const px = (cx - bw / 2) * vw;
+              const py = (cy - bh / 2) * vh;
+              const pw = bw * vw;
+              const ph = bh * vh;
+              const pcx = cx * vw;
+              const pcy = cy * vh;
+
+              return (
+                <g
+                  key={`${det.id ?? "x"}-${i}`}
+                  onClick={hasId ? () => handleFollow(det.id) : undefined}
+                  style={{ cursor: hasId ? "pointer" : "default", pointerEvents: "auto" }}
+                >
+                  {isFollowing ? (
+                    <>
+                      {/* invisible bbox-sized hit target so the whole person stays clickable */}
+                      <rect
+                        x={px}
+                        y={py}
+                        width={pw}
+                        height={ph}
+                        fill="transparent"
+                        stroke="none"
+                      />
+                      {/* black halo so the cross stays readable on any background */}
+                      <line
+                        x1={pcx - CROSS_HALF_SIZE}
+                        y1={pcy}
+                        x2={pcx + CROSS_HALF_SIZE}
+                        y2={pcy}
+                        stroke="#000000"
+                        strokeWidth={CROSS_HALO_STROKE}
+                        strokeOpacity={0.75}
+                        strokeLinecap="round"
+                      />
+                      <line
+                        x1={pcx}
+                        y1={pcy - CROSS_HALF_SIZE}
+                        x2={pcx}
+                        y2={pcy + CROSS_HALF_SIZE}
+                        stroke="#000000"
+                        strokeWidth={CROSS_HALO_STROKE}
+                        strokeOpacity={0.75}
+                        strokeLinecap="round"
+                      />
+                      <line
+                        x1={pcx - CROSS_HALF_SIZE}
+                        y1={pcy}
+                        x2={pcx + CROSS_HALF_SIZE}
+                        y2={pcy}
+                        stroke="#80f060"
+                        strokeWidth={CROSS_STROKE}
+                        strokeOpacity={1.0}
+                        strokeLinecap="round"
+                      />
+                      <line
+                        x1={pcx}
+                        y1={pcy - CROSS_HALF_SIZE}
+                        x2={pcx}
+                        y2={pcy + CROSS_HALF_SIZE}
+                        stroke="#80f060"
+                        strokeWidth={CROSS_STROKE}
+                        strokeOpacity={1.0}
+                        strokeLinecap="round"
+                      />
+                    </>
+                  ) : (
+                    <rect
+                      x={px}
+                      y={py}
+                      width={pw}
+                      height={ph}
+                      fill="transparent"
+                      stroke="#ffffff"
+                      strokeWidth={2}
+                      strokeOpacity={0.8}
+                    />
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+        )}
+          </div>
 
           <div className="logs-panel side-card">
             <button
               className="controls-toggle"
               onClick={() => setLogsOpen((o) => !o)}
             >
-              Logs {logsOpen ? "\u25B2" : "\u25BC"}
+              Logs {logsOpen ? "▲" : "▼"}
             </button>
             {logsOpen && (
               <div className="logs-body">
@@ -762,59 +780,23 @@ export default function App() {
           </div>
         </div>
 
-        <div className="video-column">
-          <div className="video-container">
-        <canvas
-          ref={canvasRef}
-          className="video-feed"
-        />
-        {vw > 0 && vh > 0 && (
-          <svg className="overlay" viewBox={`0 0 ${vw} ${vh}`}>
-            {detections.map((det) => {
-              const x = det.bbox.x * vw;
-              const y = det.bbox.y * vh;
-              const w = det.bbox.w * vw;
-              const h = det.bbox.h * vh;
-              const isFollowing =
-                det.id != null && det.id === followingId;
-              const hasId = det.id != null;
-
-              return (
-                <g
-                  key={det.id ?? `${det.bbox.x}-${det.bbox.y}`}
-                  onClick={hasId ? () => handleFollow(det.id) : undefined}
-                  style={{ cursor: hasId ? "pointer" : "default", pointerEvents: "auto" }}
-                >
-                  <rect
-                    x={x}
-                    y={y}
-                    width={w}
-                    height={h}
-                    fill="transparent"
-                    stroke={isFollowing ? "#00ff00" : "#ffffff"}
-                    strokeWidth={isFollowing ? 3 : 2}
-                    strokeOpacity={0.9}
-                  />
-                  <text
-                    x={x + 4}
-                    y={y - 6}
-                    fill={isFollowing ? "#00ff00" : "#ffffff"}
-                    fontSize={14}
-                    fontFamily="monospace"
-                    fontWeight="bold"
-                    style={{
-                      textShadow: "1px 1px 2px rgba(0,0,0,0.8)",
-                    }}
-                  >
-                    {hasId ? `ID: ${det.id}` : "person"}{" "}
-                    ({Math.round(det.confidence * 100)}%) h:{det.bbox.h.toFixed(2)}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
-        )}
-          </div>
+        <div className="action-panel">
+          <button
+            className={`record-btn ${recording ? "recording" : ""}`}
+            onClick={handleRecord}
+          >
+            {recording ? "Stop Rec" : "Record"}
+          </button>
+          <button className="clear-btn" onClick={handleClear}>
+            Clear Target
+          </button>
+          <button className="clear-btn" onClick={handleConfigSave} title="Save current config to df_config.json on the air unit">
+            Save Config
+          </button>
+          <button className="clear-btn" onClick={handleConfigLoad} title="Live-reload config from df_config.json on the air unit">
+            Load Config
+          </button>
+          {configStatus && <span className="config-status">{configStatus}</span>}
         </div>
       </div>
     </div>

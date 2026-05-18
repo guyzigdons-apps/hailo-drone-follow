@@ -17,7 +17,11 @@ try:
 except ImportError:
     create_h15_app = None
 
+from .tracker_factory import add_tracker_args
+
+
 __all__ = [
     "create_app",
     "create_h15_app",
+    "add_tracker_args",
 ]

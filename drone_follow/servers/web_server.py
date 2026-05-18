@@ -100,12 +100,11 @@ class SharedUIState:
         with self._lock:
             self._perf = perf
 
-    def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str, right_m_s: float = 0.0):
+    def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str):
         """Called from control loop to expose current command velocity in UI."""
         with self._lock:
             self._velocity = {
                 "forward_m_s": float(forward_m_s),
-                "right_m_s": float(right_m_s),
                 "down_m_s": float(down_m_s),
                 "yawspeed_deg_s": float(yawspeed_deg_s),
                 "mode": str(mode),
@@ -259,8 +258,6 @@ class _WebHandler(BaseHTTPRequestHandler):
 
     _CONFIG_FIELDS = {
         "kp_yaw": float,
-        "kp_forward": float,
-        "kp_backward": float,
         "max_forward": float,
         "max_backward": float,
         "max_forward_accel": float,
@@ -269,25 +266,23 @@ class _WebHandler(BaseHTTPRequestHandler):
         "yaw_only": bool,
         "auto_select": bool,
         "target_bbox_height": float,
-        "target_center_y": float,
-        "dead_zone_y_deg": float,
-        "kp_altitude": float,
+        "kp_distance": float,
+        "kp_distance_back": float,
         "dead_zone_bbox_percent": float,
         "max_climb_speed": float,
+        "kp_alt_hold": float,
         "min_altitude": float,
         "max_altitude": float,
+        "top_margin_safety": float,
+        "bottom_margin_safety": float,
         "smooth_yaw": bool,
         "yaw_alpha": float,
         "smooth_forward": bool,
         "forward_alpha": float,
-        "smooth_right": bool,
-        "right_alpha": float,
+        "forward_velocity_deadband": float,
         "smooth_down": bool,
         "down_alpha": float,
         "target_altitude": float,
-        "follow_mode": str,
-        "orbit_speed_m_s": float,
-        "orbit_direction": int,
     }
 
     def _handle_get_config(self):

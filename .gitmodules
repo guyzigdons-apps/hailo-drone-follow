@@ -1,3 +1,7 @@
 [submodule "sim/PX4-Autopilot"]
 	path = sim/PX4-Autopilot
 	url = https://github.com/PX4/PX4-Autopilot.git
+[submodule "hailo-apps"]
+	path = hailo-apps
+	url = git@github.com:hailocs/hailo-apps-internal.git
+	branch = community_plugins
