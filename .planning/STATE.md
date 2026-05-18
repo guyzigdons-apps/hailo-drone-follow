@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 8
+current_plan: 3
 status: executing
 stopped_at: Completed 02-07-PLAN.md — CLEAN-16 SSE Condition + frame_seq race fix + CLEAN-17 socket reuse + CLEAN-18 O(1) dedup; Phase 2 done (18/18 CLEAN items closed; 5/5 ROADMAP criteria closed; 3 xfails flipped to passes; 0 xfailed remaining)
-last_updated: "2026-05-17T15:34:12.261Z"
-last_activity: 2026-05-17
+last_updated: "2026-05-18T20:07:40.221Z"
+last_activity: 2026-05-18
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 11
-  completed_plans: 11
-  percent: 82
+  total_plans: 21
+  completed_plans: 13
+  percent: 33
 ---
 
 # Project State
@@ -22,22 +22,23 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 **Core value:** The pipeline keeps a target person in frame and computes safe velocity commands for the robot, even when the target is briefly occluded — without operator input.
-**Current focus:** v1.1 Phase 2 — Cleanup (Wave 0 done; Waves 1-3 ahead)
+**Current focus:** v1.1 Phase 3 — Abstraction (Wave 1 in progress; 03-01 + 03-02 landing in parallel)
 
 ## Current Position
 
-Phase: 2 of 6 (Cleanup) — **in progress, Waves 1-3 mostly complete (02-01..04 + 02-06 all landed; 02-05 + 02-07 remain)**
-Plan: 6 of 8 complete (02-00 + 02-01 + 02-02 + 02-03 + 02-04 + 02-06)
-Current Plan: 8
-Total Plans in Phase: 8
-Status: In progress
-Last activity: 2026-05-17
+Phase: 3 of 6 (Abstraction) — **in progress, Wave 1 (03-01 + 03-02 parallel)**
+Plan: 3 of 10
+Current Plan: 3
+Total Plans in Phase: 10
+Status: Ready to execute
+Last activity: 2026-05-18
 
-Progress: [████████░░] 82%
+Progress: [██████░░░░] 62%
 
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 4
 - Average duration: 24.5 min
 - Total execution time: 98 min (1.6 h)
@@ -64,6 +65,8 @@ Progress: [████████░░] 82%
 | Phase 02-cleanup P06 | 5 min | 2 tasks | 4 files |
 | Phase 02-cleanup P05 | 17 min | 2 tasks tasks | 5 files files |
 | Phase 02-cleanup P07 | 5 min | 3 tasks | 4 files |
+| Phase 03-abstraction P02 | 4 | 3 tasks | 5 files |
+| Phase 03-abstraction P01 | 8 | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -142,6 +145,14 @@ Progress: [████████░░] 82%
 - **CLEAN-18 — `person_by_obj_id = {id(p): p for p in persons}` dict built ONCE at the top of `_update_ui`; O(n²) worst-case (n persons all sharing one tid via multi-scale tile duplicates) collapses to O(n) construction + O(1) lookup.** Identical semantics; the lookup dict is just a precomputed inverse of the same `id(p) -> p` mapping the old `next((q for q in persons if id(q) == prev), None)` recomputed inside its predicate.
 - **Phase 2 closes with `0 xfailed` in the full suite.** Two Wave-0 scaffolds — `test_vision_branches.py` (CLEAN-15, plan 02-05) and `test_web_server_sse.py` (CLEAN-16, this plan) — both flipped from xfail to pass without their markers. Manual two-tab browser CLEAN-16 smoke is deferred to the operator's phase-gate run (not pytestable). `DEFER-02-00-A` baseline (2 controller failures) persists unchanged into Phase 3; recommended action is a CLEAN-19 / Phase-2.5 patch before Phase 3 begins.
 
+### Phase 3 decisions (2026-05-18, 03-02 execute)
+
+- **Wave-0 scaffolds for ABS-01/02/03/09/10 use `strict=False`.** Several wave-0 tests xpass today coincidentally (drone-help-includes-flag passes because no `--robot` dispatch yet means argparse short-circuits on `--help` with all flags visible; legacy VelocityCommand still around). Locking these as strict would break the suite on parallel-wave merges. Strict semantics belong to the xfail-strip plans (03-03..09).
+- **`XFAIL_REASON_*` module-top constants in every new test file.** Future agents grep `git grep "XFAIL_REASON" robot_follow/tests/` to find every strip site mechanically. Mirrors the discipline established in 02-00/02-05/02-07. Five files have constants this plan: `test_robot_command_shape.py` (LEGACY + NEW), `test_robot_protocol_shape.py` (PROTOCOL + ADAPTER), `test_layout_smoke.py` (ADAPTER + DRONE_API_DELETED), `test_cli_help_dispatch.py` (single `XFAIL_REASON`), `test_setup_env_sh.py` (single `XFAIL_REASON`).
+- **`git mv` preserves filesystem rename but NOT `git log --follow` archaeology.** `test_velocity_command_shape.py` → `test_robot_command_shape.py` rewrote the file substantially in the same commit (18 → 46 lines, well below git's default 50% similarity threshold; even `--find-renames=20%` doesn't help). `git log --follow robot_follow/tests/test_robot_command_shape.py` shows ONLY the rename commit. Workaround for archaeology: `git log -- robot_follow/tests/test_velocity_command_shape.py` (still shows legacy history under the old path; git tracks file paths by name, not inode). Rename intent recorded in commit message + module docstring.
+- **Parallel-wave hygiene via explicit pathspec held under live contention.** Plan 03-01 ran concurrently and had unstaged files at every commit boundary (`tests/cases/__init__.py`, `tests/cases/drone_command_baseline.py`, `test_robot_command_snapshot.py`). All 3 of this plan's commits used `git commit -m "..." -- <files>` with explicit pathspec; `git show --stat` on each commit lists ONLY this plan's files. Same pattern that worked in 02-04 / 02-06. Confirms the playbook for the rest of Phase 3 (waves 2-7 all have parallel plans).
+- **One PASSING test per scaffold where possible.** `test_setup_env_sh_exists` is the only non-xfail test in this plan — gives `test_setup_env_sh.py` a green anchor today so the file is not a pure xfail container. Suite count went 176 → 175 (rename removed 2 legacy tests) + 1 new pass = 175 net.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -154,6 +165,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-17T11:14:23.607Z
+Last session: 2026-05-18T20:05:22.085Z
 Stopped at: Completed 02-07-PLAN.md — CLEAN-16 SSE Condition + frame_seq race fix + CLEAN-17 socket reuse + CLEAN-18 O(1) dedup; Phase 2 done (18/18 CLEAN items closed; 5/5 ROADMAP criteria closed; 3 xfails flipped to passes; 0 xfailed remaining)
 Resume file: None

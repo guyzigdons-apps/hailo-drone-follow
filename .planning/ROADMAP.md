@@ -75,7 +75,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   5. On a machine with `/opt/ros/humble` installed, `setup_env.sh` with `--robot rover` detected auto-sources `/opt/ros/humble/setup.bash` after venv activation.
 **Plans**: 10 plans
   - [ ] 03-01-PLAN.md — Wave 1: test scaffolds for ABS-04/05/06 (snapshot + adapter pure-function tests + baseline fixture)
-  - [ ] 03-02-PLAN.md — Wave 1: test scaffolds for ABS-01/02/03/09/10 (protocol shape, layout smoke, CLI help dispatch, setup_env.sh, rename VelocityCommand shape test)
+  - [x] 03-02-PLAN.md — Wave 1: test scaffolds for ABS-01/02/03/09/10 (protocol shape, layout smoke, CLI help dispatch, setup_env.sh, rename VelocityCommand shape test)
   - [ ] 03-03-PLAN.md — Wave 2: add Axis/Capabilities/RobotCommand/SafetyContext to follow_api/types.py (ABS-01, ABS-02 types)
   - [ ] 03-04-PLAN.md — Wave 3: scaffold robot_api/ package with Robot protocol + orchestrator skeleton (ABS-01 protocol)
   - [ ] 03-05-PLAN.md — Wave 4: git mv drone_api/mavsdk_drone.py to robot_api/adapters/ + shim (ABS-03 move)
@@ -129,7 +129,7 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 |-------|-----------|----------------|--------|-----------|
 | 1. Rename | v1.1 | 3/3 | Complete | 2026-05-14 |
 | 2. Cleanup | v1.1 | 8/8 | Complete | 2026-05-17 |
-| 3. Abstraction | v1.1 | 0/10 | Not started | - |
+| 3. Abstraction | v1.1 | 1/10 | In Progress|  |
 | 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
 | 5. Rover sim | v1.1 | 0/TBD | Not started | - |
 | 6. Sim integration | v1.1 | 0/TBD | Not started | - |

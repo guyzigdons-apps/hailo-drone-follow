@@ -53,20 +53,20 @@ Introduce `robot_api/` with `Robot` protocol + `Capabilities` and move the MAVSD
 
 **Design constraint (axes-only):** `follow_api/controller` must not know what kind of robot it is moving. `Capabilities` describes **which axes exist** and **what units they take** — nothing else. Robot-specific behaviors (retreat-from-tilt, slow-near-edge, takeoff/land, yaw-spin-on-loss, offboard handshake) live inside the adapter, invisible to follow_api. This is the whole point of the abstraction; a `bottom_edge_policy` flag in `Capabilities` would smuggle robot knowledge back into the controller behind a flag. Don't.
 
-- [ ] **ABS-01**: `robot_api/robot.py` defines:
+- [x] **ABS-01**: `robot_api/robot.py` defines:
   - `Axis` enum: `FORWARD` (body x, m/s), `YAW` (body z), `ALTITUDE` (body z down, m/s).
   - `Capabilities` dataclass: `axes: frozenset[Axis]`, `yaw_unit: Literal["deg/s", "rad/s"]`. **Mechanical only — no behavioral flags.**
   - `Robot` protocol: `connect`, `start_session`, `send_command`, `send_zero`, `shutdown`, plus `caps: Capabilities` attribute.
   - Lifecycle concerns (offboard handshake, arm/takeoff/land) are implemented inside the adapter's `connect` / `start_session` / `shutdown`, not exposed as capability flags.
-- [ ] **ABS-02**: `RobotCommand(forward_m_s=0.0, yaw_rate=0.0, down_m_s=0.0)` replaces `VelocityCommand`. The controller writes only the channels whose axis is in `caps.axes`; the adapter reads only the channels in `caps.axes`. Drone adapter unchanged at the wire, rover adapter converts `yaw_rate` from the unit declared in `caps.yaw_unit` to rad/s.
-- [ ] **ABS-03**: `drone_api/mavsdk_drone.py` moved to `robot_api/adapters/mavsdk_drone.py`; existing MAVSDK behaviour wrapped behind `MavsdkDroneAdapter.start_session()`. No-behaviour-change regression test: drone path still flies SITL.
+- [x] **ABS-02**: `RobotCommand(forward_m_s=0.0, yaw_rate=0.0, down_m_s=0.0)` replaces `VelocityCommand`. The controller writes only the channels whose axis is in `caps.axes`; the adapter reads only the channels in `caps.axes`. Drone adapter unchanged at the wire, rover adapter converts `yaw_rate` from the unit declared in `caps.yaw_unit` to rad/s.
+- [x] **ABS-03**: `drone_api/mavsdk_drone.py` moved to `robot_api/adapters/mavsdk_drone.py`; existing MAVSDK behaviour wrapped behind `MavsdkDroneAdapter.start_session()`. No-behaviour-change regression test: drone path still flies SITL.
 - [ ] **ABS-04**: `live_control_loop` gates the altitude-hold P-loop on `Axis.ALTITUDE in capabilities.axes` (rover sees no `down_m_s` term emitted from controller).
 - [ ] **ABS-05**: Bottom-edge frame safety moves out of the controller. Controller emits `forward_m_s=0` when the target's bbox bottom is below the safe-zone threshold — that's all it knows. Per-robot reactions (drone: retreat-from-tilt; rover: slow / stop) are implemented **inside each adapter's `send_command`**, not gated by a flag in follow_api. No `bottom_edge_policy` field in `Capabilities`.
 - [ ] **ABS-06**: Yaw-spin search-on-loss moves out of the controller. When the target is lost the controller emits `send_zero()` (or holds, per existing logic) — that's all it knows. Per-robot search behaviors (drone: yaw-spin to scan; rover: no spin) are implemented **inside each adapter**, not gated by a flag in follow_api. No `yaw_spin_on_loss` field in `Capabilities`.
 - [ ] **ABS-07**: `ControllerConfig` altitude fields (`min_altitude`, `max_altitude`, `target_altitude`, `kp_alt_hold`, `max_climb_speed`, `max_down_speed`, `max_bbox_height_safety`, `top_margin_safety`, `bottom_margin_safety`) become `Optional[float]`; `validate()` skips altitude relationship checks when `Axis.ALTITUDE not in capabilities.axes`.
 - [ ] **ABS-08**: Composition root: `run_drone()` renamed to `run_robot()`; dispatches to the right adapter based on `--robot`. Existing `run_drone()` callers updated; behaviour unchanged for `--robot drone` (default).
-- [ ] **ABS-09**: `--robot drone|rover` CLI flag (default `drone`) with two-pass argparse pre-parse so rover users don't see drone-only flags (`--takeoff-landing`, `--target-altitude`, `--serial`) in `--help` and vice versa.
-- [ ] **ABS-10**: `setup_env.sh` auto-sources `/opt/ros/humble/setup.bash` if `--robot rover` is detected and ROS is installed; sourcing order is venv first, then ROS (per PITFALLS.md).
+- [x] **ABS-09**: `--robot drone|rover` CLI flag (default `drone`) with two-pass argparse pre-parse so rover users don't see drone-only flags (`--takeoff-landing`, `--target-altitude`, `--serial`) in `--help` and vice versa.
+- [x] **ABS-10**: `setup_env.sh` auto-sources `/opt/ros/humble/setup.bash` if `--robot rover` is detected and ROS is installed; sourcing order is venv first, then ROS (per PITFALLS.md).
 - [ ] **ABS-11**: Drone path regression: full SITL drone follow-the-person test passes with `--robot drone` (or default). Existing `--takeoff-landing`, `--target-altitude`, `--connection` paths unchanged.
 
 ### Rover adapter
@@ -166,16 +166,16 @@ Tracked but not in current roadmap. All require physical hardware to exercise.
 | CLEAN-16 | Phase 2 | Complete |
 | CLEAN-17 | Phase 2 | Complete |
 | CLEAN-18 | Phase 2 | Complete |
-| ABS-01 | Phase 3 | Pending |
-| ABS-02 | Phase 3 | Pending |
-| ABS-03 | Phase 3 | Pending |
+| ABS-01 | Phase 3 | Complete |
+| ABS-02 | Phase 3 | Complete |
+| ABS-03 | Phase 3 | Complete |
 | ABS-04 | Phase 3 | Pending |
 | ABS-05 | Phase 3 | Pending |
 | ABS-06 | Phase 3 | Pending |
 | ABS-07 | Phase 3 | Pending |
 | ABS-08 | Phase 3 | Pending |
-| ABS-09 | Phase 3 | Pending |
-| ABS-10 | Phase 3 | Pending |
+| ABS-09 | Phase 3 | Complete |
+| ABS-10 | Phase 3 | Complete |
 | ABS-11 | Phase 3 | Pending |
 | ROVER-01 | Phase 4 | Pending |
 | ROVER-02 | Phase 4 | Pending |
