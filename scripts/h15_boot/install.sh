@@ -15,6 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo "===== Full install on $TARGET ====="
 echo ""
 
+"$SCRIPT_DIR/build_ui.sh"
+echo ""
 "$SCRIPT_DIR/install_app.sh" "$TARGET"
 echo ""
 "$SCRIPT_DIR/install_service.sh" "$TARGET"
