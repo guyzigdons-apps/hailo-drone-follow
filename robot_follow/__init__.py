@@ -2,7 +2,7 @@
 
 Architecture:
     follow_api/         Pure domain logic (types, config, state, controller math)
-    drone_api/          MAVSDK flight controller adapter
+    robot_api/          Robot protocol + adapters (MAVSDK drone)
     pipeline_adapter/   Hailo/GStreamer pipeline adapter + ByteTracker
     servers/            HTTP servers (follow target API, web UI)
     tools/              Standalone utilities (video bridge)
@@ -11,10 +11,10 @@ Architecture:
 
 from .follow_api import (
     Detection,
-    VelocityCommand,
+    RobotCommand,
     SharedDetectionState,
     ControllerConfig,
-    compute_velocity_command,
+    compute,
 )
 
 # Keep package import lightweight for tests/environments that don't have
@@ -32,10 +32,10 @@ except ImportError:  # pragma: no cover - optional runtime dependencies
 
 __all__ = [
     "Detection",
-    "VelocityCommand",
+    "RobotCommand",
     "SharedDetectionState",
     "ControllerConfig",
-    "compute_velocity_command",
+    "compute",
     "create_app",
     "SharedUIState",
     "WebServer",

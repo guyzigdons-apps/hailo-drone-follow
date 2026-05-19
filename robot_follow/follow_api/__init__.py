@@ -10,11 +10,10 @@ from .types import (
     Detection,
     RobotCommand,
     SafetyContext,
-    VelocityCommand,
 )
 from .config import ControllerConfig
 from .state import SharedDetectionState, FollowTargetState
-from .controller import compute_velocity_command
+from .controller import compute
 
 __all__ = [
     "Axis",
@@ -22,9 +21,8 @@ __all__ = [
     "Detection",
     "RobotCommand",
     "SafetyContext",
-    "VelocityCommand",
     "ControllerConfig",
     "SharedDetectionState",
     "FollowTargetState",
-    "compute_velocity_command",
+    "compute",
 ]

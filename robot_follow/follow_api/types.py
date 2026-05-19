@@ -4,8 +4,8 @@ All actuator-boundary types live here so follow_api stays the
 pure-leaf core. robot_api imports from here; never the other way.
 Per Phase 3 R1 (adversarial review 2026-05-17).
 
-VelocityCommand is legacy — it is replaced by RobotCommand in
-Phase 3 plan 03-07. Both types co-exist during the migration.
+RobotCommand is the controller's emit type (see controller.compute).
+The legacy VelocityCommand was deleted in Phase 3 plan 03-07.
 """
 
 from dataclasses import dataclass
@@ -64,24 +64,6 @@ class RobotCommand:
     forward_m_s: float = 0.0
     yaw_rate: float = 0.0
     down_m_s: float = 0.0
-
-
-@dataclass
-class VelocityCommand:
-    """LEGACY drone-shaped velocity command.
-
-    DEPRECATED — to be deleted in Phase 3 plan 03-07. New code MUST
-    use RobotCommand. The two types co-exist during the 103-test-edit
-    migration; once test_controller.py is migrated, this class is
-    removed in the same commit as the controller-signature change.
-
-    This is a pure domain type that replaces direct use of
-    mavsdk.offboard.VelocityBodyYawspeed in the follow logic, keeping
-    the follow layer free of MAVSDK dependencies.
-    """
-    forward_m_s: float
-    down_m_s: float
-    yawspeed_deg_s: float
 
 
 @dataclass

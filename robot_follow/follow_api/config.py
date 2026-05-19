@@ -4,7 +4,10 @@ import argparse
 import json
 import os
 from dataclasses import dataclass, fields, asdict
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
+
+if TYPE_CHECKING:
+    from .types import Capabilities
 
 
 class TunableField(NamedTuple):
@@ -57,14 +60,17 @@ class ControllerConfig:
     # directly (10 → ±10% relative distance error). Old configs load with a
     # wider effective dead band than they meant.
     dead_zone_bbox_percent: float = 10.0  # dead zone: |factor| as fraction (10 → ±10% of target)
-    max_climb_speed: float = 1.0        # max altitude change rate (m/s)
-    max_down_speed: float = 1.5         # safety clamp in VelocityCommandAPI
-    min_altitude: float = 2.0           # hard floor (m)
-    max_altitude: float = 4.0           # hard ceiling (m)
+    # Altitude fields are Optional[float] per ABS-07 — rover (no ALTITUDE axis)
+    # can leave them unset; validate() skips altitude relationship checks when
+    # caps is provided and ALTITUDE is not in caps.axes.
+    max_climb_speed: Optional[float] = 1.0    # max altitude change rate (m/s)
+    max_down_speed: Optional[float] = 1.5     # safety clamp in MavsdkDroneAdapter
+    min_altitude: Optional[float] = 2.0       # hard floor (m)
+    max_altitude: Optional[float] = 4.0       # hard ceiling (m)
     # Altitude-hold P gain: drives down axis from (current_alt - target_altitude)
-    # whenever not yaw_only. Applied in live_control_loop where current altitude
-    # is available; controller stays pure.
-    kp_alt_hold: float = 0.5
+    # whenever not yaw_only. Applied in MavsdkDroneAdapter._apply_altitude_p
+    # (formerly live_control_loop); controller stays pure.
+    kp_alt_hold: Optional[float] = 0.5
     # --- Safety ---
     max_bbox_height_safety: float = 0.8  # bbox > this → emergency climb + reverse
     # Frame-edge safety: when bbox top/bottom breaches a margin from the frame
@@ -97,14 +103,32 @@ class ControllerConfig:
     smooth_down: bool = True            # smooth bbox_height-driven altitude output
     down_alpha: float = 0.2             # moderate smoothing to reduce alt jitter
     # --- Takeoff/misc ---
-    target_altitude: float = 3.0        # initial altitude for --takeoff-landing; UI "Target Alt" adjusts this as a soft reference
+    target_altitude: Optional[float] = 3.0   # initial altitude for --takeoff-landing; UI "Target Alt" adjusts this as a soft reference
     log_verbosity: str = "normal"  # quiet | normal | debug
 
     def __post_init__(self):
         self.validate()
 
-    def validate(self):
-        """Raise ValueError if the configuration is internally inconsistent."""
+    def validate(self, caps: Optional["Capabilities"] = None) -> None:
+        """Raise ValueError if the configuration is internally inconsistent.
+
+        ABS-07: altitude relationship checks are skipped when ``caps`` is
+        provided AND ALTITUDE is not in ``caps.axes`` (rover does not own
+        an altitude axis). When ``caps`` is None (drone path / legacy
+        callers), altitude is validated; if any altitude field is None,
+        validation is also skipped because no relationship can be checked.
+        """
+        # ABS-07: skip altitude validation when caps says ALTITUDE is absent.
+        if caps is not None:
+            # Local import to avoid circular dependency at module load.
+            from .types import Axis as _Axis
+            if _Axis.ALTITUDE not in caps.axes:
+                return
+        # Altitude validation needs ALL altitude fields populated.
+        if (self.min_altitude is None
+                or self.max_altitude is None
+                or self.target_altitude is None):
+            return
         if self.min_altitude >= self.max_altitude:
             raise ValueError(
                 f"min_altitude ({self.min_altitude}) must be < max_altitude ({self.max_altitude})"

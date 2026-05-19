@@ -23,16 +23,18 @@ os.environ.setdefault("HAILO_MONITOR", "1")
 import argparse
 import asyncio
 import logging
+import math
 import signal
 import threading
 import time
 from robot_follow.follow_api import ControllerConfig, SharedDetectionState
 from robot_follow.follow_api.state import FollowTargetState
 from robot_follow.robot_api.adapters.mavsdk_drone import (
-    run_live_drone,
+    MavsdkDroneAdapter,
     _reap_mavsdk_server,
     add_drone_args,
 )
+from robot_follow.robot_api.orchestrator import run_robot_loop
 from robot_follow.pipeline_adapter.vision_branches import decide_branches
 from robot_follow.servers import FollowServer, OpenHDBridge
 
@@ -387,16 +389,52 @@ def main():
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
     def run_drone():
-        """Run drone control in a background thread with its own asyncio loop."""
+        """Run drone control in a background thread with its own asyncio loop.
+
+        Phase 3 plan 03-07 swapped out the legacy live_control_loop /
+        VelocityCommandAPI path. The new production path is
+        ``MavsdkDroneAdapter`` driven by
+        ``robot_api.orchestrator.run_robot_loop``. The mission-duration
+        watchdog (B1 lock) is wrapped here, NOT in ``run_robot_loop`` —
+        keeping the orchestrator robot-agnostic (rover users have no
+        ``--mission-duration`` arg). 03-08 will rename this to
+        ``run_robot()`` and add ``--robot`` dispatch.
+        """
+        async def _main():
+            adapter = MavsdkDroneAdapter(args, controller_config)
+            duration = getattr(args, "mission_duration", math.inf)
+            loop_task = asyncio.create_task(
+                run_robot_loop(adapter, shared_state, controller_config, shutdown)
+            )
+            deadline_task = asyncio.create_task(asyncio.sleep(duration))
+            try:
+                done, pending = await asyncio.wait(
+                    [loop_task, deadline_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for t in (loop_task, deadline_task):
+                    if not t.done():
+                        t.cancel()
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            LOGGER.warning(
+                                "[drone] background task raised on shutdown",
+                                exc_info=True,
+                            )
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(
-                run_live_drone(args, shared_state, shutdown,
-                              config=controller_config, ui_state=ui_state,
-                              target_state=target_state))
+            loop.run_until_complete(_main())
         except Exception:
-            LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
+            LOGGER.warning(
+                "[drone] Drone connection failed — pipeline continues without drone control.",
+                exc_info=True,
+            )
         finally:
             loop.close()
 
