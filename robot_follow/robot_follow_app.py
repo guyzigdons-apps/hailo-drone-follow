@@ -518,8 +518,10 @@ def main():
 
         async def _main():
             duration = getattr(args, "mission_duration", math.inf)
+            # Pass ui_state so run_robot_loop publishes mode + velocity to the web UI per
+            # 03-11 gap closure (axes-only contract preserved — adapter remains UI-agnostic).
             loop_task = asyncio.create_task(
-                run_robot_loop(adapter, shared_state, controller_config, shutdown)
+                run_robot_loop(adapter, shared_state, controller_config, shutdown, ui_state=ui_state)
             )
             deadline_task = asyncio.create_task(asyncio.sleep(duration))
             try:
