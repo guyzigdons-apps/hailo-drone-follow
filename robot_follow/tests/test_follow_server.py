@@ -163,11 +163,17 @@ class TestFollowServer:
         assert "not found" in data["message"]
         assert set(data["available_ids"]) == {1, 2, 3}
 
-    def test_post_follow_stale_id_locks_onto_single_available(self, server):
-        """F3 closure (03-13): stale id from React closure recovers to single visible person."""
-        # ByteTracker has re-acquired the actor under id=45; the UI's click handler
-        # closed over the previous (stale) id=1. With exactly one available id, the
-        # operator's intent is unambiguous: lock onto the single visible person.
+    def test_post_follow_stale_id_with_single_available_returns_404(self, server):
+        """03-15 revert pin: stale id + single visible person → strict 404 (no server-side recovery).
+
+        The rejected 03-13 widening (commit 72add07) would have recovered to the single
+        available id. Per operator decision (see feedback_click_to_follow_id_resolution.md),
+        the right layer for stale-id resolution is the client (nearest-center match in
+        handleFollow); the server stays strict so a future re-introduction of that
+        widening will be caught by this test.
+        """
+        # Exactly one person is visible under id=45; client (incorrectly) sends stale id=1.
+        # Server MUST NOT recover. Client owns this resolution now.
         server.shared_state.update(None, available_ids={45})
 
         conn = HTTPConnection("127.0.0.1", server.port)
@@ -175,11 +181,11 @@ class TestFollowServer:
         response = conn.getresponse()
         data = json.loads(response.read().decode())
 
-        assert response.status == 200
-        assert data["status"] == "success"
-        assert data["following_id"] == 45  # recovered, NOT the requested stale 1
-        assert server.target_state.get_target() == 45
-        assert server.target_state.is_explicit_lock() is True
+        assert response.status == 404
+        assert data["status"] == "error"
+        assert "not found" in data["message"]
+        assert set(data["available_ids"]) == {45}
+        assert server.target_state.get_target() is None
 
     def test_post_follow_stale_id_with_zero_available_returns_404(self, server):
         """F3 closure (03-13): zero available — no recovery candidate, preserve 404."""

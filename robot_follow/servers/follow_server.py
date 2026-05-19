@@ -103,27 +103,13 @@ class FollowServerHandler(BaseHTTPRequestHandler):
             if self.shared_state is not None:
                 available_ids = self.shared_state.get_available_ids()
                 if detection_id not in available_ids:
-                    if len(available_ids) == 1:
-                        # F3 (03-13): widen leniency for stale React-closure ids when intent is unambiguous.
-                        # Exactly one person is visible — the operator's click clearly meant that person,
-                        # regardless of which (now-stale) id the React onClick closure captured.
-                        requested_id = detection_id
-                        recovered_id = next(iter(available_ids))
-                        LOGGER.info(
-                            "Stale detection ID %d; locking onto single available %d",
-                            requested_id,
-                            recovered_id,
-                        )
-                        detection_id = recovered_id
-                    else:
-                        # Zero or >=2 available — no unambiguous recovery; preserve existing 404 path.
-                        self._send_json({
-                            "status": "error",
-                            "message": f"Detection ID {detection_id} not found in current frame",
-                            "available_ids": list(available_ids),
-                        }, status=404)
-                        LOGGER.info("Detection ID %d not found. Available: %s", detection_id, available_ids)
-                        return
+                    self._send_json({
+                        "status": "error",
+                        "message": f"Detection ID {detection_id} not found in current frame",
+                        "available_ids": list(available_ids),
+                    }, status=404)
+                    LOGGER.info("Detection ID %d not found. Available: %s", detection_id, available_ids)
+                    return
 
             self.target_state.set_paused(False)
             self.target_state.set_target(detection_id)
