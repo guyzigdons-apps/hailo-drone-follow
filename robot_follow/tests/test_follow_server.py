@@ -152,16 +152,68 @@ class TestFollowServer:
         """POST /follow/<id> should return 404 if ID not available."""
         # Only IDs 1,2,3 are available, but we try to follow 99
         server.shared_state.update(None, available_ids={1, 2, 3})
-        
+
         conn = HTTPConnection("127.0.0.1", server.port)
         conn.request("POST", "/follow/99")
         response = conn.getresponse()
         data = json.loads(response.read().decode())
-        
+
         assert response.status == 404
         assert data["status"] == "error"
         assert "not found" in data["message"]
         assert set(data["available_ids"]) == {1, 2, 3}
+
+    def test_post_follow_stale_id_locks_onto_single_available(self, server):
+        """F3 closure (03-13): stale id from React closure recovers to single visible person."""
+        # ByteTracker has re-acquired the actor under id=45; the UI's click handler
+        # closed over the previous (stale) id=1. With exactly one available id, the
+        # operator's intent is unambiguous: lock onto the single visible person.
+        server.shared_state.update(None, available_ids={45})
+
+        conn = HTTPConnection("127.0.0.1", server.port)
+        conn.request("POST", "/follow/1")
+        response = conn.getresponse()
+        data = json.loads(response.read().decode())
+
+        assert response.status == 200
+        assert data["status"] == "success"
+        assert data["following_id"] == 45  # recovered, NOT the requested stale 1
+        assert server.target_state.get_target() == 45
+        assert server.target_state.is_explicit_lock() is True
+
+    def test_post_follow_stale_id_with_zero_available_returns_404(self, server):
+        """F3 closure (03-13): zero available — no recovery candidate, preserve 404."""
+        # No person in view — server cannot recover; preserve the existing 404 path.
+        server.shared_state.update(None, available_ids=set())
+
+        conn = HTTPConnection("127.0.0.1", server.port)
+        conn.request("POST", "/follow/1")
+        response = conn.getresponse()
+        data = json.loads(response.read().decode())
+
+        assert response.status == 404
+        assert data["status"] == "error"
+        assert "not found" in data["message"]
+        assert data["available_ids"] == []
+        assert server.target_state.get_target() is None
+
+    def test_post_follow_stale_id_with_multiple_available_returns_404(self, server):
+        """F3 closure (03-13): multiple available — ambiguous, preserve 404."""
+        # Two visible persons — server cannot disambiguate which one the operator
+        # meant; preserve the existing 404 path so the operator re-clicks the
+        # (now-fresh) bbox they want.
+        server.shared_state.update(None, available_ids={45, 67})
+
+        conn = HTTPConnection("127.0.0.1", server.port)
+        conn.request("POST", "/follow/1")
+        response = conn.getresponse()
+        data = json.loads(response.read().decode())
+
+        assert response.status == 404
+        assert data["status"] == "error"
+        assert "not found" in data["message"]
+        assert set(data["available_ids"]) == {45, 67}
+        assert server.target_state.get_target() is None
 
     def test_cors_headers_present(self, server):
         """Response should include CORS headers."""
