@@ -309,7 +309,14 @@ export default function App() {
     try {
       const port = config?.follow_server_port || 8080;
       const host = window.location.hostname;
-      await fetch(`http://${host}:${port}/follow/${pick.id}`, { method: "POST" });
+      // Send the resolved bbox height in the body so the server uses it directly
+      // as the target_bbox_height setpoint, bypassing the SharedUIState lookup
+      // that races with SharedDetectionState and produced "bbox height n/a" logs.
+      await fetch(`http://${host}:${port}/follow/${pick.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bbox: { h: pick.bbox.h } }),
+      });
     } catch {
       // ignore
     }

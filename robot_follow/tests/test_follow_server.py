@@ -221,12 +221,73 @@ class TestFollowServer:
         assert set(data["available_ids"]) == {45, 67}
         assert server.target_state.get_target() is None
 
+    def test_post_follow_with_bbox_body_uses_body_h_for_setpoint(self, server):
+        """03-15 F4b: POST body with bbox.h is written directly to controller_config.
+
+        Bypasses the SharedUIState lookup that races with SharedDetectionState and
+        produced 'bbox height n/a' INFO lines in live SITL. The client (post-03-13)
+        already resolved the right detection and knows its bbox; just send it.
+        """
+        from robot_follow.follow_api.config import ControllerConfig
+        from robot_follow.servers.follow_server import FollowServerHandler
+
+        cfg = ControllerConfig()
+        cfg.target_bbox_height = 0.25  # baseline — will be overwritten
+        FollowServerHandler.controller_config = cfg
+        try:
+            server.shared_state.update(None, available_ids={45})
+
+            conn = HTTPConnection("127.0.0.1", server.port)
+            # Value picked inside capture_bbox_setpoint_from_height's clamp range [0.10, 0.25]
+            body = json.dumps({"bbox": {"h": 0.18}}).encode("utf-8")
+            conn.request(
+                "POST",
+                "/follow/45",
+                body=body,
+                headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+            )
+            response = conn.getresponse()
+            data = json.loads(response.read().decode())
+
+            assert response.status == 200
+            assert data["status"] == "success"
+            assert data["following_id"] == 45
+            assert data["target_bbox_height"] == pytest.approx(0.18)
+            assert cfg.target_bbox_height == pytest.approx(0.18)
+        finally:
+            FollowServerHandler.controller_config = None
+
+    def test_post_follow_without_body_falls_back_to_ui_state_lookup(self, server):
+        """03-15 F4b: POST without body falls back to _capture_bbox_for_id.
+
+        Backward compat for curl-style callers and older clients. Without ui_state
+        wired in the test fixture, _capture_bbox_for_id returns None and the
+        response carries target_bbox_height: None (still 200; the lock succeeds).
+        """
+        from robot_follow.servers.follow_server import FollowServerHandler
+
+        # No controller_config, no ui_state — both branches degrade to None.
+        FollowServerHandler.controller_config = None
+        FollowServerHandler.ui_state = None
+        server.shared_state.update(None, available_ids={45})
+
+        conn = HTTPConnection("127.0.0.1", server.port)
+        conn.request("POST", "/follow/45")
+        response = conn.getresponse()
+        data = json.loads(response.read().decode())
+
+        assert response.status == 200
+        assert data["status"] == "success"
+        assert data["following_id"] == 45
+        assert data["target_bbox_height"] is None
+        assert server.target_state.get_target() == 45
+
     def test_cors_headers_present(self, server):
         """Response should include CORS headers."""
         conn = HTTPConnection("127.0.0.1", server.port)
         conn.request("GET", "/status")
         response = conn.getresponse()
-        
+
         headers = dict(response.getheaders())
         assert "Access-Control-Allow-Origin" in headers
         assert headers["Access-Control-Allow-Origin"] == "*"

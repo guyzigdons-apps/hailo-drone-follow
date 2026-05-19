@@ -21,6 +21,7 @@ Example:
 
 import json
 import logging
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -82,6 +83,33 @@ class FollowServerHandler(BaseHTTPRequestHandler):
                 return capture_bbox_setpoint_from_height(self.controller_config, h, source="CLICK")
         return None
 
+    def _read_bbox_h_from_body(self):
+        # ui_state ↔ shared_state can race for the same id, so the client carries
+        # the bbox height of the detection it actually resolved at click time.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return None
+        if length <= 0 or length > 4096:
+            return None
+        try:
+            raw = self.rfile.read(length)
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, OSError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        bbox = payload.get("bbox")
+        if not isinstance(bbox, dict):
+            return None
+        h = bbox.get("h")
+        if not isinstance(h, (int, float)) or isinstance(h, bool):
+            return None
+        h = float(h)
+        if not math.isfinite(h) or h <= 0.0 or h > 1.0:
+            return None
+        return h
+
     def do_POST(self):
         if self.path in ("/follow/clear", "/follow/"):
             self.target_state.enter_auto_mode()
@@ -116,12 +144,24 @@ class FollowServerHandler(BaseHTTPRequestHandler):
             self.target_state.set_explicit_lock(True)
             # Capture the clicked person's current bbox as the distance setpoint so
             # the drone holds its current distance instead of converging on a fixed value.
-            captured_h = self._capture_bbox_for_id(detection_id)
+            body_h = self._read_bbox_h_from_body()
+            if body_h is not None and self.controller_config is not None:
+                from robot_follow.pipeline_adapter.hailo_drone_detection_manager import (
+                    capture_bbox_setpoint_from_height,
+                )
+                captured_h = capture_bbox_setpoint_from_height(
+                    self.controller_config, body_h, source="CLICK"
+                )
+                bbox_source = "POST body"
+            else:
+                captured_h = self._capture_bbox_for_id(detection_id)
+                bbox_source = "ui_state" if captured_h is not None else "n/a"
             self._send_json({"status": "success", "following_id": detection_id,
                              "target_bbox_height": captured_h})
-            LOGGER.info("Now following detection ID: %d (bbox height %s)",
+            LOGGER.info("Now following detection ID: %d (bbox height %s, source: %s)",
                         detection_id,
-                        f"{captured_h:.3f}" if captured_h is not None else "n/a")
+                        f"{captured_h:.3f}" if captured_h is not None else "n/a",
+                        bbox_source)
         else:
             self.send_error(404, "Not Found")
 
