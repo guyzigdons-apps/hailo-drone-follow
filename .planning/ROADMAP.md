@@ -73,7 +73,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   3. `robot_api/robot.py` exists with `Robot` protocol, `Capabilities`, and `RobotCommand`; `VelocityCommand` no longer exists in the codebase.
   4. `robot_api/adapters/mavsdk_drone.py` exists; `drone_api/mavsdk_drone.py` does not exist; `run_robot()` is the composition root entry point.
   5. On a machine with `/opt/ros/humble` installed, `setup_env.sh` with `--robot rover` detected auto-sources `/opt/ros/humble/setup.bash` after venv activation.
-**Plans**: 12 plans
+**Plans**: 14 plans
   - [x] 03-01-PLAN.md — Wave 1: test scaffolds for ABS-04/05/06 (snapshot + adapter pure-function tests + baseline fixture)
   - [x] 03-02-PLAN.md — Wave 1: test scaffolds for ABS-01/02/03/09/10 (protocol shape, layout smoke, CLI help dispatch, setup_env.sh, rename VelocityCommand shape test)
   - [x] 03-03-PLAN.md — Wave 2: add Axis/Capabilities/RobotCommand/SafetyContext to follow_api/types.py (ABS-01, ABS-02 types)
@@ -86,6 +86,8 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   - [x] 03-10-PLAN.md — Wave 7 (checkpoint): operator-witnessed SITL drone follow gate (ABS-11) — FAILED (F1 + F2 surfaced; see 03-10-SUMMARY.md)
   - [x] 03-11-PLAN.md — Wave 8 (gap closure): thread ui_state through run_robot_loop + publish (fwd,down,yaw,mode) per branch + demote F2 INFO log to DEBUG (ABS-11)
   - [x] 03-12-PLAN.md — Wave 9 (gap closure checkpoint): operator SITL re-run gate after F1 + F2 fixes (ABS-11) — FAILED (F1+F2 closed, new F3 surfaced; see 03-12-SUMMARY.md)
+  - [ ] 03-13-PLAN.md — Wave 10 (gap closure): widen do_POST /follow/<id> stale-id leniency in follow_server.py when len(available_ids)==1 + 3 new tests (ABS-11 / F3)
+  - [ ] 03-14-PLAN.md — Wave 11 (gap closure checkpoint): operator SITL re-run gate (round 3) — F3 closed + F1/F2 stay closed + AUTO not regressed (ABS-11)
 
 ### Phase 4: Rover adapter
 **Goal**: `Ros2RoverAdapter` publishes `geometry_msgs/Twist` on `/cmd_vel`; SIGINT handler is preserved; adapter integrates cleanly with the asyncio control loop.
