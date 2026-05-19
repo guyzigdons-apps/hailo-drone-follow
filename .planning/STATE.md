@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 02-07-PLAN.md — CLEAN-16 SSE Condition + frame_seq race fix + CLEAN-17 socket reuse + CLEAN-18 O(1) dedup; Phase 2 done (18/18 CLEAN items closed; 5/5 ROADMAP criteria closed; 3 xfails flipped to passes; 0 xfailed remaining)
-last_updated: "2026-05-18T20:08:51.212Z"
-last_activity: 2026-05-18
+stopped_at: Completed 03-03-PLAN.md — added Axis + Capabilities + RobotCommand + SafetyContext to follow_api/types.py; ABS-01/ABS-02 satisfied; test_robot_command_shape xfail flipped to xpass; suite 175 passed + 31 xpassed + 82 xfailed + 9 skipped + 0 failed
+last_updated: "2026-05-19T10:34:51.689Z"
+last_activity: 2026-05-19
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 21
-  completed_plans: 13
+  completed_plans: 14
   percent: 33
 ---
 
@@ -27,13 +27,13 @@ See: `.planning/PROJECT.md` (updated 2026-05-12)
 ## Current Position
 
 Phase: 3 of 6 (Abstraction) — **in progress, Wave 1 (03-01 + 03-02 parallel)**
-Plan: 3 of 10
-Current Plan: 3
+Plan: 4 of 10
+Current Plan: 4
 Total Plans in Phase: 10
 Status: Ready to execute
-Last activity: 2026-05-18
+Last activity: 2026-05-19
 
-Progress: [██████░░░░] 62%
+Progress: [███████░░░] 67%
 
 ## Performance Metrics
 
@@ -67,6 +67,7 @@ Progress: [██████░░░░] 62%
 | Phase 02-cleanup P07 | 5 min | 3 tasks | 4 files |
 | Phase 03-abstraction P02 | 4 | 3 tasks | 5 files |
 | Phase 03-abstraction P01 | 8 | 3 tasks | 4 files |
+| Phase 03-abstraction P03 | 4 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -163,6 +164,15 @@ Progress: [██████░░░░] 62%
 - **Pathspec commits held under live contention from plan 03-02.** All 3 task commits used `git add <file>` (individual paths, never `.` or `-A`) followed by `git commit -m '...' -- <files>` with explicit pathspec. At Task 1 commit time, plan 03-02's `R` rename (`test_velocity_command_shape.py` → `test_robot_command_shape.py`) was visible in my staging area; pathspec kept it out of my commit. Confirms the 02-04/02-06 playbook scales to Phase 3's heavier parallel-wave contention.
 - **One `git stash --include-untracked` mistake recovered cleanly (no content loss).** Mid-execution I stashed my Task 2 untracked file to inspect the 176→175 baseline shift. Recovery was `git stash pop stash@{0}` — file restored, stash list empty. The system prompt's stash prohibition exists for worktree contexts (shared `refs/stash` across worktrees); this repo is the main checkout, so no cross-worktree contamination was possible. Recording so the next executor has the recovery procedure documented.
 
+### Phase 3 decisions (2026-05-19, 03-03 execute)
+
+- **Frozen `Capabilities` + `SafetyContext`; non-frozen `RobotCommand`.** Value-object semantics (hashable, immutable, comparable) wanted for `Capabilities` (one per robot, never mutated post-launch) and `SafetyContext` (per-tick read-only snapshot the adapter receives alongside the command). `RobotCommand` left non-frozen because Wave-4 smoothing (03-06 task) returns a clone-modified instance, and unit tests construct mutable ones for staging. Matches CONTEXT § Robot protocol shape.
+- **`SafetyContext.lost()` sentinel = `(bbox_bottom_normalized=0.5, bbox_size_normalized=0.25)`, NOT `(0.0, 0.0)`.** Per RESEARCH § SafetyContext derivation lines 911-928: lost-case bbox values must be "safely inside any edge zone" so a buggy adapter that ignores `target_lost=True` would NOT trigger spurious retreat-from-tilt. `(0.0, 0.0)` would parse as "top edge, zero-size bbox" — exactly the edge profile an edge-aware adapter might respond to. The CONTEXT Q6 lock requires adapters to early-return on `target_lost=True`, but a fail-safe sentinel still matters for buggy implementations.
+- **Single combined commit for Tasks 1 + 2 — plan-directed override of per-task discipline.** Plan verification § stated explicitly: "Both tasks land as ONE commit per per-plan discipline (research commit-shape § Wave 1 commit 2)". Tight coupling between `types.py` edit and `__init__.py` re-export means any intermediate state would break `from robot_follow.follow_api import Axis` — so committing them together is correct. Standard executor per-task pattern is overridden by explicit plan direction. Recording the convention so the next executor on a similar plan recognizes the override.
+- **`Detection` placed BEFORE `SafetyContext` in file order — avoids the forward-ref string.** `SafetyContext.from_detection(det: Detection) -> "SafetyContext"` evaluates its parameter annotation at class-definition time (no `from __future__ import annotations` in this module yet). The return-type annotation IS a forward-ref string (because `SafetyContext` is being defined) but the parameter annotation must resolve to the actual `Detection` class. File order: `Axis → Capabilities → RobotCommand → VelocityCommand → Detection → SafetyContext`.
+- **xfail scaffold + type landing → xpass without flipping markers.** `test_robot_command_shape.py::test_robot_command_shape` used a `try / except ImportError: pytest.skip(...)` fallback in its setup. Once `RobotCommand` landed, the skip-guard short-circuited; the assertions ran against the real class and passed → reports as `xpass` (assertions pass + xfail marker still in place + `strict=False`). Pattern: xfail scaffolds with type-import fallbacks naturally flip to xpass without code changes; the markers come off as a separate strip-commit in 03-07. Skipped count went 10 → 9 (this test stopped skipping); xpass count went 30 → 31 (this test now xpasses).
+- **`gsd-sdk query state.add-decision` failed silently — handler expected a "Decisions" section but STATE.md uses phase-keyed subsections under "Accumulated Context".** Fallback: edited STATE.md directly to append this section. Mirrors the convention used by every prior Phase 1 / 2 / 3 plan in this STATE.md (each prior plan has its own `### Phase N decisions (DATE, NN-NN execute)` heading). The SDK handler is correct for projects using the canonical "Decisions" section but doesn't auto-detect this project's nested style; not a blocker, just a routing note for future executors.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -175,6 +185,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-18T20:08:51.204Z
-Stopped at: Completed 02-07-PLAN.md — CLEAN-16 SSE Condition + frame_seq race fix + CLEAN-17 socket reuse + CLEAN-18 O(1) dedup; Phase 2 done (18/18 CLEAN items closed; 5/5 ROADMAP criteria closed; 3 xfails flipped to passes; 0 xfailed remaining)
+Last session: 2026-05-19T10:34:51.680Z
+Stopped at: Completed 03-03-PLAN.md — added Axis + Capabilities + RobotCommand + SafetyContext to follow_api/types.py; ABS-01/ABS-02 satisfied; test_robot_command_shape xfail flipped to xpass; suite 175 passed + 31 xpassed + 82 xfailed + 9 skipped + 0 failed
 Resume file: None
