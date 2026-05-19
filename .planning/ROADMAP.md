@@ -82,7 +82,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   - [x] 03-06-PLAN.md — Wave 4: introduce MavsdkDroneAdapter + R5 pure-function extracts + ~30 adapter tests (ABS-04, ABS-05, ABS-06)
   - [x] 03-07-PLAN.md — Wave 5 (ATOMIC): controller.compute(detection, caps, config) -> RobotCommand; delete VelocityCommand + VelocityCommandAPI + live_control_loop; migrate 103 test sites; populate snapshot baseline; ABS-07 Optional altitude fields
   - [x] 03-08-PLAN.md — Wave 6: two-pass argparse with --robot dispatch + run_robot() composition root (ABS-08, ABS-09)
-  - [ ] 03-09-PLAN.md — Wave 7: setup_env.sh conditional ROS source + delete drone_api/ directory (ABS-03 final, ABS-10)
+  - [x] 03-09-PLAN.md — Wave 7: setup_env.sh conditional ROS source + delete drone_api/ directory (ABS-03 final, ABS-10)
   - [ ] 03-10-PLAN.md — Wave 7 (checkpoint): operator-witnessed SITL drone follow gate (ABS-11)
 
 ### Phase 4: Rover adapter
@@ -129,7 +129,7 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 |-------|-----------|----------------|--------|-----------|
 | 1. Rename | v1.1 | 3/3 | Complete | 2026-05-14 |
 | 2. Cleanup | v1.1 | 8/8 | Complete | 2026-05-17 |
-| 3. Abstraction | v1.1 | 8/10 | In Progress|  |
+| 3. Abstraction | v1.1 | 9/10 | In Progress|  |
 | 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
 | 5. Rover sim | v1.1 | 0/TBD | Not started | - |
 | 6. Sim integration | v1.1 | 0/TBD | Not started | - |
