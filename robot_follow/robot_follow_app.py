@@ -28,8 +28,11 @@ import threading
 import time
 from robot_follow.follow_api import ControllerConfig, SharedDetectionState
 from robot_follow.follow_api.state import FollowTargetState
-from robot_follow.drone_api import run_live_drone, _reap_mavsdk_server
-from robot_follow.drone_api.mavsdk_drone import add_drone_args
+from robot_follow.robot_api.adapters.mavsdk_drone import (
+    run_live_drone,
+    _reap_mavsdk_server,
+    add_drone_args,
+)
 from robot_follow.pipeline_adapter.vision_branches import decide_branches
 from robot_follow.servers import FollowServer, OpenHDBridge
 
