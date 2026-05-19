@@ -63,7 +63,7 @@ Introduce `robot_api/` with `Robot` protocol + `Capabilities` and move the MAVSD
 - [x] **ABS-04**: `live_control_loop` gates the altitude-hold P-loop on `Axis.ALTITUDE in capabilities.axes` (rover sees no `down_m_s` term emitted from controller).
 - [x] **ABS-05**: Bottom-edge frame safety moves out of the controller. Controller emits `forward_m_s=0` when the target's bbox bottom is below the safe-zone threshold — that's all it knows. Per-robot reactions (drone: retreat-from-tilt; rover: slow / stop) are implemented **inside each adapter's `send_command`**, not gated by a flag in follow_api. No `bottom_edge_policy` field in `Capabilities`.
 - [x] **ABS-06**: Yaw-spin search-on-loss moves out of the controller. When the target is lost the controller emits `send_zero()` (or holds, per existing logic) — that's all it knows. Per-robot search behaviors (drone: yaw-spin to scan; rover: no spin) are implemented **inside each adapter**, not gated by a flag in follow_api. No `yaw_spin_on_loss` field in `Capabilities`.
-- [ ] **ABS-07**: `ControllerConfig` altitude fields (`min_altitude`, `max_altitude`, `target_altitude`, `kp_alt_hold`, `max_climb_speed`, `max_down_speed`, `max_bbox_height_safety`, `top_margin_safety`, `bottom_margin_safety`) become `Optional[float]`; `validate()` skips altitude relationship checks when `Axis.ALTITUDE not in capabilities.axes`.
+- [x] **ABS-07**: `ControllerConfig` altitude fields (`min_altitude`, `max_altitude`, `target_altitude`, `kp_alt_hold`, `max_climb_speed`, `max_down_speed`, `max_bbox_height_safety`, `top_margin_safety`, `bottom_margin_safety`) become `Optional[float]`; `validate()` skips altitude relationship checks when `Axis.ALTITUDE not in capabilities.axes`.
 - [ ] **ABS-08**: Composition root: `run_drone()` renamed to `run_robot()`; dispatches to the right adapter based on `--robot`. Existing `run_drone()` callers updated; behaviour unchanged for `--robot drone` (default).
 - [x] **ABS-09**: `--robot drone|rover` CLI flag (default `drone`) with two-pass argparse pre-parse so rover users don't see drone-only flags (`--takeoff-landing`, `--target-altitude`, `--serial`) in `--help` and vice versa.
 - [x] **ABS-10**: `setup_env.sh` auto-sources `/opt/ros/humble/setup.bash` if `--robot rover` is detected and ROS is installed; sourcing order is venv first, then ROS (per PITFALLS.md).
@@ -172,7 +172,7 @@ Tracked but not in current roadmap. All require physical hardware to exercise.
 | ABS-04 | Phase 3 | Complete |
 | ABS-05 | Phase 3 | Complete |
 | ABS-06 | Phase 3 | Complete |
-| ABS-07 | Phase 3 | Pending |
+| ABS-07 | Phase 3 | Complete |
 | ABS-08 | Phase 3 | Pending |
 | ABS-09 | Phase 3 | Complete |
 | ABS-10 | Phase 3 | Complete |
