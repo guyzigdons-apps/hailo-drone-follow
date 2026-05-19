@@ -15,12 +15,18 @@ class SharedDetectionState:
         self._detection: Optional[Detection] = None
         self._frame_count: int = 0
         self._available_ids: set = set()
+        # {track_id -> (x, y, w, h)} in normalized [0..1] coords. Atomic with
+        # _available_ids so follow_server can match a client-supplied bbox
+        # against the SAME snapshot the id check ran against — no ui_state race.
+        self._available_bboxes: dict = {}
 
-    def update(self, detection: Optional[Detection], available_ids: set):
+    def update(self, detection: Optional[Detection], available_ids: set,
+               available_bboxes: Optional[dict] = None):
         with self._lock:
             self._detection = detection
             self._frame_count += 1
             self._available_ids = available_ids
+            self._available_bboxes = dict(available_bboxes) if available_bboxes else {}
 
     def get_latest(self):
         with self._lock:
@@ -30,6 +36,15 @@ class SharedDetectionState:
         """Get the set of currently visible detection IDs."""
         with self._lock:
             return self._available_ids.copy()
+
+    def get_available_bboxes(self):
+        """Get a {id -> (x, y, w, h)} snapshot of currently visible bboxes.
+
+        Returned dict is a defensive copy under lock so the caller can iterate
+        without holding the state lock; bboxes are tuples (immutable).
+        """
+        with self._lock:
+            return dict(self._available_bboxes)
 
 
 class FollowTargetState:

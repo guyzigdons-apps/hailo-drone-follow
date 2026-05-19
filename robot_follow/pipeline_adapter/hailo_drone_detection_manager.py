@@ -378,7 +378,7 @@ def _app_callback_inner(element, buffer, user_data):
                                 # Reacquire failed — hold position, retry
                                 # next frame. Mirrors the existing REID-lost
                                 # path's "no match" behaviour.
-                                user_data.shared_state.update(None, available_ids=available_ids)
+                                user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
                                 _update_ui(ui_state, persons, person_to_id, None)
                                 _log_mode(user_data, FollowEvent.REID_DRIFT, target_id)
                                 return
@@ -438,7 +438,7 @@ def _app_callback_inner(element, buffer, user_data):
 
                     if best is None:
                         # No match (or no candidates) — hold position, retry next frame.
-                        user_data.shared_state.update(None, available_ids=available_ids)
+                        user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
                         _update_ui(ui_state, persons, person_to_id, None)
                         _log_mode(user_data, FollowEvent.REID_SEARCH, target_id)
                         return
@@ -465,7 +465,7 @@ def _app_callback_inner(element, buffer, user_data):
         # No explicit target — decide between idle, hold, or auto-select
         if target_state is not None and target_state.is_paused():
             # True IDLE — hold position
-            user_data.shared_state.update(None, available_ids=available_ids)
+            user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
             _update_ui(ui_state, persons, person_to_id, None, paused=True)
             LOGGER.debug("[IDLE] Paused. Available: %s",
                         sorted(available_ids) if available_ids else "none")
@@ -473,7 +473,7 @@ def _app_callback_inner(element, buffer, user_data):
             return
         if not auto_select:
             # Auto-select disabled — pilot-led workflow. Hold position; wait for operator click.
-            user_data.shared_state.update(None, available_ids=available_ids)
+            user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
             _update_ui(ui_state, persons, person_to_id, None, paused=True)
             LOGGER.debug("[IDLE] auto-select off — waiting for operator selection. Available: %s",
                         sorted(available_ids) if available_ids else "none")
@@ -495,14 +495,14 @@ def _app_callback_inner(element, buffer, user_data):
             LOGGER.debug("[AUTO] Selected biggest person ID %s. Available: %s",
                         biggest_id, sorted(available_ids) if available_ids else "none")
         else:
-            user_data.shared_state.update(None, available_ids=available_ids)
+            user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
             _update_ui(ui_state, persons, person_to_id, None)
             _log_mode(user_data, FollowEvent.AUTO_NO_TRACKED, None)
             return
 
     if best is None:
         # Safety fallback — should not normally reach here
-        user_data.shared_state.update(None, available_ids=available_ids)
+        user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
         _update_ui(ui_state, persons, person_to_id, None)
         _log_mode(user_data, FollowEvent.FALLBACK, None)
         return
@@ -542,7 +542,7 @@ def _app_callback_inner(element, buffer, user_data):
         center_y=cy,
         bbox_height=bbox_h,
         timestamp=time.monotonic(),
-    ), available_ids=available_ids)
+    ), available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
 
     # Use the original ID for the UI so the operator sees a stable ID
     # even after ReID re-identifies the person with a new tracker ID. Also
