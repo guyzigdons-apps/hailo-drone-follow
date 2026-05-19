@@ -31,6 +31,10 @@ export default function App() {
   // rendered bbox, both in normalized coords. RAF lerps rendered → target.
   const targetBoxesRef = useRef(new Map());
   const renderedBoxesRef = useRef(new Map());
+  // Mirror of the latest SSE detections so handleFollow can resolve the bbox's
+  // current id at click time (React closure binds det.id at render time, which
+  // goes stale when ByteTracker re-IDs the same target between SSE and click).
+  const detectionsRef = useRef([]);
   // Bumped by the RAF loop to trigger SVG re-renders between detection events.
   const [, setSmoothTick] = useState(0);
 
@@ -41,6 +45,7 @@ export default function App() {
       try {
         const data = JSON.parse(event.data);
         setDetections(data.detections || []);
+        detectionsRef.current = data.detections || [];
         setFollowingId(data.following_id);
         setVelocity(data.velocity || null);
         setPerf(data.perf || null);
@@ -282,11 +287,29 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  const handleFollow = async (id) => {
+  const handleFollow = async (clickedDet) => {
+    // Resolve the bbox's CURRENT id from the latest SSE frame.
+    // React's onClick closure captures det.id at render time; if ByteTracker
+    // re-IDed the same visual target between the render and the click firing,
+    // that id is stale and the server returns 404 (F3 from 03-12-SUMMARY.md).
+    // Pick the detection whose bbox center is nearest the clicked center.
+    const latest = detectionsRef.current;
+    const cx = clickedDet.bbox.x + clickedDet.bbox.w / 2;
+    const cy = clickedDet.bbox.y + clickedDet.bbox.h / 2;
+    let pick = clickedDet;
+    let best = Infinity;
+    for (const d of latest) {
+      if (d.id == null) continue;
+      const dx = (d.bbox.x + d.bbox.w / 2) - cx;
+      const dy = (d.bbox.y + d.bbox.h / 2) - cy;
+      const dist2 = dx * dx + dy * dy;
+      if (dist2 < best) { best = dist2; pick = d; }
+    }
+    if (pick.id == null) return;
     try {
       const port = config?.follow_server_port || 8080;
       const host = window.location.hostname;
-      await fetch(`http://${host}:${port}/follow/${id}`, { method: "POST" });
+      await fetch(`http://${host}:${port}/follow/${pick.id}`, { method: "POST" });
     } catch {
       // ignore
     }
@@ -683,7 +706,7 @@ export default function App() {
               return (
                 <g
                   key={`${det.id ?? "x"}-${i}`}
-                  onClick={hasId ? () => handleFollow(det.id) : undefined}
+                  onClick={hasId ? () => handleFollow(det) : undefined}
                   style={{ cursor: hasId ? "pointer" : "default", pointerEvents: "auto" }}
                 >
                   {isFollowing ? (
