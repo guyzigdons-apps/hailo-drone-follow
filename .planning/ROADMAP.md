@@ -22,7 +22,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
 
 - [x] **Phase 1: Rename** - Mechanical `drone_follow` → `robot_follow` package rename with `drone-follow` alias preserved (3/3 plans complete; ready for `/gsd:verify-work`)
 - [x] **Phase 2: Cleanup** - Delete confirmed dead code, merge duplications, fix hot-path races
-- [ ] **Phase 3: Abstraction** - `Robot` protocol + `Capabilities`, drone adapter behind protocol; CRITICAL GATE before rover work
+- [ ] **Phase 3: Abstraction** - `Robot` protocol + `Capabilities`, drone adapter behind protocol; CRITICAL GATE before rover work — all 12 plans landed but ABS-11 SITL gate failed (F3 surfaced in 03-12); awaiting gap closure 03-13/03-14
 - [ ] **Phase 4: Rover adapter** - ROS 2 Humble rclpy node publishing `geometry_msgs/Twist`; parallel with Phase 5
 - [ ] **Phase 5: Rover sim** - Gazebo Garden rover SDF + cmd_vel bridge + video_bridge.py camera path; parallel with Phase 4
 - [ ] **Phase 6: Sim integration** - Rover defaults, bottom-edge safety repurpose, ByteTracker config, end-to-end validation
@@ -85,7 +85,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   - [x] 03-09-PLAN.md — Wave 7: setup_env.sh conditional ROS source + delete drone_api/ directory (ABS-03 final, ABS-10)
   - [x] 03-10-PLAN.md — Wave 7 (checkpoint): operator-witnessed SITL drone follow gate (ABS-11) — FAILED (F1 + F2 surfaced; see 03-10-SUMMARY.md)
   - [x] 03-11-PLAN.md — Wave 8 (gap closure): thread ui_state through run_robot_loop + publish (fwd,down,yaw,mode) per branch + demote F2 INFO log to DEBUG (ABS-11)
-  - [ ] 03-12-PLAN.md — Wave 9 (gap closure checkpoint): operator SITL re-run gate after F1 + F2 fixes (ABS-11)
+  - [x] 03-12-PLAN.md — Wave 9 (gap closure checkpoint): operator SITL re-run gate after F1 + F2 fixes (ABS-11) — FAILED (F1+F2 closed, new F3 surfaced; see 03-12-SUMMARY.md)
 
 ### Phase 4: Rover adapter
 **Goal**: `Ros2RoverAdapter` publishes `geometry_msgs/Twist` on `/cmd_vel`; SIGINT handler is preserved; adapter integrates cleanly with the asyncio control loop.
@@ -131,7 +131,7 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 |-------|-----------|----------------|--------|-----------|
 | 1. Rename | v1.1 | 3/3 | Complete | 2026-05-14 |
 | 2. Cleanup | v1.1 | 8/8 | Complete | 2026-05-17 |
-| 3. Abstraction | v1.1 | 11/12 | In Progress|  |
+| 3. Abstraction | v1.1 | 12/12 | In Progress (gate failed) |  |
 | 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
 | 5. Rover sim | v1.1 | 0/TBD | Not started | - |
 | 6. Sim integration | v1.1 | 0/TBD | Not started | - |
