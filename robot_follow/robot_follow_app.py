@@ -76,6 +76,9 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
         --record  : pure-GStreamer recording (x264enc -> matroskamux -> filesink)
 
     If neither --openhd nor --webui is passed, --display defaults to True.
+
+    Note: this helper is invoked from add_common_args(); per ABS-09 it is
+    robot-agnostic (every flag here is shared between drone and rover).
     """
     group = parser.add_argument_group("app")
 
@@ -161,29 +164,119 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="H264 encoding bitrate in kbps for OpenHD stream (default: 3917)")
 
 
+def add_common_args(parser: argparse.ArgumentParser) -> None:
+    """Register all CLI flags shared by every Robot type.
+
+    Pipeline-app extensions are NOT registered here — the upstream
+    ``hailo_apps.python.core.common.core.get_pipeline_parser()`` creates
+    a fresh parser pre-loaded with its own flags, so the pipeline flags
+    are installed by ``_build_parser`` before this function is called.
+    What lives in this common set:
+
+      - ``ControllerConfig.add_args``  (controller gains, framing, search,
+        smoothing, safety — robot-agnostic)
+      - ``_add_app_args``              (UI, output branches, ReID, OpenHD,
+        recording — all robot-agnostic per ABS-09)
+      - ``add_tracker_args``           (tracker choice + tracker tunables)
+
+    Altitude flags (``--min-altitude``, ``--max-altitude``,
+    ``--kp-alt-hold``, ``--max-climb-speed``, ``--smooth-down``,
+    ``--down-alpha``) stay in this common set per ABS-07: they are
+    Optional types in ``ControllerConfig`` and the rover adapter simply
+    ignores them.
+
+    This is invoked from ``_build_parser`` BEFORE the robot-specific
+    dispatch (``add_drone_args`` or ``add_rover_args``) so the shared
+    flags appear identically in ``--robot drone --help`` and
+    ``--robot rover --help``.
+    """
+    from robot_follow.pipeline_adapter import add_tracker_args
+
+    ControllerConfig.add_args(parser)
+    _add_app_args(parser)
+    add_tracker_args(parser)
+
+
+def add_rover_args(parser: argparse.ArgumentParser) -> None:
+    """Register rover-only CLI flags.
+
+    EMPTY in Phase 3 — Phase 4 fills this in with ``--cmd-vel-topic``,
+    ``--ros-namespace``, ``--ros-domain-id`` (ROVER-05). The argument
+    group is added unconditionally so plan-checkers can confirm that
+    the dispatch is wired even before Phase 4 lands flags.
+
+    Plan-checker invariant (DESIGN-NOTES line 128): no flag may be in
+    both ``add_drone_args`` and ``add_rover_args``. The empty body
+    automatically satisfies this; future rover flags must not duplicate
+    drone flags.
+    """
+    parser.add_argument_group("rover-ros2 (Phase 4)")
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the full CLI parser, assembling args from every domain.
+    """Two-pass argparse with ``--robot`` dispatch.
+
+    Pass 1: a tiny pre-parser extracts ``--robot {drone,rover}`` (default
+    ``drone``) from argv without consuming any other flags.
+    Pass 2: the full parser is assembled with ``add_common_args`` and,
+    based on the pre-parsed robot value, either ``add_drone_args`` (from
+    ``robot_api.adapters.mavsdk_drone``) or ``add_rover_args``.
+
+    --help shape::
+
+        robot-follow --robot drone --help → common + drone flags
+        robot-follow --robot rover --help → common + rover flags only
+                                            (Phase 3: rover-specific is empty)
+
+    Common flags (``--webui``, ``--display``, ``--input``, etc.) appear
+    under both. Drone-only flags (``--takeoff-landing``,
+    ``--target-altitude``, ``--serial``, ``--serial-baud``,
+    ``--connection``, ``--mission-duration``) appear ONLY under
+    ``--robot drone``.
 
     Each domain only registers arguments it owns:
       - follow_api:        controller gains, framing, search, smoothing, safety
       - drone_api:         MAVLink connection, flight lifecycle
-      - app (this file):   UI/server ports
+      - app (this file):   UI/server ports, ReID, output branches
     """
     from hailo_apps.python.core.common.core import get_pipeline_parser
-    from robot_follow.pipeline_adapter import add_tracker_args
+
+    # Pre-parser pass 1: extract --robot. Uses parse_known_args so it
+    # doesn't error on the full argv (which contains many flags it
+    # doesn't know about). add_help=False so this pre-parser doesn't
+    # consume --help — that's the full parser's job.
+    pre_robot = argparse.ArgumentParser(add_help=False)
+    pre_robot.add_argument("--robot", choices=("drone", "rover"), default="drone")
+    robot_args, _ = pre_robot.parse_known_args()
+
+    # Pass 2: full parser with robot-conditional dispatch. Start from
+    # the upstream pipeline parser (which already registers --input,
+    # --tiles-x, --hef-path, etc.), then layer the rest on top via
+    # ``add_common_args`` and the robot-specific add_*_args.
     parser = get_pipeline_parser()
+
+    add_common_args(parser)
+    if robot_args.robot == "drone":
+        add_drone_args(parser)  # canonical, from robot_api.adapters.mavsdk_drone
+    else:
+        add_rover_args(parser)
+
+    # Re-add --robot to the full parser so --help renders it as a known
+    # option and the final parse_args() call accepts it. default mirrors
+    # the pre-parse so args.robot agrees with whichever branch ran.
+    parser.add_argument(
+        "--robot",
+        choices=("drone", "rover"),
+        default=robot_args.robot,
+        help="Robot adapter to use (default: drone). Drone path runs MAVSDK "
+             "via MavsdkDroneAdapter; rover path lands in Phase 4.",
+    )
 
     # Pin the program name in --help output so the `robot-follow` and
     # `drone-follow` console-script aliases produce byte-identical
     # `--help` output (Phase 1 success criterion 2). Without this,
     # argparse derives prog from sys.argv[0] and the two aliases diverge.
     parser.prog = "robot-follow"
-
-    ControllerConfig.add_args(parser)
-    add_drone_args(parser)
-
-    _add_app_args(parser)
-    add_tracker_args(parser)
 
     # Tile / multi-scale defaults are injected AFTER the upstream
     # ``GStreamerTilingApp._add_tiling_arguments`` runs (it registers
@@ -388,20 +481,42 @@ def main():
         _quit_pipeline()
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
-    def run_drone():
-        """Run drone control in a background thread with its own asyncio loop.
+    def run_robot():
+        """Run robot control in a background thread with its own asyncio loop.
 
-        Phase 3 plan 03-07 swapped out the legacy live_control_loop /
-        VelocityCommandAPI path. The new production path is
-        ``MavsdkDroneAdapter`` driven by
-        ``robot_api.orchestrator.run_robot_loop``. The mission-duration
-        watchdog (B1 lock) is wrapped here, NOT in ``run_robot_loop`` —
-        keeping the orchestrator robot-agnostic (rover users have no
-        ``--mission-duration`` arg). 03-08 will rename this to
-        ``run_robot()`` and add ``--robot`` dispatch.
+        Phase 3 plan 03-08 renamed ``run_drone`` → ``run_robot`` and
+        added ``--robot`` dispatch. The drone path constructs
+        ``MavsdkDroneAdapter`` and drives it via
+        ``robot_api.orchestrator.run_robot_loop`` (unchanged from 03-07).
+        The rover path raises ``NotImplementedError`` until Phase 4
+        lands ``Ros2RoverAdapter`` — at which point THIS stub will be
+        replaced by ROVER-04's friendly
+        ``RuntimeError("ROS 2 not sourced — run sudo apt install
+        ros-humble-ros-base then re-source setup_env.sh")`` path.
+
+        B1 carry-through (03-07 → 03-08): the mission-duration watchdog
+        wrap from 03-07's ``run_drone`` is PRESERVED mechanically — not
+        deleted, not moved into ``run_robot_loop``. The wrap uses
+        ``getattr(args, "mission_duration", math.inf)`` so rover users
+        (no ``--mission-duration`` flag registered in
+        ``add_rover_args``) get ``math.inf`` (no deadline) while drone
+        users honor their ``--mission-duration`` value (default 300s
+        per ``add_drone_args``). The watchdog lives HERE, not in
+        ``run_robot_loop``, to keep the orchestrator robot-agnostic.
         """
-        async def _main():
+        if args.robot == "drone":
             adapter = MavsdkDroneAdapter(args, controller_config)
+        elif args.robot == "rover":
+            # Phase 4 replaces this stub with ROVER-04's friendly
+            # ``RuntimeError("ROS 2 not sourced — ...")`` path.
+            raise NotImplementedError(
+                "Rover adapter lands in Phase 4. "
+                "Run with --robot drone (default) until then."
+            )
+        else:
+            raise ValueError(f"Unknown --robot value: {args.robot}")
+
+        async def _main():
             duration = getattr(args, "mission_duration", math.inf)
             loop_task = asyncio.create_task(
                 run_robot_loop(adapter, shared_state, controller_config, shutdown)
@@ -422,7 +537,7 @@ def main():
                             pass
                         except Exception:
                             LOGGER.warning(
-                                "[drone] background task raised on shutdown",
+                                "[robot] background task raised on shutdown",
                                 exc_info=True,
                             )
 
@@ -432,15 +547,17 @@ def main():
             loop.run_until_complete(_main())
         except Exception:
             LOGGER.warning(
-                "[drone] Drone connection failed — pipeline continues without drone control.",
+                "[robot] Control loop failed — pipeline continues without robot control.",
                 exc_info=True,
             )
         finally:
             loop.close()
 
-    drone_thread = threading.Thread(target=run_drone, daemon=True)
-    drone_thread.start()
-    LOGGER.info("[app] Drone control started in background thread")
+    robot_thread = threading.Thread(target=run_robot,
+                                    name="robot-follow-control",
+                                    daemon=True)
+    robot_thread.start()
+    LOGGER.info("[app] Robot control started in background thread")
 
     def on_signal(*_):
         if not shutdown.is_set():
@@ -472,10 +589,10 @@ def main():
             app.stop_recording()
         else:
             app.cleanup_recording_branch()
-        # Wait for drone thread to finish cleanly
-        drone_thread.join(timeout=5.0)
-        if drone_thread.is_alive():
-            # Drone thread is stuck (typically a MAVSDK land/offboard timeout
+        # Wait for robot thread to finish cleanly
+        robot_thread.join(timeout=5.0)
+        if robot_thread.is_alive():
+            # Robot thread is stuck (typically a MAVSDK land/offboard timeout
             # against a sim that's already gone). Its `with DetachedMavsdkServer`
             # __exit__ won't run, and start_new_session=True means mavsdk_server
             # would survive us — leaving UDP 14540 + TCP 50051 bound and blocking
