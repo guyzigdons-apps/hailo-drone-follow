@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import time
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -19,13 +20,231 @@ from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 from mavsdk.telemetry import FlightMode
 
-from robot_follow.follow_api.types import VelocityCommand
+from robot_follow.follow_api.types import (
+    Axis,
+    Capabilities,
+    Detection,
+    RobotCommand,
+    SafetyContext,
+    VelocityCommand,
+)
 from robot_follow.follow_api.config import ControllerConfig
 from robot_follow.follow_api.controller import (
     compute_velocity_command,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Robot-protocol capabilities (Q8 lock: lives here, NOT in follow_api/types.py)
+# ---------------------------------------------------------------------------
+
+# Drone-axis capability constant — declared here per Q8 lock
+# (CONTEXT 2026-05-17). follow_api/types.py stays types-only;
+# per-adapter constants live with their adapter.
+DRONE_CAPS: Capabilities = Capabilities(
+    axes=frozenset({Axis.FORWARD, Axis.YAW, Axis.ALTITUDE}),
+    yaw_unit="deg/s",
+)
+
+
+# ---------------------------------------------------------------------------
+# SmoothingState — per-adapter EMA / slew-rate filter state
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SmoothingState:
+    """Per-adapter smoothing/slew state.
+
+    Mutated in place by _apply_smoothing. Lives on the
+    MavsdkDroneAdapter instance; recreated on shutdown/restart.
+    Equivalent to VelocityCommandAPI's _filtered_* attributes; the
+    two state holders co-exist during the 03-06/03-07 migration.
+    """
+    filtered_yaw: float = 0.0
+    filtered_forward: float = 0.0
+    filtered_down: float = 0.0
+    prev_forward: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Pure-function extracts (R5): altitude P, retreat-from-tilt, smoothing,
+# search-yawspeed. Module-level so they are testable without instantiating
+# the adapter or talking to MAVSDK.
+# ---------------------------------------------------------------------------
+
+def _apply_altitude_p(
+    down_m_s: float,
+    altitude_cache: dict,
+    config: ControllerConfig,
+) -> float:
+    """Altitude-hold P correction on the down axis.
+
+    Behavior byte-equivalent to live_control_loop's altitude block
+    (mavsdk_drone.py lines 509-524). Pure: no I/O, no asyncio, no MAVSDK.
+
+    Returns the (possibly clamped) down command:
+      - No altitude reading available → passthrough input.
+      - yaw_only mode → passthrough input.
+      - At or below floor with positive down (descend) → 0.
+      - At or above ceiling with negative down (climb) → 0.
+      - Otherwise: down = kp_alt_hold * (current_alt - target_altitude),
+        clamped to [-max_climb_speed, max_down_speed].
+    """
+    current_alt = altitude_cache.get("m")
+    if current_alt is None:
+        return down_m_s
+    if config.yaw_only:
+        down = down_m_s
+    else:
+        alt_err = current_alt - config.target_altitude  # +ve = too high
+        down = config.kp_alt_hold * alt_err
+        down = max(-config.max_climb_speed, min(config.max_down_speed, down))
+    if current_alt <= config.min_altitude and down > 0:
+        down = 0.0
+    elif current_alt >= config.max_altitude and down < 0:
+        down = 0.0
+    return down
+
+
+def _apply_retreat_from_tilt(
+    forward_m_s: float,
+    safety_ctx: SafetyContext,
+    config: ControllerConfig,
+) -> float:
+    """Drone-specific bottom/top frame-edge fade + safety push.
+
+    Lifted from controller._apply_frame_edge_safety (controller.py:58-117)
+    but reads bbox_top / bbox_bottom from SafetyContext rather than
+    Detection. Behavior byte-equivalent.
+
+    Q6 lock: when ``safety_ctx.target_lost == True``, returns
+    ``forward_m_s`` unchanged. Sentinel bbox values in the lost
+    SafetyContext are intentionally not inspected.
+    """
+    if safety_ctx.target_lost:
+        return forward_m_s
+    if config.yaw_only:
+        return forward_m_s
+
+    bbox_bottom = safety_ctx.bbox_bottom_normalized
+    # SafetyContext stores bottom + size; reconstruct top as
+    # bottom - size to match the original controller math
+    # (top = center_y - height/2 = bottom - height).
+    bbox_top = bbox_bottom - safety_ctx.bbox_size_normalized
+
+    forward = forward_m_s
+
+    if config.bottom_margin_safety > 0:
+        margin = config.bottom_margin_safety
+        # Fade positive (approach) natural command across [1-2m, 1-m].
+        if forward > 0:
+            fade_depth = bbox_bottom - (1.0 - 2.0 * margin)
+            if fade_depth > 0:
+                fade = max(0.0, 1.0 - fade_depth / margin)
+                forward *= fade
+        # Safety push inside the margin.
+        depth = bbox_bottom - (1.0 - margin)
+        if depth > 0:
+            ratio = min(depth / margin, 1.0)
+            forward = min(forward, -ratio * config.max_backward)
+
+    if config.top_margin_safety > 0:
+        margin = config.top_margin_safety
+        # Fade negative (retreat) natural command across [m, 2m].
+        if forward < 0:
+            fade_depth = (2.0 * margin) - bbox_top
+            if fade_depth > 0:
+                fade = max(0.0, 1.0 - fade_depth / margin)
+                forward *= fade
+        # Safety push inside the margin.
+        depth = margin - bbox_top
+        if depth > 0:
+            ratio = min(depth / margin, 1.0)
+            forward = max(forward, ratio * config.max_forward)
+
+    return forward
+
+
+def _apply_smoothing(
+    cmd: RobotCommand,
+    state: SmoothingState,
+    config: ControllerConfig,
+) -> RobotCommand:
+    """Per-axis clamp → per-axis EMA → forward-axis slew-rate cap.
+
+    Mutates ``state`` in place (filtered_* + prev_forward). Returns a
+    NEW RobotCommand with the clamped/filtered values. Behavior
+    byte-equivalent to VelocityCommandAPI.send (mavsdk_drone.py:130-181).
+    """
+    # Clamp each axis to configured maximums
+    forward = max(-config.max_backward, min(config.max_forward, cmd.forward_m_s))
+    down = max(-config.max_down_speed, min(config.max_down_speed, cmd.down_m_s))
+    yaw_raw = max(-config.max_yawspeed, min(config.max_yawspeed, cmd.yaw_rate))
+
+    # Per-axis EMA filtering
+    if config.smooth_forward:
+        state.filtered_forward = (
+            config.forward_alpha * forward
+            + (1.0 - config.forward_alpha) * state.filtered_forward
+        )
+        forward = state.filtered_forward
+    else:
+        state.filtered_forward = forward
+
+    if config.smooth_down:
+        state.filtered_down = (
+            config.down_alpha * down
+            + (1.0 - config.down_alpha) * state.filtered_down
+        )
+        down = state.filtered_down
+    else:
+        state.filtered_down = down
+
+    if config.smooth_yaw:
+        state.filtered_yaw = (
+            config.yaw_alpha * yaw_raw
+            + (1.0 - config.yaw_alpha) * state.filtered_yaw
+        )
+        yaw_out = state.filtered_yaw
+    else:
+        state.filtered_yaw = yaw_raw
+        yaw_out = yaw_raw
+
+    # Forward-axis slew-rate cap (after EMA): hard m/s² bound on |Δforward/Δt|.
+    # Tames PX4 pitch transients on target acquisition / abrupt distance changes.
+    # Independent of cfg.max_forward and of cfg.forward_alpha.
+    if config.max_forward_accel > 0 and config.control_loop_hz > 0:
+        max_step = config.max_forward_accel / config.control_loop_hz
+        delta = forward - state.prev_forward
+        if delta > max_step:
+            forward = state.prev_forward + max_step
+        elif delta < -max_step:
+            forward = state.prev_forward - max_step
+    state.prev_forward = forward
+    # Keep the EMA filter state in sync so it doesn't fight the slew limiter
+    state.filtered_forward = forward
+
+    return RobotCommand(forward_m_s=forward, yaw_rate=yaw_out, down_m_s=down)
+
+
+def _compute_search_yawspeed(
+    last_detection: Optional[Detection],
+    config: ControllerConfig,
+) -> float:
+    """Yaw speed for the drone's search-mode spin.
+
+    Direction follows the last seen side: ``last_detection.center_x > 0.5``
+    → spin right (+); else spin left (−). Magnitude:
+    ``config.search_yawspeed_slow``. No last detection → default right
+    (positive), matching controller.compute_velocity_command's
+    ``search_direction = 1.0`` default.
+    """
+    if last_detection is None:
+        return config.search_yawspeed_slow
+    sign = 1.0 if last_detection.center_x > 0.5 else -1.0
+    return sign * config.search_yawspeed_slow
 
 
 def add_drone_args(parser) -> None:
