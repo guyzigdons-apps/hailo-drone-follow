@@ -309,13 +309,16 @@ export default function App() {
     try {
       const port = config?.follow_server_port || 8080;
       const host = window.location.hostname;
-      // Send the resolved bbox height in the body so the server uses it directly
-      // as the target_bbox_height setpoint, bypassing the SharedUIState lookup
-      // that races with SharedDetectionState and produced "bbox height n/a" logs.
+      // Send the full bbox geometry so the server can: (a) write target_bbox_height
+      // from .h directly (bypassing the SharedUIState race [03-15]); and (b) when
+      // the requested id has drifted between SSE render and HTTP arrival, match
+      // the clicked bbox against shared_state's atomic id→bbox snapshot and
+      // recover by geometric overlap (IoU) [03-16] — the operator's click is the
+      // visual identification, regardless of which id was current at any layer.
       await fetch(`http://${host}:${port}/follow/${pick.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bbox: { h: pick.bbox.h } }),
+        body: JSON.stringify({ bbox: { x: pick.bbox.x, y: pick.bbox.y, w: pick.bbox.w, h: pick.bbox.h } }),
       });
     } catch {
       // ignore

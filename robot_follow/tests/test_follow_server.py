@@ -238,8 +238,9 @@ class TestFollowServer:
             server.shared_state.update(None, available_ids={45})
 
             conn = HTTPConnection("127.0.0.1", server.port)
-            # Value picked inside capture_bbox_setpoint_from_height's clamp range [0.10, 0.25]
-            body = json.dumps({"bbox": {"h": 0.18}}).encode("utf-8")
+            # h picked inside capture_bbox_setpoint_from_height's clamp range [0.10, 0.25].
+            # All four geometry keys are now required by the body schema.
+            body = json.dumps({"bbox": {"x": 0.4, "y": 0.3, "w": 0.1, "h": 0.18}}).encode("utf-8")
             conn.request(
                 "POST",
                 "/follow/45",
@@ -256,6 +257,100 @@ class TestFollowServer:
             assert cfg.target_bbox_height == pytest.approx(0.18)
         finally:
             FollowServerHandler.controller_config = None
+
+    def test_post_follow_stale_id_with_body_bbox_recovers_via_iou(self, server):
+        """03-16: stale id + body bbox that overlaps an available id → recover.
+
+        Client thinks the bbox has id=1 (last SSE frame); server sees id=45 in
+        the current frame (pipeline advanced). Without a body bbox the server
+        returns 404 (client doesn't know id=45 exists). WITH a body bbox the
+        server matches the clicked geometry against its atomic id→bbox snapshot
+        and locks onto whichever current id overlaps the click.
+        """
+        # Pipeline has id=45 at roughly the position the client clicked
+        server.shared_state.update(
+            None,
+            available_ids={45},
+            available_bboxes={45: (0.40, 0.30, 0.10, 0.20)},
+        )
+
+        conn = HTTPConnection("127.0.0.1", server.port)
+        # Client's clicked bbox is at almost the same position (slight drift from
+        # SSE smoothing) but it still posts the stale render-time id=1.
+        body = json.dumps({"bbox": {"x": 0.41, "y": 0.31, "w": 0.10, "h": 0.20}}).encode("utf-8")
+        conn.request(
+            "POST",
+            "/follow/1",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = conn.getresponse()
+        data = json.loads(response.read().decode())
+
+        assert response.status == 200
+        assert data["status"] == "success"
+        assert data["following_id"] == 45  # recovered via IoU, not the stale 1
+        assert server.target_state.get_target() == 45
+        assert server.target_state.is_explicit_lock() is True
+
+    def test_post_follow_stale_id_with_body_bbox_no_overlap_returns_404(self, server):
+        """03-16: stale id + body bbox that does NOT overlap any available bbox → 404.
+
+        Operator clicked in one spot but the only available detection is on the
+        opposite side of the frame. Server must not silently recover onto a
+        clearly-different person — return 404 so the operator re-clicks.
+        """
+        server.shared_state.update(
+            None,
+            available_ids={45},
+            available_bboxes={45: (0.05, 0.05, 0.10, 0.20)},  # top-left corner
+        )
+
+        conn = HTTPConnection("127.0.0.1", server.port)
+        # Operator clicked far away (bottom-right) — IoU with id=45 is 0
+        body = json.dumps({"bbox": {"x": 0.80, "y": 0.70, "w": 0.10, "h": 0.20}}).encode("utf-8")
+        conn.request(
+            "POST",
+            "/follow/1",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = conn.getresponse()
+        data = json.loads(response.read().decode())
+
+        assert response.status == 404
+        assert data["status"] == "error"
+        assert "not found" in data["message"]
+        assert set(data["available_ids"]) == {45}
+        assert server.target_state.get_target() is None
+
+    def test_post_follow_stale_id_with_body_bbox_picks_higher_iou(self, server):
+        """03-16: when multiple bboxes are available, recovery picks the one
+        with the highest IoU vs the clicked bbox — not 'first match' or
+        'len==1 single' heuristics."""
+        server.shared_state.update(
+            None,
+            available_ids={45, 67},
+            available_bboxes={
+                45: (0.10, 0.10, 0.10, 0.20),  # close to click
+                67: (0.80, 0.70, 0.10, 0.20),  # far from click
+            },
+        )
+
+        conn = HTTPConnection("127.0.0.1", server.port)
+        body = json.dumps({"bbox": {"x": 0.11, "y": 0.11, "w": 0.10, "h": 0.20}}).encode("utf-8")
+        conn.request(
+            "POST",
+            "/follow/1",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = conn.getresponse()
+        data = json.loads(response.read().decode())
+
+        assert response.status == 200
+        assert data["following_id"] == 45  # the higher-IoU match
+        assert server.target_state.get_target() == 45
 
     def test_post_follow_without_body_falls_back_to_ui_state_lookup(self, server):
         """03-15 F4b: POST without body falls back to _capture_bbox_for_id.
