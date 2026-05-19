@@ -654,6 +654,225 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
             ui_state.push_log(msg)
 
 
+# ---------------------------------------------------------------------------
+# MavsdkDroneAdapter — Robot protocol implementation
+# ---------------------------------------------------------------------------
+#
+# Phase 3 plan 03-06 lands this class in instantiable form; the composition
+# root (robot_follow_app.py) does NOT yet call it. live_control_loop /
+# VelocityCommandAPI remain the production path until Phase 3 plan 03-07
+# atomically swaps them out.
+# ---------------------------------------------------------------------------
+
+
+class MavsdkDroneAdapter:
+    """MAVSDK drone implementation of the Robot protocol.
+
+    Wraps DetachedMavsdkServer + MAVSDK System + telemetry tasks
+    + offboard handshake. ``send_command`` applies the 4 pure functions
+    (altitude P, retreat-from-tilt, smoothing) and forwards to
+    ``drone.offboard.set_velocity_body``.
+
+    Q6 lock: ``send_command`` short-circuits when
+    ``safety_ctx.target_lost`` is True. The orchestrator drives
+    search-mode behavior via ``on_target_lost``.
+
+    NOTE: 03-06 lands this class in instantiable form; the composition
+    root (robot_follow_app.py) does NOT yet call it. live_control_loop
+    / VelocityCommandAPI remain the production path until Phase 3
+    plan 03-07 atomically swaps them out.
+    """
+
+    caps: Capabilities = DRONE_CAPS  # class-level for type-checker
+
+    def __init__(self, args, config: ControllerConfig):
+        self.caps = DRONE_CAPS  # per CONTEXT instance-attr rule
+        self._args = args
+        self._config = config
+        self._drone: Optional[System] = None
+        self._mavsdk_server_cm: Optional[DetachedMavsdkServer] = None
+        self._connection_url: Optional[str] = None
+        self._smoothing = SmoothingState()
+        self._telemetry_cache: dict = {}
+        self._altitude_cache: dict = {}
+        self._telemetry_tasks: list = []
+        # Lazy-initialised in start_session to avoid binding to the
+        # wrong event loop when the adapter is constructed in tests.
+        self._shutdown_event: Optional[asyncio.Event] = None
+
+    async def connect(self) -> None:
+        """Open MAVSDK gRPC. Raises ConnectionError on timeout.
+
+        Wraps DetachedMavsdkServer + drone.connect + _wait_for_connection
+        (15 s timeout). Idempotent: if already connected, no-op.
+        """
+        if self._drone is not None:
+            return
+        self._mavsdk_server_cm = DetachedMavsdkServer(self._args.connection)
+        connection_url = self._mavsdk_server_cm.__enter__()
+        self._connection_url = connection_url
+        if connection_url.startswith("grpc://"):
+            parsed = urlparse(connection_url)
+            drone = System(
+                mavsdk_server_address=parsed.hostname or "127.0.0.1",
+                port=parsed.port or 50051,
+            )
+            await drone.connect()
+        else:
+            drone = System()
+            await drone.connect(system_address=connection_url)
+        try:
+            connected = await asyncio.wait_for(
+                _wait_for_connection(drone), timeout=_CONNECTION_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            connected = False
+        if not connected:
+            raise ConnectionError(
+                f"No drone detected on {self._args.connection} after "
+                f"{_CONNECTION_TIMEOUT_S}s. Pipeline continues without drone control."
+            )
+        self._drone = drone
+
+    async def start_session(self) -> None:
+        """Spawn telemetry tasks, run offboard handshake.
+
+        Raises ``RuntimeError`` if called before ``connect()`` succeeded.
+
+        Integration with the legacy ``_start_offboard(drone, vel_api, ...)``
+        helper: per 03-06 must_haves lock (option b), construct a
+        THROWAWAY ``VelocityCommandAPI(self._drone, self._config)`` and
+        pass it to ``_start_offboard``. The throwaway is discarded
+        immediately after the handshake; smoothing state lives on
+        ``self._smoothing`` and is NOT shared with the throwaway. This
+        keeps the migration diff minimal.
+        """
+        if self._drone is None:
+            raise RuntimeError("start_session called before successful connect")
+        if self._shutdown_event is None:
+            self._shutdown_event = asyncio.Event()
+        # Spawn telemetry tasks. The position task fans out into both
+        # telemetry_cache and altitude_cache (CLEAN-13: single position
+        # subscription, two consumers).
+        self._telemetry_tasks.append(asyncio.create_task(
+            _telemetry_velocity_task(
+                self._drone, self._telemetry_cache, self._shutdown_event,
+            )
+        ))
+        self._telemetry_tasks.append(asyncio.create_task(
+            _telemetry_position_task(
+                self._drone, self._telemetry_cache, self._altitude_cache,
+                self._shutdown_event,
+            )
+        ))
+        # Optional arm+takeoff when --takeoff-landing is set.
+        if getattr(self._args, "takeoff_landing", False):
+            await self._drone.action.set_takeoff_altitude(self._args.target_altitude)
+            for attempt in range(_ARM_MAX_ATTEMPTS):
+                if self._shutdown_event.is_set():
+                    return
+                try:
+                    await self._drone.action.arm()
+                    break
+                except mavsdk.action.ActionError as e:
+                    if attempt == _ARM_MAX_ATTEMPTS - 1:
+                        raise
+                    LOGGER.warning(
+                        "[drone] arm() failed (%s), retrying in %ds... (%d/%d)",
+                        e, _ARM_RETRY_DELAY_S, attempt + 1, _ARM_MAX_ATTEMPTS - 1,
+                    )
+                    for _ in range(int(_ARM_RETRY_DELAY_S / _ARM_SHUTDOWN_POLL_S)):
+                        if self._shutdown_event.is_set():
+                            return
+                        await asyncio.sleep(_ARM_SHUTDOWN_POLL_S)
+            await self._drone.action.takeoff()
+            await asyncio.sleep(5)
+        # Offboard handshake via _start_offboard (option b — locked).
+        # Construct throwaway VelocityCommandAPI for the legacy helper;
+        # filter state is local to the handshake, NOT propagated into
+        # self._smoothing.
+        throwaway_vel_api = VelocityCommandAPI(self._drone, self._config)
+        await _start_offboard(self._drone, throwaway_vel_api, self._shutdown_event)
+
+    async def send_command(
+        self,
+        cmd: RobotCommand,
+        safety_ctx: SafetyContext,
+    ) -> None:
+        """Per-tick command. Applies altitude P + retreat-from-tilt + smoothing.
+
+        Q6 lock: early-returns when ``safety_ctx.target_lost`` is True.
+        """
+        if safety_ctx.target_lost:
+            return
+        if self._drone is None:
+            return  # connect failed; silently skip
+        down = _apply_altitude_p(cmd.down_m_s, self._altitude_cache, self._config)
+        forward = _apply_retreat_from_tilt(cmd.forward_m_s, safety_ctx, self._config)
+        staged = RobotCommand(
+            forward_m_s=forward,
+            yaw_rate=cmd.yaw_rate,
+            down_m_s=down,
+        )
+        smoothed = _apply_smoothing(staged, self._smoothing, self._config)
+        vbys = VelocityBodyYawspeed(
+            smoothed.forward_m_s,
+            0.0,  # right_m_s — drone is non-holonomic
+            smoothed.down_m_s,
+            smoothed.yaw_rate,  # already deg/s per DRONE_CAPS.yaw_unit (Q5 lock)
+        )
+        await self._drone.offboard.set_velocity_body(vbys)
+
+    async def send_zero(self) -> None:
+        """Quiescent zero setpoint + reset smoothing state.
+
+        Called once in the orchestrator's finally block on shutdown.
+        """
+        self._smoothing = SmoothingState()
+        if self._drone is None:
+            return
+        await self._drone.offboard.set_velocity_body(
+            VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
+        )
+
+    async def on_target_lost(self, last_detection: Optional[Detection]) -> None:
+        """Drone's lost-target behavior: yaw-spin in last bbox direction."""
+        yawspeed_deg_s = _compute_search_yawspeed(last_detection, self._config)
+        if self._drone is None:
+            return
+        await self._drone.offboard.set_velocity_body(
+            VelocityBodyYawspeed(0.0, 0.0, 0.0, yawspeed_deg_s)
+        )
+
+    async def shutdown(self) -> None:
+        """Idempotent. Cancel telemetry, land if armed, exit context."""
+        if self._shutdown_event is not None:
+            self._shutdown_event.set()
+        for task in self._telemetry_tasks:
+            await _cancel_task(task)
+        self._telemetry_tasks.clear()
+        if (
+            getattr(self._args, "takeoff_landing", False)
+            and self._drone is not None
+        ):
+            try:
+                await _land_safely(self._drone, VelocityCommandAPI(self._drone, self._config))
+            except Exception:
+                pass  # logged inside _land_safely
+        if self._mavsdk_server_cm is not None:
+            try:
+                self._mavsdk_server_cm.__exit__(None, None, None)
+            except Exception:
+                pass
+        self._drone = None
+        self._mavsdk_server_cm = None
+
+
+# ---------------------------------------------------------------------------
+# Live Control Loop (legacy — production path until 03-07 swaps it out)
+# ---------------------------------------------------------------------------
+
+
 async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None,
                             ui_state=None, target_state=None, telemetry_cache: Optional[dict] = None):
     """Control loop for Hailo modes.
