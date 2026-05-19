@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Any
 
 from robot_follow.follow_api import controller
 from robot_follow.follow_api.types import RobotCommand, SafetyContext
@@ -37,6 +37,7 @@ async def run_robot_loop(
     shared_state: "SharedDetectionState",
     config: "ControllerConfig",
     shutdown: asyncio.Event,
+    ui_state: Optional[Any] = None,
 ) -> None:
     """Generic per-tick robot control loop.
 
@@ -53,6 +54,26 @@ async def run_robot_loop(
       - detection absent, within search_enter_delay_s → re-send last cmd
         (orchestrator-side hold, gated by SafetyContext.from_detection or .lost())
       - detection absent, past delay → on_target_lost (adapter-specific)
+
+    ui_state (optional duck-typed):
+        Any object that implements ``update_velocity(forward_m_s, down_m_s,
+        yawspeed_deg_s, mode)`` — e.g. SharedUIState from web_server.py.
+        Pass None (default) to suppress UI publishing (rover sim, unit tests
+        without UI wiring).
+
+    Published values reflect the controller's PRE-smoothing ``cmd``.
+    Rationale: The drone adapter's ``_apply_smoothing`` is a drone-specific
+    EMA + slew cap — publishing post-smoothing would (a) require ui_state
+    inside the adapter, violating axes-only Capabilities (see CONTEXT
+    D-axes-only contract / feedback_robot_abstraction_axes_only.md),
+    (b) lag one tick behind the controller's actual command, (c) be
+    undefined for rover (no smoother). Pre-Phase-3 behavior used
+    pre-smoothing values from live_control_loop — this restores parity
+    (gap closure 03-11, ABS-11).
+
+    Mode strings are robot-agnostic (AUTO / LOCKED / LOST / IDLE) so the
+    future Ros2RoverAdapter gets UI telemetry for free without any
+    adapter-side changes.
     """
     await robot.connect()
     await robot.start_session()
@@ -76,6 +97,13 @@ async def run_robot_loop(
                 last_seen_t = time.monotonic()
                 last_cmd = cmd
                 last_detection = detection
+                # Publish pre-smoothing cmd to UI. Mode="AUTO" here; LOCKED/AUTO
+                # distinction via FollowTargetState is not wired in this plan
+                # (run_robot_loop has no access to FollowTargetState) — deferred
+                # to a future plan. The four allowed mode strings are:
+                # AUTO, LOCKED, LOST, IDLE (symmetric for drone + rover).
+                if ui_state is not None:
+                    ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yaw_rate, "AUTO")
             else:
                 lost_for = (time.monotonic() - last_seen_t) if last_seen_t else math.inf
                 if lost_for < config.search_enter_delay_s:
@@ -85,10 +113,22 @@ async def run_robot_loop(
                         else SafetyContext.lost()
                     )
                     await robot.send_command(last_cmd, safety_ctx)
+                    # Hold phase: publish IDLE with zeros (hold is adapter-internal,
+                    # no meaningful velocity to surface to the operator).
+                    if ui_state is not None:
+                        ui_state.update_velocity(0.0, 0.0, 0.0, "IDLE")
                 else:
                     await robot.on_target_lost(last_detection)
+                    # Lost phase: adapter executes its search behavior internally;
+                    # yaw-spin is adapter-specific and NOT surfaced at the orchestrator.
+                    if ui_state is not None:
+                        ui_state.update_velocity(0.0, 0.0, 0.0, "LOST")
             elapsed = time.monotonic() - tick_start
             await asyncio.sleep(max(0.0, tick_dt - elapsed))
     finally:
         await robot.send_zero()
+        # Publish clean shutdown indicator so the UI shows IDLE with zeros
+        # rather than holding the last flying command after the loop exits.
+        if ui_state is not None:
+            ui_state.update_velocity(0.0, 0.0, 0.0, "IDLE")
         await robot.shutdown()
