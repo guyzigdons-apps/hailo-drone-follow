@@ -84,7 +84,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   - [x] 03-08-PLAN.md — Wave 6: two-pass argparse with --robot dispatch + run_robot() composition root (ABS-08, ABS-09)
   - [x] 03-09-PLAN.md — Wave 7: setup_env.sh conditional ROS source + delete drone_api/ directory (ABS-03 final, ABS-10)
   - [x] 03-10-PLAN.md — Wave 7 (checkpoint): operator-witnessed SITL drone follow gate (ABS-11) — FAILED (F1 + F2 surfaced; see 03-10-SUMMARY.md)
-  - [ ] 03-11-PLAN.md — Wave 8 (gap closure): thread ui_state through run_robot_loop + publish (fwd,down,yaw,mode) per branch + demote F2 INFO log to DEBUG (ABS-11)
+  - [x] 03-11-PLAN.md — Wave 8 (gap closure): thread ui_state through run_robot_loop + publish (fwd,down,yaw,mode) per branch + demote F2 INFO log to DEBUG (ABS-11)
   - [ ] 03-12-PLAN.md — Wave 9 (gap closure checkpoint): operator SITL re-run gate after F1 + F2 fixes (ABS-11)
 
 ### Phase 4: Rover adapter
@@ -131,7 +131,7 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 |-------|-----------|----------------|--------|-----------|
 | 1. Rename | v1.1 | 3/3 | Complete | 2026-05-14 |
 | 2. Cleanup | v1.1 | 8/8 | Complete | 2026-05-17 |
-| 3. Abstraction | v1.1 | 9/10 | In Progress|  |
+| 3. Abstraction | v1.1 | 11/12 | In Progress|  |
 | 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
 | 5. Rover sim | v1.1 | 0/TBD | Not started | - |
 | 6. Sim integration | v1.1 | 0/TBD | Not started | - |
