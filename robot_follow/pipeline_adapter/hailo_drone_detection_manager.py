@@ -530,7 +530,7 @@ def _app_callback_inner(element, buffer, user_data):
         bbox_h = bbox.height()
     if config is not None and bbox_h > 0:
         _factor = (config.target_bbox_height / bbox_h) - 1.0
-        LOGGER.info(
+        LOGGER.debug(
             "ctrl: bh=%.3f bottom=%.3f target=%.3f factor=%.3f filtered=%s",
             bbox_h, cy + bbox_h / 2.0, config.target_bbox_height, _factor,
             bool(filtered),
