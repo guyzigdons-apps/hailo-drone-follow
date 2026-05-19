@@ -1,4 +1,11 @@
-"""Tests for VelocityCommandAPI (per-axis smoothing)."""
+"""Tests for VelocityCommandAPI smoothing/clamping.
+
+NOTE: VelocityCommandAPI is DEPRECATED. Replacement: _apply_smoothing
+in robot_follow.robot_api.adapters.mavsdk_drone (Phase 3 plan 03-06
+extracted it). This file's tests stay green until Phase 3 plan 03-07
+deletes VelocityCommandAPI; at that point the file is removed and
+equivalent coverage lives in test_mavsdk_drone_adapter.py::TestApplySmoothing.
+"""
 
 import asyncio
 import time
