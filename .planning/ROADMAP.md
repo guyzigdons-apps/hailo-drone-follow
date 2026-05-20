@@ -134,6 +134,14 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   2. Bottom-edge frame safety with `--robot rover` slows/stops the rover when the person is too low in frame; with `--robot drone` the same edge still triggers the retreat-from-tilt behavior (RINT-02 capability-gated, both branches verified).
   3. Ctrl+C from `drone-follow --robot rover` produces zero additional `/cmd_vel` messages within 100 ms; rclpy node is destroyed cleanly before `rclpy.try_shutdown()` (RINT-06 shutdown integration test).
   4. `configs/rover_simulation.json` ships with rover-safe defaults (no altitude knobs, `track_buffer` ≈ 30 frames, lower `kp_yaw`); `configs/drone_simulation.json` (or equivalent) still uses original values; both load without validation errors (RINT-01, RINT-03).
+**Plans**: 7 plans
+  - [ ] 06-01-PLAN.md — Wave 1: rover_simulation.json + ControllerConfig ByteTracker fields + SafetyContext bbox_bottom_norm (RINT-01)
+  - [ ] 06-02-PLAN.md — Wave 1: sim/rover/README.md port-isolation table append (RINT-05)
+  - [ ] 06-03-PLAN.md — Wave 2: ByteTracker config-driven refactor in hailo_drone_detection_manager + create_app wiring (RINT-03)
+  - [ ] 06-04-PLAN.md — Wave 2: rover bottom-edge slow-down in ros2_rover.py.send_command (RINT-02)
+  - [ ] 06-05-PLAN.md — Wave 3: TestSigintShutdown SIGINT silence + timing tests (RINT-06)
+  - [ ] 06-06-PLAN.md — Wave 3: TestRoverWalkAcrossThenApproach E2E deterministic test (RINT-04, skip-on-no-gz)
+  - [ ] 06-07-PLAN.md — Wave 4: operator-witnessed rover sim full follow gate (autonomous: false)
 
 ## Progress
 
