@@ -28,6 +28,19 @@ ROVER_CAPS: Capabilities = Capabilities(
 )
 
 
+# RINT-02 / Q1 lock (Phase 6 CONTEXT, 2026-05-20): rover-specific slow-down
+# when the person's bbox bottom is in the lowest 15% of the frame (the actor
+# is too close to the rover; stop driving forward to avoid a collision).
+# YAW IS PRESERVED — the rover can still rotate to recenter, just not drive
+# forward. The drone adapter does NOT read this threshold; its existing
+# retreat-from-tilt behavior operates on SafetyContext.bbox_bottom_normalized
+# (the legacy field) via mavsdk_drone.py::_apply_retreat_from_tilt.
+#
+# Named constant per Phase 6 user decision: this is NOT a magic number
+# embedded in send_command. Tuning happens here, ONE site.
+ROVER_BOTTOM_STOP_THRESHOLD: float = 0.85
+
+
 class Ros2RoverAdapter:
     """Robot-protocol adapter publishing geometry_msgs/Twist to ROS 2."""
 
@@ -121,6 +134,16 @@ class Ros2RoverAdapter:
         twist = self._Twist()
         twist.linear.x = cmd.forward_m_s
         twist.angular.z = cmd.yaw_rate
+        # RINT-02 / Q1 lock: when the person's bbox bottom enters the lowest
+        # 15% of the frame, override forward to 0.0 (stop driving). Yaw is
+        # PRESERVED — the rover can still rotate to recenter. cmd is not
+        # mutated (RobotCommand is a value type emitted by the controller);
+        # only the about-to-publish twist is overridden. The drone adapter
+        # never reads bbox_bottom_norm — it stays on bbox_bottom_normalized
+        # (the legacy field used by _apply_retreat_from_tilt).
+        if (safety_ctx.bbox_bottom_norm is not None
+                and safety_ctx.bbox_bottom_norm >= ROVER_BOTTOM_STOP_THRESHOLD):
+            twist.linear.x = 0.0
         self._publisher.publish(twist)
 
     async def send_zero(self) -> None:
