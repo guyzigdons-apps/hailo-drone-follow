@@ -120,8 +120,11 @@ def test_install_sh_rover_lists_garden_bridge() -> None:
     assert "ros-humble-geometry-msgs" in text, (
         f"{INSTALL_SH}: ros-humble-geometry-msgs absent (RSIM-05)"
     )
-    assert "apt-cache search ros-humble-ros-gzgarden-bridge" in text, (
-        f"{INSTALL_SH}: apt-cache preflight absent (RSIM-05)"
+    assert "apt-cache show ros-humble-ros-base" in text, (
+        f"{INSTALL_SH}: ros.org repo preflight absent (RSIM-05)"
+    )
+    assert "apt-cache show ros-humble-ros-gzgarden-bridge" in text, (
+        f"{INSTALL_SH}: osrfoundation repo preflight absent (RSIM-05)"
     )
 
 

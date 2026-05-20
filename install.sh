@@ -75,13 +75,32 @@ if $ROVER_DEPS; then
     exit 6
   fi
 
-  # Preflight 2: osrfoundation apt repo must be configured.
-  # ros-humble-ros-gzgarden-bridge ships from packages.osrfoundation.org,
-  # NOT packages.ros.org.  Visible to apt-cache iff the repo is configured.
-  # (PITFALLS Pitfall 7 / RSIM-05; verified package name from apt-cache
-  # search on the v1.1 dev box 2026-05-20.)
-  if ! apt-cache search ros-humble-ros-gzgarden-bridge 2>/dev/null \
-       | grep -q '^ros-humble-ros-gzgarden-bridge '; then
+  # Preflight 2: ROS 2 Humble apt repo (packages.ros.org) must be configured —
+  # source of ros-humble-ros-base + ros-humble-geometry-msgs.
+  if ! apt-cache show ros-humble-ros-base >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+    echo "ERROR: ros-humble-ros-base not visible to apt-cache." >&2
+    echo "       Add the ROS 2 Humble apt repo first:" >&2
+    echo >&2
+    echo "         sudo apt install -y software-properties-common curl" >&2
+    echo "         sudo add-apt-repository universe -y" >&2
+    echo "         sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \\" >&2
+    echo "              -o /usr/share/keyrings/ros-archive-keyring.gpg" >&2
+    echo "         echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \\" >&2
+    echo "               http://packages.ros.org/ros2/ubuntu ${UBUNTU_CODENAME} main\" \\" >&2
+    echo "              | sudo tee /etc/apt/sources.list.d/ros2.list" >&2
+    echo "         sudo apt update" >&2
+    echo >&2
+    echo "       Full guide: https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debians.html" >&2
+    exit 7
+  fi
+
+  # Preflight 3: osrfoundation apt repo must be configured — source of
+  # ros-humble-ros-gzgarden-bridge (NOT packages.ros.org).
+  if ! apt-cache show ros-humble-ros-gzgarden-bridge >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
     echo "ERROR: ros-humble-ros-gzgarden-bridge not visible to apt-cache." >&2
     echo "       Add the osrfoundation apt repo first:" >&2
     echo >&2
@@ -89,14 +108,14 @@ if $ROVER_DEPS; then
     echo "              -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg" >&2
     echo "         echo \"deb [signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] \\" >&2
     echo "               http://packages.osrfoundation.org/gazebo/ubuntu-stable \\" >&2
-    echo "               \$(lsb_release -cs) main\" \\" >&2
+    echo "               ${UBUNTU_CODENAME} main\" \\" >&2
     echo "              | sudo tee /etc/apt/sources.list.d/gazebo-stable.list" >&2
     echo "         sudo apt update" >&2
     echo >&2
     echo "       If your machine already runs Gazebo Harmonic instead of Garden," >&2
     echo "       see sim/rover/README.md \"Migration to Harmonic\" for the" >&2
     echo "       s/gzgarden/gzharmonic/ apt-name substitution." >&2
-    exit 7
+    exit 8
   fi
 
   # Apt install.  Pin exact package names — RSIM-05 + PITFALLS Pitfall 5:
@@ -108,11 +127,11 @@ if $ROVER_DEPS; then
        ros-humble-ros-gzgarden-bridge \
        gz-garden
 
-  # Preflight 3: gz CLI must end up on PATH (sanity check the install).
+  # Post-install sanity: gz CLI must end up on PATH.
   if ! command -v gz >/dev/null 2>&1; then
     echo "ERROR: 'gz' CLI not found after apt install -- check apt logs." >&2
     echo "       Re-run with: sudo apt-get install -y gz-garden" >&2
-    exit 8
+    exit 9
   fi
 
   echo "==> Rover sim deps installed.  See sim/rover/README.md to launch."
