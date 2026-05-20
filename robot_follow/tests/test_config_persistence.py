@@ -195,6 +195,59 @@ def test_vfov_field_removed():
     assert "vfov" not in {f.name for f in fields(ControllerConfig)}
 
 
+def test_rover_simulation_json_loads_with_rover_safe_defaults():
+    """RINT-01: configs/rover_simulation.json loads cleanly via
+    ControllerConfig.from_json and produces rover-safe values.
+
+    - Loader filters unknown keys → no error on shape mismatch.
+    - validate() runs successfully with caps=None (altitude defaults are
+      self-consistent: 2.0 ≤ 3.0 ≤ 4.0).
+    - bytetracker_track_buffer override (90 → 30) lands.
+    - max_forward_accel=0 cleanly disables the slew cap in _apply_smoothing.
+    """
+    from pathlib import Path
+    from robot_follow.follow_api.config import ControllerConfig
+    repo_root = Path(__file__).resolve().parents[2]
+    rover_json = repo_root / "configs" / "rover_simulation.json"
+    assert rover_json.is_file(), (
+        f"configs/rover_simulation.json missing at {rover_json}"
+    )
+
+    cfg = ControllerConfig.from_json(str(rover_json))
+
+    # Rover-safe controller knobs
+    assert cfg.yaw_only is False, "rover must drive forward to follow"
+    assert cfg.kp_yaw == 3.0, "rover-safe yaw gain (vs drone 4.0)"
+    assert cfg.max_forward == 1.0, "rover-safe top speed"
+    assert cfg.max_backward == 1.0
+    assert cfg.max_forward_accel == 0, "slew cap disabled for rover"
+    assert cfg.target_bbox_height == 0.25
+    assert cfg.bottom_margin_safety == 0.25
+    assert cfg.top_margin_safety == 0.10
+    assert cfg.smooth_yaw is True
+    assert cfg.yaw_alpha == 0.3
+    assert cfg.smooth_forward is True
+    assert cfg.forward_alpha == 0.15
+    assert cfg.search_timeout_s == 60.0
+    assert cfg.log_verbosity == "normal"
+
+    # ByteTracker (RINT-03 overrides)
+    assert cfg.bytetracker_track_thresh == 0.4, (
+        "drone-parity detection floor (NOT lowered for rover — safer)"
+    )
+    assert cfg.bytetracker_track_buffer == 30, (
+        "rover override: 1 s @ 30 fps (vs drone 3 s @ 30 fps = 90)"
+    )
+    assert cfg.bytetracker_match_thresh == 0.5
+    assert cfg.bytetracker_frame_rate == 30
+
+    # Altitude knobs OMITTED in JSON → fall through to dataclass defaults
+    # (consistency: 2.0 ≤ 3.0 ≤ 4.0; validate() runs cleanly with caps=None)
+    assert cfg.target_altitude == 3.0
+    assert cfg.min_altitude == 2.0
+    assert cfg.max_altitude == 4.0
+
+
 def test_safety_context_from_detection_populates_bbox_bottom_norm():
     """RINT-02 / Q1 lock: SafetyContext.from_detection populates bbox_bottom_norm
     from det.center_y + det.bbox_height / 2 (same expression as the legacy

@@ -1,0 +1,20 @@
+{
+  "yaw_only": false,
+  "kp_yaw": 3.0,
+  "max_forward": 1.0,
+  "max_backward": 1.0,
+  "max_forward_accel": 0,
+  "target_bbox_height": 0.25,
+  "bottom_margin_safety": 0.25,
+  "top_margin_safety": 0.10,
+  "smooth_yaw": true,
+  "yaw_alpha": 0.3,
+  "smooth_forward": true,
+  "forward_alpha": 0.15,
+  "search_timeout_s": 60.0,
+  "log_verbosity": "normal",
+  "bytetracker_track_thresh": 0.4,
+  "bytetracker_track_buffer": 30,
+  "bytetracker_match_thresh": 0.5,
+  "bytetracker_frame_rate": 30
+}
