@@ -130,6 +130,9 @@ def _build_parser() -> argparse.ArgumentParser:
                        metavar="PATH",
                        help="Record H264 video locally (Matroska container). "
                             "Optional PATH; if omitted uses /home/root/recordings/drone_<timestamp>.mkv")
+    group.add_argument("--replay", metavar="FILE",
+                       help="Replay a recorded .mkv through inference + tracker instead of "
+                            "the live camera. No recording, no UDP output. Implies --dry-run.")
 
     return parser
 
@@ -164,9 +167,15 @@ def main():
     # Create shared UI state and H15 pipeline app
     ui_state = SharedUIState()
 
-    # Resolve record path
+    # Replay mode forces dry-run (no drone control during replay)
+    replay_path = getattr(args, "replay", None)
+    if replay_path:
+        args.dry_run = True
+        LOGGER.info("[app] Replay mode (%s) — drone control disabled", replay_path)
+
+    # Resolve record path (not used in replay mode)
     record_path = None
-    if getattr(args, "record", None) is not None:
+    if not replay_path and getattr(args, "record", None) is not None:
         record_path = args.record
         if record_path == "auto":
             import datetime
@@ -179,7 +188,7 @@ def main():
 
     app = create_h15_app(
         shared_state, target_state=target_state, eos_reached=eos_reached,
-        ui_state=ui_state, record_path=record_path)
+        ui_state=ui_state, record_path=record_path, replay_path=replay_path)
 
     # Start follow server
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)

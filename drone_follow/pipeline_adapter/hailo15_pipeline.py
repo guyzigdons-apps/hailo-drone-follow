@@ -192,10 +192,12 @@ class Hailo15PipelineApp:
     """
 
     def __init__(self, shared_state, target_state=None, ui_state=None,
-                 eos_reached=None, options_menu=None, record_path=None):
+                 eos_reached=None, options_menu=None, record_path=None,
+                 replay_path=None):
         self.shared_state = shared_state
         self.target_state = target_state
         self._record_path = record_path
+        self._replay_path = replay_path  # if set, use file source instead of ISP
         self._rec_first_pts = None  # for PTS normalization on recording branch
         self._det_log = None         # detections sidecar file (jsonl)
         self._det_log_t0 = None      # wall-clock time of first detection write
@@ -267,14 +269,16 @@ class Hailo15PipelineApp:
 
     def _build_pipeline(self):
         """Build the GStreamer pipeline string and create it."""
+        Gst.init(None)
+        if self._replay_path:
+            self._build_replay_pipeline()
+            return
         frontend_path, encoder_path, n_streams, app_settings = _resolve_frontend_config()
         self._frontend_config_path = frontend_path
 
         LOGGER.info("[h15] Frontend config: %s", frontend_path)
         LOGGER.info("[h15] Encoder config: %s", encoder_path)
         LOGGER.info("[h15] Streams: %d", n_streams)
-
-        Gst.init(None)
 
         sink_parts = []
         for i in range(n_streams):
@@ -351,6 +355,45 @@ class Hailo15PipelineApp:
                 self._rec_first_pts = None
                 src_pad = rec_parse.get_static_pad("src")
                 src_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_record_probe)
+
+    def _build_replay_pipeline(self):
+        """Build a pipeline that replays a recorded .mkv through inference.
+
+        No ISP, no encoder, no UDP, no recording branches. Just decode the file,
+        feed NV12 frames into the inference appsink (and optionally the web UI
+        raw appsink), and let the existing callbacks do the rest.
+        """
+        if not os.path.isfile(self._replay_path):
+            raise FileNotFoundError(f"Replay file not found: {self._replay_path}")
+        LOGGER.info("[h15] Replay mode: %s", self._replay_path)
+
+        # decodebin pipes into a tee → inference appsink + (optionally) web UI raw appsink
+        ui_branch = ""
+        if self.ui_state is not None:
+            ui_branch = (
+                " t. ! queue leaky=downstream max-size-buffers=1 ! "
+                "videoscale ! video/x-raw,format=NV12,width=640,height=360 ! "
+                "appsink name=raw_sink emit-signals=true sync=false drop=true max-buffers=1"
+            )
+
+        pipeline_str = (
+            f"filesrc location={self._replay_path} ! "
+            f"matroskademux ! h264parse ! avdec_h264 ! "
+            f"videoconvert ! video/x-raw,format=NV12 ! "
+            f"tee name=t "
+            f"t. ! queue leaky=downstream max-size-buffers=3 ! "
+            f"appsink name=frame_sink emit-signals=true sync=false drop=true"
+            + ui_branch
+        )
+        LOGGER.info("[h15] Replay pipeline: %s", pipeline_str)
+        self.pipeline = Gst.parse_launch(pipeline_str)
+
+        appsink = self.pipeline.get_by_name("frame_sink")
+        if appsink:
+            appsink.connect("new-sample", self._on_new_sample)
+        raw_sink = self.pipeline.get_by_name("raw_sink")
+        if raw_sink:
+            raw_sink.connect("new-sample", self._on_raw_web_sample)
 
     def _write_detection_log(self, detections, following_id):
         """Append a detection record (JSONL) with timestamp relative to record start."""
@@ -756,7 +799,8 @@ class Hailo15PipelineApp:
 # ---------------------------------------------------------------------------
 
 def create_h15_app(shared_state, target_state=None, eos_reached=None,
-                   ui_state=None, parser=None, record_path=None, **kwargs):
+                   ui_state=None, parser=None, record_path=None,
+                   replay_path=None, **kwargs):
     """Create a Hailo15 pipeline app.
 
     Provides the same interface as pipeline_adapter.create_app() so
@@ -775,6 +819,7 @@ def create_h15_app(shared_state, target_state=None, eos_reached=None,
         ui_state=ui_state,
         eos_reached=eos_reached,
         record_path=record_path,
+        replay_path=replay_path,
         options_menu=args,
     )
     return app

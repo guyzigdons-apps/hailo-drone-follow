@@ -45,8 +45,27 @@ def find_record_for_time(records, t, last_idx=0):
     return idx, records[idx] if records else None
 
 
+CROSS_HALF_SIZE = 10      # pixels, half-length of cross arm (matches UI)
+CROSS_STROKE = 3
+CROSS_HALO_STROKE = 6
+
+
+def _draw_cross(frame, cx, cy):
+    """Draw a green '+' with black halo at (cx, cy) — matches the UI overlay."""
+    # Black halo first
+    cv2.line(frame, (cx - CROSS_HALF_SIZE, cy), (cx + CROSS_HALF_SIZE, cy),
+             (0, 0, 0), CROSS_HALO_STROKE, cv2.LINE_AA)
+    cv2.line(frame, (cx, cy - CROSS_HALF_SIZE), (cx, cy + CROSS_HALF_SIZE),
+             (0, 0, 0), CROSS_HALO_STROKE, cv2.LINE_AA)
+    # Green cross on top (BGR for OpenCV: #80f060 → (96, 240, 128))
+    cv2.line(frame, (cx - CROSS_HALF_SIZE, cy), (cx + CROSS_HALF_SIZE, cy),
+             (96, 240, 128), CROSS_STROKE, cv2.LINE_AA)
+    cv2.line(frame, (cx, cy - CROSS_HALF_SIZE), (cx, cy + CROSS_HALF_SIZE),
+             (96, 240, 128), CROSS_STROKE, cv2.LINE_AA)
+
+
 def draw_overlay(frame, record, w, h):
-    """Draw bounding boxes from a record onto the frame in-place."""
+    """Draw bounding boxes + followed-target cross onto the frame in-place."""
     if record is None:
         return
     following_id = record.get("following_id")
@@ -63,6 +82,10 @@ def draw_overlay(frame, record, w, h):
         label = f"ID {det.get('id', '?')}  {int(det.get('confidence', 0) * 100)}%"
         cv2.putText(frame, label, (x1, max(0, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+        if is_followed:
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+            _draw_cross(frame, cx, cy)
 
 
 def main():
