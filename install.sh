@@ -23,18 +23,19 @@
 #   --skip-python      skip pip install -e .
 #   --skip-hefs        skip ReID HEF downloads
 #   --skip-ui          skip npm install + UI build
+#   --rover            install ROS 2 Humble + Gazebo Garden apt deps (rover sim)
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APPS_DIR="$SCRIPT_DIR/hailo-apps"
-RESOURCES_HEF_DIR="/usr/local/hailo/resources/models/hailo8"
-
+# --- Parse flags first (before SCRIPT_DIR setup, so rover-only invocations
+# --- via stripped PATH can short-circuit to the Step-6 preflights without
+# --- tripping over dirname / cd on PATH=/tmp test paths).
 SKIP_SUBMODULE=false
 SKIP_APPS=false
 SKIP_PYTHON=false
 SKIP_HEFS=false
 SKIP_UI=false
+ROVER_DEPS=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-submodule) SKIP_SUBMODULE=true; shift ;;
@@ -42,13 +43,93 @@ while [[ $# -gt 0 ]]; do
     --skip-python)    SKIP_PYTHON=true; shift ;;
     --skip-hefs)      SKIP_HEFS=true; shift ;;
     --skip-ui)        SKIP_UI=true; shift ;;
+    --rover)          ROVER_DEPS=true; shift ;;
     -h|--help)
-      sed -n '2,16p' "$0"
+      sed -n '2,26p' "$0"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
   esac
 done
+
+# --- Step 6: Rover sim apt deps (only if --rover passed) ---------------------
+# RSIM-05: install ros-humble-ros-base, ros-humble-geometry-msgs, and the
+# Garden-suffixed ros-gz bridge (ros-humble-ros-gzgarden-bridge).  The
+# no-suffix form is the Fortress binding and must NOT be used here
+# (PITFALLS Pitfall 5).  See sim/rover/README.md for the Harmonic-migration
+# recipe.
+#
+# Placed BEFORE the hailo-apps SCRIPT_DIR setup so that a rover-only
+# invocation (--rover plus all five --skip-* flags) runs through Step-6
+# preflights without needing the hailo-apps submodule context.  When --rover
+# is NOT passed (default), this block is skipped silently and the existing
+# 5-step flow runs unchanged.
+if $ROVER_DEPS; then
+  echo "==> [6/6] Installing ROS 2 Humble + Gazebo Garden bridge (rover sim)"
+
+  # Preflight 1: apt-get must exist (Ubuntu/Debian only).
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "ERROR: --rover requires apt-get (Ubuntu/Debian only)." >&2
+    echo "       This rover-sim install path is sim-only and Linux-only;" >&2
+    echo "       see sim/rover/README.md for the Harmonic-migration note." >&2
+    exit 6
+  fi
+
+  # Preflight 2: osrfoundation apt repo must be configured.
+  # ros-humble-ros-gzgarden-bridge ships from packages.osrfoundation.org,
+  # NOT packages.ros.org.  Visible to apt-cache iff the repo is configured.
+  # (PITFALLS Pitfall 7 / RSIM-05; verified package name from apt-cache
+  # search on the v1.1 dev box 2026-05-20.)
+  if ! apt-cache search ros-humble-ros-gzgarden-bridge 2>/dev/null \
+       | grep -q '^ros-humble-ros-gzgarden-bridge '; then
+    echo "ERROR: ros-humble-ros-gzgarden-bridge not visible to apt-cache." >&2
+    echo "       Add the osrfoundation apt repo first:" >&2
+    echo >&2
+    echo "         sudo curl -sSL https://packages.osrfoundation.org/gazebo.gpg \\" >&2
+    echo "              -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg" >&2
+    echo "         echo \"deb [signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] \\" >&2
+    echo "               http://packages.osrfoundation.org/gazebo/ubuntu-stable \\" >&2
+    echo "               \$(lsb_release -cs) main\" \\" >&2
+    echo "              | sudo tee /etc/apt/sources.list.d/gazebo-stable.list" >&2
+    echo "         sudo apt update" >&2
+    echo >&2
+    echo "       If your machine already runs Gazebo Harmonic instead of Garden," >&2
+    echo "       see sim/rover/README.md \"Migration to Harmonic\" for the" >&2
+    echo "       s/gzgarden/gzharmonic/ apt-name substitution." >&2
+    exit 7
+  fi
+
+  # Apt install.  Pin exact package names — RSIM-05 + PITFALLS Pitfall 5:
+  # the no-suffix gz-bridge form is the Fortress binding and breaks
+  # DiffDrive silently on Garden.
+  sudo apt-get install -y \
+       ros-humble-ros-base \
+       ros-humble-geometry-msgs \
+       ros-humble-ros-gzgarden-bridge \
+       gz-garden
+
+  # Preflight 3: gz CLI must end up on PATH (sanity check the install).
+  if ! command -v gz >/dev/null 2>&1; then
+    echo "ERROR: 'gz' CLI not found after apt install -- check apt logs." >&2
+    echo "       Re-run with: sudo apt-get install -y gz-garden" >&2
+    exit 8
+  fi
+
+  echo "==> Rover sim deps installed.  See sim/rover/README.md to launch."
+
+  # Rover-only mode: when all five hailo --skip-* flags are also set, exit
+  # cleanly so a contributor on a non-hailo box (rover-sim-only dev) doesn't
+  # trip over the hailo-apps submodule / venv assertions below.
+  if $SKIP_SUBMODULE && $SKIP_APPS && $SKIP_PYTHON && $SKIP_HEFS && $SKIP_UI; then
+    echo
+    echo "==> Rover-only install complete.  See sim/rover/README.md to launch."
+    exit 0
+  fi
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APPS_DIR="$SCRIPT_DIR/hailo-apps"
+RESOURCES_HEF_DIR="/usr/local/hailo/resources/models/hailo8"
 
 # --- Step 1: Init/update the hailo-apps submodule ----------------------------
 if ! $SKIP_SUBMODULE; then
