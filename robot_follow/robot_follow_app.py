@@ -535,12 +535,32 @@ def main():
         if args.robot == "drone":
             adapter = MavsdkDroneAdapter(args, controller_config)
         elif args.robot == "rover":
-            # Phase 4 replaces this stub with ROVER-04's friendly
-            # ``RuntimeError("ROS 2 not sourced — ...")`` path.
-            raise NotImplementedError(
-                "Rover adapter lands in Phase 4. "
-                "Run with --robot drone (default) until then."
-            )
+            # Phase 4 Plan 04-04: replace the NotImplementedError stub
+            # from Phase 3 03-08 with real Ros2RoverAdapter construction.
+            #
+            # The import is LAZY (inside this branch, not at module top)
+            # for two reasons:
+            #   1. So `--robot drone` runs on a no-rclpy dev box continue
+            #      to work without surfacing rover-only errors.
+            #   2. So the ROVER-04 friendly RuntimeError (raised by
+            #      Ros2RoverAdapter.__init__ when rclpy/geometry_msgs are
+            #      missing) only fires when the user actually selects
+            #      --robot rover. The catch below logs + returns so the
+            #      outer pipeline continues without robot control —
+            #      mirroring the drone branch's outer try/except at the
+            #      bottom of run_robot.
+            try:
+                from robot_follow.robot_api.adapters.ros2_rover import (
+                    Ros2RoverAdapter,
+                )
+                adapter = Ros2RoverAdapter(args, controller_config)
+            except RuntimeError as e:
+                LOGGER.error(
+                    "[rover] adapter construction failed: %s\n"
+                    "Pipeline continues without robot control.",
+                    e,
+                )
+                return
         else:
             raise ValueError(f"Unknown --robot value: {args.robot}")
 
