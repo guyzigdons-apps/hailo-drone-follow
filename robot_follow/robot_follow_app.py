@@ -324,6 +324,18 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 def main():
+    # Restore default SIGPIPE so `robot-follow --help | head -5` terminates
+    # cleanly instead of leaking a BrokenPipeError traceback when the
+    # downstream reader closes the pipe. The pipeline init re-parses
+    # sys.argv internally (hailo_drone_detection_manager.py:819) so -h
+    # fires there, not in main — without this signal the partial write
+    # surfaces as a Python traceback rather than a normal CLI termination.
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError):
+        # AttributeError on Windows (no SIGPIPE); ValueError if not main thread.
+        pass
+
     shared_state = SharedDetectionState()
     shutdown = asyncio.Event()
     eos_reached = threading.Event()
