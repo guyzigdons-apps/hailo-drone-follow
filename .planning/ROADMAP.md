@@ -117,7 +117,13 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   2. `drone-follow --input udp://0.0.0.0:5600` receives frames from the rover sim camera via `video_bridge.py` (gz-transport → UDP H.264); no `ros_gz_image_bridge`, no new camera shim (RSIM-06 camera plumbing decision).
   3. `sim/rover/start_rover_sim.sh` runs in one command from a clean terminal; required apt packages (`ros-humble-ros-gzgarden-bridge`) are listed in `install.sh --rover` with a friendly error if `/opt/ros/humble` is missing.
   4. At least one rover actor world (`walk_across_then_approach`) renders a walking person in Gazebo Garden; rover model appears on a ground plane.
-**Plans**: TBD
+**Plans**: 6 plans
+  - [ ] 05-01-PLAN.md — Wave 1: sim/rover/rover.sdf (Garden DiffDrive + camera, RSIM-01/02)
+  - [ ] 05-02-PLAN.md — Wave 1: sim/rover/worlds/{walk_across_then_approach,random_walk,circle_around}.sdf (RSIM-03)
+  - [ ] 05-03-PLAN.md — Wave 1: sim/rover/README.md — Garden EOL + smoke-test step (RSIM-07)
+  - [ ] 05-04-PLAN.md — Wave 2: install.sh --rover apt-install branch with friendly preflight errors (RSIM-05)
+  - [ ] 05-05-PLAN.md — Wave 2: sim/rover/start_rover_sim.sh launcher with setsid cleanup + bridge wiring (RSIM-04, RSIM-06)
+  - [ ] 05-06-PLAN.md — Wave 3: robot_follow/tests/test_rover_sim_smoke.py parse-only smoke tests (RSIM-01..07 regression guard)
 
 ### Phase 6: Sim integration
 **Goal**: Rover follows a walking actor end-to-end in Gazebo Garden with rover-safe defaults; SIGINT shuts down cleanly with zero residual `/cmd_vel` messages; port isolation from PX4 SITL is documented.
@@ -140,5 +146,5 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 | 2. Cleanup | v1.1 | 8/8 | Complete | 2026-05-17 |
 | 3. Abstraction | v1.1 | 12/12 | In Progress (gate failed) |  |
 | 4. Rover adapter | v1.1 | 4/5 | In Progress|  |
-| 5. Rover sim | v1.1 | 0/TBD | Not started | - |
+| 5. Rover sim | v1.1 | 0/6 | Planned | - |
 | 6. Sim integration | v1.1 | 0/TBD | Not started | - |
