@@ -335,3 +335,144 @@ class TestCompositionRootIntegration:
             assert signal.getsignal(signal.SIGINT) is fake_handler
         finally:
             signal.signal(signal.SIGINT, original)
+
+
+class TestBottomEdgeNaturalStop:
+    """RINT-02 / Q1 lock: rover slow-down when bbox bottom enters lowest 15%.
+
+    Tests the wire-level contract added by Plan 06-04 to ros2_rover.py:
+        if safety_ctx.bbox_bottom_norm >= ROVER_BOTTOM_STOP_THRESHOLD (0.85):
+            twist.linear.x = 0.0    # stop forward
+            # twist.angular.z stays at cmd.yaw_rate (yaw preserved)
+
+    The drone adapter does NOT exercise this path — it reads
+    SafetyContext.bbox_bottom_normalized (the legacy field) instead, via
+    _apply_retreat_from_tilt in mavsdk_drone.py. This class is rover-only.
+    """
+
+    def _ctx(self, bbox_bottom_norm):
+        """Helper: build a SafetyContext with bbox_bottom_norm overridden
+        and target_lost=False (so send_command does NOT early-exit on the
+        lost-target check).
+        """
+        from robot_follow.follow_api.types import SafetyContext
+        # Pure dataclass construction — we don't need a real Detection here.
+        return SafetyContext(
+            bbox_bottom_normalized=bbox_bottom_norm if bbox_bottom_norm is not None else 0.5,
+            bbox_size_normalized=0.3,
+            target_lost=False,
+            last_target_x=0.5,
+            bbox_bottom_norm=bbox_bottom_norm,
+        )
+
+    def test_rover_bottom_stop_threshold_constant_value(self, rclpy_mock):
+        """Named constant per Phase 6 user decision — value locked at 0.85.
+
+        Tuning happens by editing the constant in ros2_rover.py, NOT by
+        changing magic numbers in send_command. Test fails loudly if the
+        value drifts.
+        """
+        from robot_follow.robot_api.adapters.ros2_rover import (
+            ROVER_BOTTOM_STOP_THRESHOLD,
+        )
+        assert ROVER_BOTTOM_STOP_THRESHOLD == 0.85, (
+            f"named constant drift: ROVER_BOTTOM_STOP_THRESHOLD = "
+            f"{ROVER_BOTTOM_STOP_THRESHOLD} (expected 0.85)"
+        )
+
+    def test_below_threshold_forward_unchanged(self, rclpy_mock):
+        """bbox_bottom_norm=0.80 < 0.85 -> forward passes through unchanged.
+
+        The rover continues to drive at the controller's commanded speed.
+        """
+        from robot_follow.follow_api.types import RobotCommand
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        cmd = RobotCommand(forward_m_s=0.5, yaw_rate=0.1)
+        ctx = self._ctx(bbox_bottom_norm=0.80)
+        asyncio.run(adapter.send_command(cmd, ctx))
+        adapter._publisher.publish.assert_called_once()
+        twist = adapter._publisher.publish.call_args[0][0]
+        assert twist.linear.x == 0.5, (
+            f"below threshold: forward must pass through "
+            f"(got linear.x={twist.linear.x})"
+        )
+        assert twist.angular.z == 0.1
+
+    def test_at_threshold_forward_zeroed(self, rclpy_mock):
+        """bbox_bottom_norm=0.85 == 0.85 -> override fires; forward zeroed.
+
+        Boundary case: the >= comparison must trigger AT the threshold,
+        not just above it.
+        """
+        from robot_follow.follow_api.types import RobotCommand
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        cmd = RobotCommand(forward_m_s=0.5, yaw_rate=0.1)
+        ctx = self._ctx(bbox_bottom_norm=0.85)
+        asyncio.run(adapter.send_command(cmd, ctx))
+        adapter._publisher.publish.assert_called_once()
+        twist = adapter._publisher.publish.call_args[0][0]
+        assert twist.linear.x == 0.0, (
+            f"at threshold: forward must be overridden to 0 "
+            f"(got linear.x={twist.linear.x})"
+        )
+
+    def test_above_threshold_forward_zeroed(self, rclpy_mock):
+        """bbox_bottom_norm=0.95 > 0.85 -> forward zeroed (person very close)."""
+        from robot_follow.follow_api.types import RobotCommand
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        cmd = RobotCommand(forward_m_s=1.0, yaw_rate=0.0)
+        ctx = self._ctx(bbox_bottom_norm=0.95)
+        asyncio.run(adapter.send_command(cmd, ctx))
+        adapter._publisher.publish.assert_called_once()
+        twist = adapter._publisher.publish.call_args[0][0]
+        assert twist.linear.x == 0.0
+
+    def test_above_threshold_yaw_preserved(self, rclpy_mock):
+        """When forward is zeroed, yaw STAYS at cmd.yaw_rate.
+
+        Critical: the rover must still be able to rotate to recenter the
+        target even when forward is suppressed. If yaw were also zeroed,
+        the rover would freeze entirely — wrong shape for the use case.
+        """
+        from robot_follow.follow_api.types import RobotCommand
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        cmd = RobotCommand(forward_m_s=0.7, yaw_rate=0.3)
+        ctx = self._ctx(bbox_bottom_norm=0.95)
+        asyncio.run(adapter.send_command(cmd, ctx))
+        adapter._publisher.publish.assert_called_once()
+        twist = adapter._publisher.publish.call_args[0][0]
+        assert twist.linear.x == 0.0, "forward must be zeroed"
+        assert twist.angular.z == 0.3, (
+            f"yaw must be preserved (got angular.z={twist.angular.z}; "
+            f"expected 0.3 — RINT-02 rover-still-rotates-to-recenter contract)"
+        )
+
+    def test_none_bbox_bottom_norm_forward_passes_through(self, rclpy_mock):
+        """When safety_ctx.bbox_bottom_norm is None (defensive default),
+        the threshold check short-circuits and forward passes through.
+
+        This is the belt-and-braces guard against a misshapen SafetyContext;
+        in the real path, SafetyContext.from_detection always populates the
+        field, so this branch fires only if a future caller passes an
+        adversarial / minimal SafetyContext.
+        """
+        from robot_follow.follow_api.types import RobotCommand
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        cmd = RobotCommand(forward_m_s=0.4, yaw_rate=0.0)
+        ctx = self._ctx(bbox_bottom_norm=None)
+        asyncio.run(adapter.send_command(cmd, ctx))
+        twist = adapter._publisher.publish.call_args[0][0]
+        assert twist.linear.x == 0.4, (
+            f"None bbox_bottom_norm must not trigger override "
+            f"(got linear.x={twist.linear.x}; expected 0.4)"
+        )
