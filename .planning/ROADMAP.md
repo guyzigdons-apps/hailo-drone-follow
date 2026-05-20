@@ -25,7 +25,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
 - [ ] **Phase 3: Abstraction** - `Robot` protocol + `Capabilities`, drone adapter behind protocol; CRITICAL GATE before rover work — all 12 plans landed but ABS-11 SITL gate failed (F3 surfaced in 03-12); awaiting gap closure 03-13/03-14
 - [ ] **Phase 4: Rover adapter** - ROS 2 Humble rclpy node publishing `geometry_msgs/Twist`; parallel with Phase 5
 - [ ] **Phase 5: Rover sim** - Gazebo Garden rover SDF + cmd_vel bridge + video_bridge.py camera path; parallel with Phase 4
-- [ ] **Phase 6: Sim integration** - Rover defaults, bottom-edge safety repurpose, ByteTracker config, end-to-end validation
+- [x] **Phase 6: Sim integration** - Rover defaults, bottom-edge safety repurpose, ByteTracker config, end-to-end validation (completed 2026-05-20)
 
 ## Phase Details
 
@@ -141,7 +141,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   - [x] 06-04-PLAN.md — Wave 2: rover bottom-edge slow-down in ros2_rover.py.send_command (RINT-02)
   - [x] 06-05-PLAN.md — Wave 3: TestSigintShutdown SIGINT silence + timing tests (RINT-06)
   - [x] 06-06-PLAN.md — Wave 3: TestRoverWalkAcrossThenApproach E2E deterministic test (RINT-04, skip-on-no-gz)
-  - [ ] 06-07-PLAN.md — Wave 4: operator-witnessed rover sim full follow gate (autonomous: false)
+  - [x] 06-07-PLAN.md — Wave 4: operator-witnessed rover sim full follow gate (autonomous: false)
 
 ## Progress
 
@@ -155,4 +155,4 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 | 3. Abstraction | v1.1 | 12/12 | In Progress (gate failed) |  |
 | 4. Rover adapter | v1.1 | 4/5 | In Progress|  |
 | 5. Rover sim | v1.1 | 0/6 | Planned | - |
-| 6. Sim integration | v1.1 | 6/7 | In Progress|  |
+| 6. Sim integration | v1.1 | 7/7 | Complete   | 2026-05-20 |
