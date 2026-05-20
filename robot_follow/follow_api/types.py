@@ -96,11 +96,23 @@ class SafetyContext:
     - `bbox_size_normalized`: bbox_height, for size-based safety (0..1).
     - `target_lost`: True only when constructed via .lost().
     - `last_target_x`: for on_target_lost search direction hint.
+    - `bbox_bottom_norm`: Optional[float]; rover-specific bottom-edge
+      slow-down threshold input (Plan 06-04). Populated in
+      from_detection from cy + bh/2; left None in lost() per Q6 lock.
+      Optional (default None) so any caller that doesn't populate it
+      remains backward-compatible. Coexists with bbox_bottom_normalized
+      during migration — drone path reads the legacy field; rover
+      adapter (06-04) will read this new one.
     """
     bbox_bottom_normalized: float
     bbox_size_normalized: float
     target_lost: bool
     last_target_x: Optional[float]
+    # RINT-02 / Q1 lock (Phase 6 CONTEXT, 2026-05-20): the rover adapter
+    # reads this and overrides forward_m_s=0.0 when >=0.85. Drone adapter
+    # ignores this field; its retreat-from-tilt continues to read
+    # bbox_bottom_normalized.
+    bbox_bottom_norm: Optional[float] = None
 
     @classmethod
     def from_detection(cls, det: Detection) -> "SafetyContext":
@@ -110,6 +122,7 @@ class SafetyContext:
             bbox_size_normalized=det.bbox_height,
             target_lost=False,
             last_target_x=det.center_x,
+            bbox_bottom_norm=det.center_y + det.bbox_height / 2,
         )
 
     @classmethod
@@ -122,6 +135,11 @@ class SafetyContext:
         derivation (lines 911-928); values are "outside any edge zone"
         so a misbehaving adapter that ignores target_lost won't trigger
         spurious retreat-from-tilt.
+
+        `bbox_bottom_norm` is left at its None default per Q6 lock — the
+        adapter must early-return on target_lost; the None sentinel is
+        belt-and-braces so a misbehaving adapter that ignores
+        target_lost will not see a "person at bottom edge" value.
         """
         return cls(
             bbox_bottom_normalized=0.5,

@@ -195,6 +195,38 @@ def test_vfov_field_removed():
     assert "vfov" not in {f.name for f in fields(ControllerConfig)}
 
 
+def test_safety_context_from_detection_populates_bbox_bottom_norm():
+    """RINT-02 / Q1 lock: SafetyContext.from_detection populates bbox_bottom_norm
+    from det.center_y + det.bbox_height / 2 (same expression as the legacy
+    bbox_bottom_normalized field).
+
+    Plan 06-04 will wire the rover adapter to read this field and override
+    forward_m_s=0.0 when >= 0.85.
+    """
+    from robot_follow.follow_api.types import Detection, SafetyContext
+    det = Detection(label="person", confidence=0.9, center_x=0.5,
+                    center_y=0.75, bbox_height=0.30, timestamp=0.0)
+    ctx = SafetyContext.from_detection(det)
+    # The new field
+    assert ctx.bbox_bottom_norm is not None
+    assert ctx.bbox_bottom_norm == pytest.approx(0.75 + 0.30 / 2)  # 0.90
+    # The legacy field is unchanged (drone-side read path still works)
+    assert ctx.bbox_bottom_normalized == pytest.approx(0.75 + 0.30 / 2)
+
+
+def test_safety_context_lost_has_bbox_bottom_norm_none():
+    """RINT-02 / Q6 lock: SafetyContext.lost() leaves bbox_bottom_norm None.
+
+    Belt-and-braces: the adapter must early-return on target_lost=True
+    anyway, but a misbehaving adapter that ignores target_lost should NOT
+    accidentally read a "person at bottom edge" value from the new field.
+    """
+    from robot_follow.follow_api.types import SafetyContext
+    ctx = SafetyContext.lost(last_target_x=0.6)
+    assert ctx.bbox_bottom_norm is None
+    assert ctx.target_lost is True
+
+
 def test_bytetracker_defaults_match_drone_hardcoded():
     """RINT-03 lock: ControllerConfig.bytetracker_* defaults MUST match the
     legacy hardcoded call at hailo_drone_detection_manager.py:1281.
