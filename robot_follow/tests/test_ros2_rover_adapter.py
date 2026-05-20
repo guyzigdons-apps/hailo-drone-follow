@@ -7,6 +7,7 @@ import importlib
 import os
 import signal
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -475,4 +476,64 @@ class TestBottomEdgeNaturalStop:
         assert twist.linear.x == 0.4, (
             f"None bbox_bottom_norm must not trigger override "
             f"(got linear.x={twist.linear.x}; expected 0.4)"
+        )
+
+
+class TestSigintShutdown:
+    """RINT-06: SIGINT shutdown contract pins (test-only; adapter unchanged).
+
+    The adapter's shutdown method (Phase 4) is the thing under test. These
+    tests pin three structural facts:
+      1. After shutdown returns, send_command does NOT publish (publisher is
+         None; the early-return guard at `if self._publisher is None: return`
+         is what keeps the rover quiet).
+      2. After shutdown returns, send_zero also does NOT publish.
+      3. shutdown() itself completes in well under 1.0 s with the mocked
+         executor (real-world bound is 2.0 s thread.join timeout in the
+         adapter; the mocked spin_once exits cleanly when the event fires).
+
+    Existing tests in TestLifecycle already pin idempotency, event-set, and
+    destroy_node-before-try_shutdown ordering — NOT duplicated here.
+    """
+
+    def test_post_shutdown_send_command_does_not_publish(self, rclpy_mock):
+        from robot_follow.follow_api.types import RobotCommand, SafetyContext
+
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        asyncio.run(adapter.shutdown())
+        # publisher is cleared in shutdown — guard pins RINT-06 silence
+        assert adapter._publisher is None, (
+            "shutdown must null out _publisher so send_command early-returns"
+        )
+        cmd = RobotCommand(forward_m_s=1.0, yaw_rate=0.0, down_m_s=0.0)
+        ctx = SafetyContext.from_detection(_det())
+        # Must not raise; the `if self._publisher is None: return` guard fires.
+        asyncio.run(adapter.send_command(cmd, ctx))
+
+    def test_post_shutdown_send_zero_does_not_publish(self, rclpy_mock):
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        asyncio.run(adapter.shutdown())
+        assert adapter._publisher is None
+        # Must not raise (publisher-is-None guard fires).
+        asyncio.run(adapter.send_zero())
+
+    def test_shutdown_completes_within_1s(self, rclpy_mock):
+        """RINT-06 spec: rover stops within 1 s. The mocked executor's
+        spin_once exits cleanly when _shutdown_event fires, so shutdown
+        completes in well under 100 ms in practice. The 1.0 s bound is the
+        spec target (the adapter's thread.join uses timeout=2.0 internally
+        as a hard ceiling for the real-rclpy path).
+        """
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        t0 = time.monotonic()
+        asyncio.run(adapter.shutdown())
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0, (
+            f"shutdown took {elapsed:.3f}s — RINT-06 requires < 1.0 s"
         )
