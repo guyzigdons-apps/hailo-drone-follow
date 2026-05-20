@@ -99,7 +99,12 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   2. `ros2 topic echo /cmd_vel` shows one `Twist` message per control tick while `drone-follow --robot rover` is running against a dummy detector input; `linear.x` is in m/s, `angular.z` is in rad/s (ROVER-06 conversion verified).
   3. `drone-follow --robot rover --help` shows `--cmd-vel-topic`, `--ros-namespace`, `--ros-domain-id`; no drone-only flags visible.
   4. On a machine without ROS installed, `--robot rover` raises a friendly `RuntimeError` with "ROS 2 not sourced" message rather than an `ImportError` traceback.
-**Plans**: TBD
+**Plans**: 5 plans
+  - [ ] 04-01-PLAN.md — Wave 1: test scaffolds (~20 ros2_rover xfail tests + 6 CLI dispatch xfail tests)
+  - [ ] 04-02-PLAN.md — Wave 2: add_rover_args body in robot_follow_app.py (ROVER-05) + strip 6 CLI dispatch xfails
+  - [ ] 04-03-PLAN.md — Wave 2: Ros2RoverAdapter + ROVER_CAPS in robot_api/adapters/ros2_rover.py (ROVER-01..04, 06-07) + strip ~20 adapter xfails
+  - [ ] 04-04-PLAN.md — Wave 3: replace NotImplementedError stub in run_robot() with lazy Ros2RoverAdapter construction + integration smoke (ROVER-08 end-to-end)
+  - [ ] 04-05-PLAN.md — Wave 4 (operator gate): real-rclpy SITL smoke — friendly error, Twist wire format, SIGINT preservation, drone-path-not-regressed
 
 ### Phase 5: Rover sim
 **Goal**: `sim/rover/start_rover_sim.sh` launches a Gazebo Garden differential-drive rover world; cmd_vel arrives from ROS and camera video reaches drone-follow via UDP on port 5600.
@@ -134,6 +139,6 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 | 1. Rename | v1.1 | 3/3 | Complete | 2026-05-14 |
 | 2. Cleanup | v1.1 | 8/8 | Complete | 2026-05-17 |
 | 3. Abstraction | v1.1 | 12/12 | In Progress (gate failed) |  |
-| 4. Rover adapter | v1.1 | 0/TBD | Not started | - |
+| 4. Rover adapter | v1.1 | 0/5 | Not started | - |
 | 5. Rover sim | v1.1 | 0/TBD | Not started | - |
 | 6. Sim integration | v1.1 | 0/TBD | Not started | - |
