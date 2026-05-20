@@ -139,6 +139,20 @@ Phase 6 RINT-05 covers this trade-off acceptance.  A future
 `--openhd-port`-style flag for the rover sim camera could remap the
 port if a future milestone requires it.
 
+### Port usage comparison
+
+| Stack    | Video (UDP) | Actuator wire             |
+|----------|-------------|---------------------------|
+| PX4 SITL (drone) | 5600 | MAVLink on UDP 14540 |
+| rover sim        | 5600 | ROS DDS (no MAVLink) |
+
+The video port (UDP 5600) is the only collision. The actuator wires
+are isolated: PX4 SITL never speaks ROS, and the rover sim never
+speaks MAVLink. This means you can't run BOTH sims on the same host
+at once (video collision), but you can run drone-follow against
+EITHER sim on the same host without MAVLink-vs-ROS interference —
+they're on entirely different wires.
+
 ## Known gotchas
 
 These are documented in detail in `.planning/research/PITFALLS.md` —
