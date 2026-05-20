@@ -697,7 +697,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                parser: Optional[argparse.ArgumentParser] = None,
                record_enabled=False, record_dir=None, reid_manager=None,
                reid_search_timeout: float = 20.0,
-               tracker_name=None, log_perf=False):
+               tracker_name=None, log_perf=False,
+               controller_config: "Optional[ControllerConfig]" = None):
     """Create the tiling pipeline app with drone-follow callback.
 
     Follows the hailo-app pattern: build parser, create user_data,
@@ -715,6 +716,12 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         record_dir: Directory for recording output files (optional)
         reid_manager: ReIDManager for appearance-based re-identification (optional)
         reid_search_timeout: Seconds to search via ReID before returning to auto mode (default: 20.0)
+        controller_config: ControllerConfig instance used for ByteTracker init
+            (reads .bytetracker_track_thresh / .bytetracker_track_buffer /
+            .bytetracker_match_thresh / .bytetracker_frame_rate). When None,
+            ControllerConfig() defaults are used — BYTE-IDENTICAL to the
+            legacy hardcoded literals (track_thresh=0.4, track_buffer=90,
+            match_thresh=0.5, frame_rate=30). RINT-03 wiring (Phase 6 Plan 06-03).
     """
     from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import (
         GStreamerTilingApp,
@@ -1274,11 +1281,19 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             return ' ! '.join([source_pipeline, infer_stage,
                                USER_CALLBACK_PIPELINE(), output_pipeline])
 
+    # RINT-03 (Phase 6 Plan 06-03): tracker init reads from controller_config.bytetracker_*.
+    # Legacy callers (controller_config=None) get ControllerConfig() defaults —
+    # byte-identical to the pre-Phase-6 hardcoded literals (0.4, 90, 0.5, 30).
+    from robot_follow.follow_api.config import ControllerConfig as _CC
+    _cfg = controller_config if controller_config is not None else _CC()
     _tracker_name = tracker_name or "byte"
     _t0 = time.monotonic()
     _inner_tracker = create_tracker(
         _tracker_name,
-        track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
+        track_thresh=_cfg.bytetracker_track_thresh,
+        track_buffer=_cfg.bytetracker_track_buffer,
+        match_thresh=_cfg.bytetracker_match_thresh,
+        frame_rate=_cfg.bytetracker_frame_rate,
     )
     _init_ms = (time.monotonic() - _t0) * 1000.0
     tracker = MetricsTracker(_inner_tracker, init_time_ms=_init_ms)

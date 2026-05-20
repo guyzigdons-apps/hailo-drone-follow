@@ -360,6 +360,13 @@ def main():
     pre.add_argument("--reid-dump-embeddings", type=str, default=None)
     # Tracker
     pre.add_argument("--tracker", default=DEFAULT_TRACKER, choices=TRACKER_CHOICES)
+    # --config is registered here on the pre-parser so ControllerConfig.from_args(pre_args)
+    # honors --config at the Path A wiring point (RINT-03 / RESEARCH Pitfall A guard).
+    # The full parser also registers --config via ControllerConfig.add_args(); argparse
+    # tolerates the duplicate registration when default=None and dest matches (verified
+    # at import — if a future argparse change rejects duplicates, remove the --config
+    # entry from ControllerConfig.add_args and keep this one as the sole registration).
+    pre.add_argument("--config", type=str, default=None)
     pre_args, _ = pre.parse_known_args()
 
     # Single source of truth for output-branch policy
@@ -428,13 +435,20 @@ def main():
     from robot_follow.pipeline_adapter import create_app
 
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+    # RINT-03 (Path A wiring): first-pass ControllerConfig built from pre-parsed args,
+    # passed into create_app for ByteTracker init. The full-args ControllerConfig
+    # below (line ~448) stays the source of truth for the rest of the app
+    # (web server, OpenHD bridge, callback live-config). Both honor --config because
+    # --config is on both the pre-parser (added above) and the full parser
+    # (via ControllerConfig.add_args).
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=pre_args.webui_fps, parser=parser,
                      record_enabled=record_branch_enabled, record_dir=recordings_dir,
                      reid_manager=reid_manager,
                      reid_search_timeout=pre_args.reid_timeout,
                      tracker_name=pre_args.tracker,
-                     log_perf=pre_args.log_perf)
+                     log_perf=pre_args.log_perf,
+                     controller_config=ControllerConfig.from_args(pre_args))
     args = app.options_menu
     # Propagate the pre-parse branch decision onto the full-parser args
     # namespace so the pipeline-string builder reads the post-implicit-rule
