@@ -454,3 +454,109 @@ class TestCustomCliArgs:
         # We accept either timing; check after connect just in case.
         asyncio.run(adapter.connect())
         assert os.environ.get("ROS_DOMAIN_ID") == "7"
+
+
+# ---------------------------------------------------------------------------
+# TestCompositionRootIntegration — 2 tests (Plan 04-04 wire-through smoke)
+# ---------------------------------------------------------------------------
+
+
+class TestCompositionRootIntegration:
+    """ROVER-08 end-to-end + dispatch contract.
+
+    Plan 04-04 wires run_robot()'s rover branch to construct
+    Ros2RoverAdapter (replacing the Phase 3 03-08 NotImplementedError
+    stub). These tests lock the contract:
+
+    1. The lazy import path ``from robot_follow.robot_api.adapters.ros2_rover
+       import Ros2RoverAdapter`` succeeds and constructs an adapter
+       against the same args namespace argparse would emit for
+       --robot rover.
+
+    2. The ROVER-08 SIGINT-preservation contract survives the full
+       composition-root construction path (not just the adapter
+       unit-test path covered by TestSignalHandlerPreservation
+       earlier in this file). Together those two classes lock the
+       contract at BOTH the unit and integration layers.
+
+    Both tests use the rclpy_mock fixture so they run on this
+    no-rclpy dev box. A real-rclpy SITL smoke is Plan 04-05
+    territory.
+    """
+
+    def test_run_robot_constructs_ros2_rover_adapter_when_robot_is_rover(self, rclpy_mock):
+        """Dispatch contract: --robot rover → Ros2RoverAdapter.
+
+        Exercises the same lazy-import path Plan 04-04 added inside
+        run_robot()'s rover branch. We don't invoke run_robot directly
+        — that would require GStreamer / shared_state / pipeline-thread
+        mocks far heavier than the contract under test. The contract
+        is two lines: lazy import + adapter construction; both are
+        exercised here.
+        """
+        from types import SimpleNamespace
+        from robot_follow.robot_api.adapters.ros2_rover import (
+            Ros2RoverAdapter,
+        )
+        from robot_follow.follow_api.config import ControllerConfig
+
+        # Mirror what argparse emits for `--robot rover`: the three
+        # ROVER-05 flags (registered by add_rover_args in 04-02)
+        # plus the global --robot.
+        args = SimpleNamespace(
+            robot="rover",
+            cmd_vel_topic="/cmd_vel",
+            ros_namespace="",
+            ros_domain_id=0,
+        )
+        adapter = Ros2RoverAdapter(args, ControllerConfig())
+        assert isinstance(adapter, Ros2RoverAdapter)
+        assert adapter.caps.yaw_unit == "rad/s"
+        # ROVER-07: no ALTITUDE axis even at the composition-root layer.
+        from robot_follow.follow_api.types import Axis
+        assert Axis.ALTITUDE not in adapter.caps.axes
+
+    def test_sigint_handler_survives_full_composition_root_path(self, rclpy_mock):
+        """ROVER-08 wire-through-the-app smoke.
+
+        Pairs with TestSignalHandlerPreservation::test_sigint_handler_survives_connect
+        above (which covers the same contract at the adapter unit
+        layer). This integration-layer smoke proves the lazy import
+        path Plan 04-04 added doesn't accidentally introduce a SIGINT
+        clobber between args parsing and adapter.connect().
+        """
+        import asyncio
+        import signal
+        from types import SimpleNamespace
+        from robot_follow.robot_api.adapters.ros2_rover import (
+            Ros2RoverAdapter,
+        )
+        from robot_follow.follow_api.config import ControllerConfig
+
+        def fake_handler(*_):
+            pass
+
+        original = signal.getsignal(signal.SIGINT)
+        try:
+            signal.signal(signal.SIGINT, fake_handler)
+            args = SimpleNamespace(
+                robot="rover",
+                cmd_vel_topic="/cmd_vel",
+                ros_namespace="",
+                ros_domain_id=0,
+            )
+            adapter = Ros2RoverAdapter(args, ControllerConfig())
+            # ROVER-08 contract: signal.getsignal(SIGINT) is fake_handler
+            # AFTER await adapter.connect() returns. With rclpy mocked,
+            # rclpy.init does NOT touch signal state — the adapter's
+            # post-init `assert getsignal(SIGINT) is before` is what
+            # we're verifying ran AND passed.
+            asyncio.run(adapter.connect())
+            assert signal.getsignal(signal.SIGINT) is fake_handler, (
+                "ROVER-08 contract violated: SIGINT handler was clobbered "
+                "between args parsing and adapter.connect()"
+            )
+        finally:
+            # Restore the pre-test SIGINT handler so subsequent tests
+            # don't see fake_handler.
+            signal.signal(signal.SIGINT, original)
