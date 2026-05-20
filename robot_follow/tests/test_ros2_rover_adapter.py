@@ -1,24 +1,19 @@
-"""Phase 4 Wave 0 test scaffold for the ROS 2 rover adapter.
+"""ROS 2 rover adapter unit tests.
 
-This file is the failing contract for Plan 04-03 (Wave 3): every test
-in this module is marked ``@pytest.mark.xfail(strict=False, …)`` until
-``robot_follow/robot_api/adapters/ros2_rover.py`` lands. When 04-03
-adds the adapter and these xfails start passing, the markers are
-stripped en bloc.
+Phase 4 Plan 04-03 landed ros2_rover.py — Ros2RoverAdapter +
+ROVER_CAPS. Every test PASSES against the real adapter with rclpy
+injected via the ``rclpy_mock`` fixture (no markers — the wave-0
+scaffold's deferred-pass annotations were removed in Plan 04-03).
 
-Why this scaffold lands before the adapter:
-    - GSD test-first contract — establish the failing contract before
-      any production code lands (see ``.planning/phases/04-rover-adapter/RESEARCH.md``
-      § "Migration commit shape Wave 0").
-    - Locks the wire shape (Twist semantics, rclpy lifecycle order,
-      protocol fit, signal-handler preservation) so 04-03 has a single
-      target to satisfy.
-    - Documents the rclpy mock strategy now — Plan 04-03 reuses the
-      same ``rclpy_mock`` fixture without rewriting it.
-
-Reference: ``.planning/phases/04-rover-adapter/RESEARCH.md`` §§
-"rclpy mock fixture (the foundation)", "Test classes", and
-"Test count summary" — this file mirrors that map exactly:
+Coverage map (per RESEARCH § Test classes):
+    TestImportSafety              — ROVER-04 (defensive RuntimeError)
+    TestProtocolShape             — ROVER-01, ROVER-07
+    TestSignalHandlerPreservation — ROVER-02, ROVER-08
+    TestTwistPublish              — ROVER-06 (no conversion, Q6 lock)
+    TestLifecycle                 — ROVER-03 (spin_once timeout),
+                                    shutdown ordering
+    TestCustomCliArgs             — ROVER-05 plumbing (custom topic /
+                                    namespace / domain)
 
     | Class                          | # tests |
     | TestImportSafety               | 2       |
@@ -45,13 +40,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
-# Reason strings — Plan 04-03 strips the xfail markers wholesale.
-XFAIL_REASON_ADAPTER = (
-    "ros2_rover.py + Ros2RoverAdapter land in Phase 4 Plan 04-03 "
-    "(adapter implementation). This Wave 0 scaffold makes the failing "
-    "contract explicit; 04-03 strips these xfail markers."
-)
 
 
 # ---------------------------------------------------------------------------
@@ -137,10 +125,10 @@ def _default_args(**overrides):
 def _build_adapter(rclpy_mock, **arg_overrides):
     """Construct ``Ros2RoverAdapter`` against the mocked rclpy.
 
-    Imports the adapter lazily so collection succeeds without the
-    module existing yet (collection-time imports would error and break
-    the whole file). Plan 04-03 ships ``ros2_rover.py``; until then
-    every test that calls this helper xfails on the ``ImportError``.
+    Imports the adapter lazily (inside the function body, not at
+    module top) so this test file stays importable regardless of
+    sys.path or rclpy availability — the ``rclpy_mock`` fixture has
+    already populated ``sys.modules`` by the time this runs.
     """
     from robot_follow.follow_api.config import ControllerConfig
     from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
@@ -157,7 +145,6 @@ def _build_adapter(rclpy_mock, **arg_overrides):
 class TestImportSafety:
     """Module import safety and friendly-error behavior."""
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_module_imports_cleanly_without_rclpy(self):
         """``import robot_follow.robot_api.adapters.ros2_rover`` succeeds on a
         no-ROS box (the lazy import is INSIDE ``__init__``, not at module
@@ -165,7 +152,6 @@ class TestImportSafety:
         whole point of this test."""
         importlib.import_module("robot_follow.robot_api.adapters.ros2_rover")
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_friendly_error_when_rclpy_missing(self, monkeypatch):
         """Constructing the adapter without rclpy in ``sys.modules``
         raises RuntimeError whose message names ROS 2 and the source
@@ -192,7 +178,6 @@ class TestImportSafety:
 class TestProtocolShape:
     """``Ros2RoverAdapter`` must structurally implement the Robot protocol."""
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_implements_robot_protocol(self, rclpy_mock):
         """``isinstance(adapter, Robot)`` works via @runtime_checkable."""
         from robot_follow.robot_api.robot import Robot
@@ -200,7 +185,6 @@ class TestProtocolShape:
         adapter = _build_adapter(rclpy_mock)
         assert isinstance(adapter, Robot)
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_caps_is_rover_caps(self, rclpy_mock):
         """caps.axes == {FORWARD, YAW}; yaw_unit == 'rad/s'; ALTITUDE absent."""
         from robot_follow.follow_api.types import Axis
@@ -212,7 +196,6 @@ class TestProtocolShape:
         assert adapter.caps.yaw_unit == "rad/s"
         assert Axis.ALTITUDE not in adapter.caps.axes
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_has_six_methods(self, rclpy_mock):
         """Mirrors test_robot_protocol_shape.py:39-48 — hasattr loop."""
         from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
@@ -236,7 +219,6 @@ class TestProtocolShape:
 class TestSignalHandlerPreservation:
     """ROVER-02 / ROVER-08 — rclpy.init must NOT clobber the SIGINT handler."""
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_connect_calls_init_with_signal_handler_options_no(self, rclpy_mock):
         """After ``await adapter.connect()``, ``rclpy.init`` was called
         with the ``signal_handler_options="NO"`` sentinel."""
@@ -250,7 +232,6 @@ class TestSignalHandlerPreservation:
             f"expected signal_handler_options='NO', got {kwargs!r}"
         )
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_sigint_handler_survives_connect(self, rclpy_mock):
         """ROVER-08 smoke: set a fake SIGINT handler, await connect(),
         assert the handler is still bound. Mocked rclpy never touches
@@ -277,7 +258,6 @@ class TestSignalHandlerPreservation:
 class TestTwistPublish:
     """ROVER-06 — ``send_command`` writes a Twist with no unit conversion."""
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_publishes_twist_with_forward_and_yaw_rate(self, rclpy_mock):
         """forward_m_s=1.5, yaw_rate=0.3 → linear.x=1.5, angular.z=0.3,
         all other Twist components = 0.0."""
@@ -298,7 +278,6 @@ class TestTwistPublish:
         assert twist.angular.x == pytest.approx(0.0)
         assert twist.angular.y == pytest.approx(0.0)
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_send_command_no_conversion_yaw_rate(self, rclpy_mock):
         """yaw_rate=0.5 rad/s → angular.z==0.5 (NOT 0.5 * π/180).
         Locks ROVER-06: rover adapter publishes yaw_rate verbatim
@@ -315,7 +294,6 @@ class TestTwistPublish:
         twist = adapter._publisher.publish.call_args.args[0]
         assert twist.angular.z == pytest.approx(0.5)
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_send_command_short_circuits_on_target_lost(self, rclpy_mock):
         """Q6 lock: target_lost=True → publisher.publish is NOT called."""
         from robot_follow.follow_api.types import RobotCommand, SafetyContext
@@ -332,7 +310,6 @@ class TestTwistPublish:
             "publish should not be called when target is lost"
         )
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_send_zero_publishes_all_zeros(self, rclpy_mock):
         """``send_zero`` publishes a Twist with all 6 fields = 0.0."""
         adapter = _build_adapter(rclpy_mock)
@@ -349,7 +326,6 @@ class TestTwistPublish:
         assert twist.angular.y == pytest.approx(0.0)
         assert twist.angular.z == pytest.approx(0.0)
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_on_target_lost_publishes_zero_twist(self, rclpy_mock):
         """Rover does NOT yaw-spin on target loss — ``on_target_lost``
         publishes an all-zero Twist (unlike the drone, which spins
@@ -373,7 +349,6 @@ class TestTwistPublish:
 class TestLifecycle:
     """connect / start_session / shutdown ordering and idempotency."""
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_start_session_creates_node_and_publisher(self, rclpy_mock):
         """Node called with namespace=self._namespace; create_publisher
         called with (Twist, '/cmd_vel', 10)."""
@@ -395,7 +370,6 @@ class TestLifecycle:
         assert publish_args[1] == "/cmd_vel"
         assert publish_args[2] == 10
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_start_session_starts_executor_thread(self, rclpy_mock):
         """After start_session(), adapter._executor_thread.is_alive()."""
         adapter = _build_adapter(rclpy_mock)
@@ -406,7 +380,6 @@ class TestLifecycle:
         finally:
             asyncio.run(adapter.shutdown())
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_shutdown_idempotent(self, rclpy_mock):
         """Calling shutdown() twice in a row must not raise."""
         adapter = _build_adapter(rclpy_mock)
@@ -416,7 +389,6 @@ class TestLifecycle:
         # Second call must be a no-op (not raise).
         asyncio.run(adapter.shutdown())
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_shutdown_orders_node_destroy_before_try_shutdown(self, rclpy_mock):
         """PITFALLS 'Looks Done But Isn't' line 197 — destroy_node must
         be called BEFORE rclpy.try_shutdown(); record mock_calls and
@@ -437,7 +409,6 @@ class TestLifecycle:
             f"destroy_node must precede try_shutdown; saw: {names!r}"
         )
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_shutdown_sets_shutdown_event(self, rclpy_mock):
         """After shutdown(), adapter._shutdown_event.is_set() is True."""
         adapter = _build_adapter(rclpy_mock)
@@ -455,7 +426,6 @@ class TestLifecycle:
 class TestCustomCliArgs:
     """ROVER-05 — --cmd-vel-topic / --ros-namespace / --ros-domain-id."""
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_custom_cmd_vel_topic(self, rclpy_mock):
         """args.cmd_vel_topic='/rover/cmd_vel' → create_publisher called
         with that topic."""
@@ -467,7 +437,6 @@ class TestCustomCliArgs:
         publish_args, _ = node_instance.create_publisher.call_args
         assert publish_args[1] == "/rover/cmd_vel"
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_custom_namespace(self, rclpy_mock):
         """args.ros_namespace='robot1' → Node called with namespace='robot1'."""
         adapter = _build_adapter(rclpy_mock, ros_namespace="robot1")
@@ -477,7 +446,6 @@ class TestCustomCliArgs:
         _args, kwargs = rclpy.node.Node.call_args
         assert kwargs.get("namespace") == "robot1"
 
-    @pytest.mark.xfail(strict=False, reason=XFAIL_REASON_ADAPTER)
     def test_domain_id_sets_env(self, rclpy_mock, monkeypatch):
         """args.ros_domain_id=7 → os.environ['ROS_DOMAIN_ID']=='7'."""
         monkeypatch.delenv("ROS_DOMAIN_ID", raising=False)
