@@ -267,3 +267,47 @@ def test_sdfs_lint_clean_with_gz() -> None:
             f"gz sdf -k failed on {sdf}:\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
         )
+
+
+# ---------- RINT-05: README port-isolation comparison table ----------
+
+def test_readme_documents_port_isolation_table() -> None:
+    """RINT-05: sim/rover/README.md documents the port-isolation contrast
+    between PX4 SITL and rover sim.
+
+    Required ground (per RINT-05 wording):
+    - Video port (5600 UDP) collides between both stacks
+    - PX4 SITL also uses MAVLink on UDP 14540
+    - Rover sim uses ROS DDS — NO MAVLink
+
+    The 'Port usage comparison' table inside the existing 'Port 5600
+    conflict with PX4 SITL' section closes the gap. Plan 06-02 owns
+    this addition.
+    """
+    assert ROVER_README.is_file(), f"{ROVER_README} missing"
+    text = ROVER_README.read_text()
+    # Existing section header preserved (lock — must NOT have been rewritten)
+    assert "Port 5600 conflict with PX4 SITL" in text, (
+        f"existing 'Port 5600 conflict with PX4 SITL' section was lost — "
+        f"06-02 must APPEND, not REPLACE"
+    )
+    # New table header
+    assert "Port usage comparison" in text, (
+        "RINT-05: missing 'Port usage comparison' table header in "
+        "sim/rover/README.md (06-02 task contract)"
+    )
+    # The 7 substrings the table must contain
+    required = [
+        "PX4 SITL",
+        "5600",
+        "MAVLink",
+        "14540",
+        "rover sim",
+        "ROS DDS",
+        "no MAVLink",
+    ]
+    for s in required:
+        assert s in text, (
+            f"RINT-05: required string {s!r} missing from "
+            f"sim/rover/README.md port-isolation table"
+        )
