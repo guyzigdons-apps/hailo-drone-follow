@@ -511,3 +511,201 @@ def test_random_walk_produces_detections(sim_run):
     assert s["n_det"] > 80, (
         f"only {s['n_det']}/{s['n']} frames saw the random-walk actor"
     )
+
+
+# ---------------------------------------------------------------------------
+# Rover sim — RINT-04 E2E
+# ---------------------------------------------------------------------------
+
+import shutil
+
+ROVER_SIM_SCRIPT = REPO_ROOT / "sim" / "rover" / "start_rover_sim.sh"
+ROVER_CONFIG = REPO_ROOT / "configs" / "rover_simulation.json"
+
+
+def _rover_sim_prereqs_missing():
+    """Return a (reason, missing) tuple describing why the rover sim test
+    should skip on this box. Empty reason means all prereqs satisfied.
+    Mirrors the drone shape (PX4 build) but for gz + ROS 2 + rover launcher.
+    """
+    if not ROVER_SIM_SCRIPT.exists():
+        return f"missing {ROVER_SIM_SCRIPT}"
+    if shutil.which("gz") is None:
+        return "`gz` CLI not on PATH (install Gazebo Garden)"
+    if not Path("/opt/ros/humble/setup.bash").exists():
+        return "/opt/ros/humble/setup.bash missing (install ROS 2 Humble + ros_gz_bridge)"
+    if not ROVER_CONFIG.exists():
+        return f"missing {ROVER_CONFIG}"
+    return ""
+
+
+@pytest.fixture
+def rover_sim_run(tmp_path, request):
+    """Rover analog of `sim_run`: spawns start_rover_sim.sh + robot-follow
+    against a rover world; returns the JSONL log path.
+
+    Differences from the drone fixture:
+      * Launcher: sim/rover/start_rover_sim.sh (no PX4 SITL).
+      * robot-follow CLI: `--robot rover --config configs/rover_simulation.json`
+        (no takeoff/landing, no MAVSDK connection).
+      * Teardown: kills the rover sim process group; start_rover_sim.sh's own
+        SIGINT trap will reap its three children (gz/bridge/video_bridge).
+    """
+    skip_reason = _rover_sim_prereqs_missing()
+    if skip_reason:
+        pytest.skip(f"rover sim prereqs missing: {skip_reason}")
+
+    procs = []
+    test_name = request.node.name
+
+    def _run(world, run_seconds=RUN_S, extra_args=()):
+        _log("=" * 72)
+        _log(f"TEST       {test_name}")
+        _log(f"WORLD      rover/{world}")
+        if extra_args:
+            _log(f"EXTRA ARGS {' '.join(extra_args)}")
+        _log("=" * 72)
+
+        log_path = tmp_path / f"rover_{world}.jsonl"
+        sim_log_path = tmp_path / f"rover_{world}.sim.log"
+        app_log_path = tmp_path / f"rover_{world}.app.log"
+        sim_log = open(sim_log_path, "wb")
+        app_log = open(app_log_path, "wb")
+
+        _log(f"artifacts  {tmp_path}")
+        _log(f"starting rover sim: {ROVER_SIM_SCRIPT.name} --world {world}")
+        sim_env = os.environ.copy()
+        sim_env.setdefault("HEADLESS", "1")
+        sim = subprocess.Popen(
+            [str(ROVER_SIM_SCRIPT), "--world", world],
+            preexec_fn=os.setsid, env=sim_env,
+            stdout=sim_log, stderr=subprocess.STDOUT,
+        )
+        procs.append(sim)
+        _log(f"sim pid={sim.pid} — warming up for {WARMUP_S}s")
+        _wait_with_progress("warmup", WARMUP_S, watch=(sim_log_path,))
+        if sim.poll() is not None:
+            _log(f"rover sim exited early (rc={sim.returncode}); last sim log:")
+            print(_tail(sim_log_path), flush=True)
+            raise RuntimeError(
+                f"rover sim exited early (code={sim.returncode}); "
+                f"see {sim_log_path}"
+            )
+
+        extra = (" " + " ".join(extra_args)) if extra_args else ""
+        # Rover invocation: no takeoff/landing, no MAVSDK, no recording (the
+        # rover doesn't have an overlay encode path here). --no-reid keeps the
+        # test fast; we're asserting the controller's bbox tracking path, not
+        # gallery dynamics. --test-log is the same JSONL surface as the drone.
+        cmd = (
+            f"source {SETUP_ENV} && "
+            f"robot-follow --robot rover "
+            f"--input udp://0.0.0.0:5600 "
+            f"--config {ROVER_CONFIG} "
+            f"--no-reid "
+            f"--test-log {log_path}{extra}"
+        )
+        _log(f"starting robot-follow (rover) -> {log_path.name}")
+        app = subprocess.Popen(
+            ["bash", "-lc", cmd],
+            preexec_fn=os.setsid,
+            stdout=app_log, stderr=subprocess.STDOUT,
+        )
+        procs.append(app)
+        _log(f"robot-follow pid={app.pid} — capturing for {run_seconds}s")
+        _wait_with_progress(
+            "capture", run_seconds,
+            watch=(log_path, app_log_path, sim_log_path),
+            must_be_running=app,
+            must_be_running_name="robot-follow",
+            must_be_running_log=app_log_path,
+        )
+
+        _log("shutting down robot-follow so JSONL flushes before assertions")
+        _kill_group(app)
+        procs.remove(app)
+
+        if _size(log_path) <= 0:
+            _log(f"robot-follow produced no detections; tail of {app_log_path.name}:")
+            print(_tail(app_log_path), flush=True)
+            raise RuntimeError(
+                f"no detections written to {log_path} after {run_seconds}s "
+                f"(robot-follow rc={app.returncode}); see {app_log_path}"
+            )
+        return log_path
+
+    yield _run
+
+    _log("tearing down rover sim processes")
+    for p in reversed(procs):
+        _kill_group(p)
+
+
+class TestRoverWalkAcrossThenApproach:
+    """RINT-04: deterministic E2E test in the Gazebo rover sim.
+
+    Mirrors test_walk_across_then_approach_holds_target_through_approach but
+    for the rover path: start_rover_sim.sh launcher, --robot rover with
+    configs/rover_simulation.json, no MAVSDK / no takeoff. Skips cleanly on
+    boxes without gz + ROS 2 Humble.
+
+    The assertion targets the approach window (largest bbox >= 0.15 of
+    frame) — that's where the rover's bottom-edge slow-down (RINT-02, plan
+    06-04) implicitly fires once the actor crosses bbox_bottom_norm=0.85,
+    so a regression of the override would show up as a runaway rover and
+    tank the close-frame retention ratios.
+    """
+
+    def test_walk_across_then_approach_holds_target_through_approach_rover(
+        self, rover_sim_run,
+    ):
+        """Rover analog of the drone equivalent. Coarse-grained assertions
+        per RINT-04 spec (gz sim is non-deterministic at ms resolution)."""
+        log = _read_jsonl(rover_sim_run(
+            "walk_across_then_approach", run_seconds=90,
+        ))
+        s = _summarize("rover/walk_across_then_approach", log)
+
+        assert s["n"] > 0, (
+            "no log lines written — robot-follow likely never started"
+        )
+        assert s["n_det"] > MIN_FRAMES_WITH_DETECTION, (
+            f"only {s['n_det']}/{s['n']} frames had detections — sim or video "
+            f"bridge probably failed to feed frames"
+        )
+
+        APPROACH_H = 0.15
+        big = [
+            i for i, r in enumerate(log)
+            if r["detections"]
+            and max(d["bbox"][3] for d in r["detections"]) >= APPROACH_H
+        ]
+        assert big, (
+            f"no frames had bbox h >= {APPROACH_H} — actor never came close "
+            f"enough; rover sim wiring or world geometry may be off"
+        )
+        window = log[big[0]:big[-1] + 1]
+        n_w = len(window)
+        n_det_w = sum(1 for r in window if r["detections"])
+        n_id_w = sum(
+            1 for r in window if any(d["id"] is not None for d in r["detections"])
+        )
+        _log(
+            f"  rover approach window: {n_w} frames  with_det={n_det_w}  "
+            f"with_id={n_id_w}"
+        )
+
+        assert n_w >= 90, (
+            f"rover approach window only {n_w} frames — actor barely got "
+            f"close, world or camera framing may be off"
+        )
+        # Slightly looser than the drone's 0.9 — the rover has more occluders
+        # at ground perspective so a few mid-approach dropouts are tolerable.
+        assert n_det_w / n_w >= 0.8, (
+            f"rover approach window: only {n_det_w}/{n_w} frames had a "
+            f"detection — target lost while close to the rover"
+        )
+        assert n_id_w / n_w >= 0.8, (
+            f"rover approach window: only {n_id_w}/{n_w} frames had a tracker "
+            f"ID — ByteTracker dropped the target during the close approach"
+        )
