@@ -195,6 +195,31 @@ def test_vfov_field_removed():
     assert "vfov" not in {f.name for f in fields(ControllerConfig)}
 
 
+def test_bytetracker_defaults_match_drone_hardcoded():
+    """RINT-03 lock: ControllerConfig.bytetracker_* defaults MUST match the
+    legacy hardcoded call at hailo_drone_detection_manager.py:1281.
+
+    If this test fails, the drone tracker's behavior would change at the
+    moment Plan 06-03 wires the read site in create_app — that's a
+    Phase-6 regression mode this test exists to catch.
+    """
+    from dataclasses import fields
+    from robot_follow.follow_api.config import ControllerConfig
+    cfg = ControllerConfig()
+    # Field values
+    assert cfg.bytetracker_track_thresh == 0.4
+    assert cfg.bytetracker_track_buffer == 90
+    assert cfg.bytetracker_match_thresh == 0.5
+    assert cfg.bytetracker_frame_rate == 30
+    # Field types + defaults (paranoia: catch type-drift)
+    by_name = {f.name: f for f in fields(ControllerConfig)}
+    assert "bytetracker_track_thresh" in by_name
+    assert by_name["bytetracker_track_thresh"].default == 0.4
+    assert by_name["bytetracker_track_buffer"].default == 90
+    assert by_name["bytetracker_match_thresh"].default == 0.5
+    assert by_name["bytetracker_frame_rate"].default == 30
+
+
 def test_tunable_fields_source_of_truth():
     """CLEAN-14: ControllerConfig.tunable_fields() is the single schema source.
 

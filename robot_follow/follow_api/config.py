@@ -105,6 +105,22 @@ class ControllerConfig:
     # --- Takeoff/misc ---
     target_altitude: Optional[float] = 3.0   # initial altitude for --takeoff-landing; UI "Target Alt" adjusts this as a soft reference
     log_verbosity: str = "normal"  # quiet | normal | debug
+    # --- ByteTracker (RINT-03 preparation) ---
+    # Drone defaults preserved BYTE-IDENTICAL to the legacy hardcoded call at
+    # robot_follow/pipeline_adapter/hailo_drone_detection_manager.py:1281
+    # (track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30) and
+    # to the factory defaults in hailo_apps/.../tracker_factory.py:19-21.
+    # Plan 06-03 will wire create_app to read these fields and replace the
+    # hardcoded call site. Plan 06-01 (this one) only adds the dataclass fields.
+    # NOT added to tunable_fields() (tracker is constructed once at init —
+    # live mutation would silently no-op; RESEARCH A3 lock).
+    # NOT added to add_args() (operators tune via JSON config to keep --help
+    # uncluttered; from_json path is the only consumer).
+    # Rover override lives in configs/rover_simulation.json (track_buffer=30).
+    bytetracker_track_thresh: float = 0.4   # detection confidence floor for new tracks
+    bytetracker_track_buffer: int = 90      # frames to keep lost tracks (drone: 3 s @ 30 fps; rover: 1 s)
+    bytetracker_match_thresh: float = 0.5   # IoU matching threshold between dets and tracks
+    bytetracker_frame_rate: int = 30        # pipeline fps (informational; used by ByteTracker internals)
 
     def __post_init__(self):
         self.validate()
