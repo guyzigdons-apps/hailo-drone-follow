@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
 current_plan: 1
-status: executing
-stopped_at: Completed 04-04-PLAN.md
-last_updated: "2026-05-20T14:20:07.319Z"
+status: milestone_complete
+stopped_at: Milestone complete (Phase 06 was final phase)
+last_updated: 2026-05-20T16:30:03.667Z
 last_activity: 2026-05-20 -- Phase 06 execution started
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 38
-  completed_plans: 38
+  completed_plans: 45
   percent: 83
 ---
 
@@ -22,16 +22,16 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 **Core value:** The pipeline keeps a target person in frame and computes safe velocity commands for the robot, even when the target is briefly occluded — without operator input.
-**Current focus:** Phase 06 — sim-integration
+**Current focus:** Milestone complete
 
 ## Current Position
 
-Phase: 06 (sim-integration) — EXECUTING
+Phase: 06
 Plan: 1 of ?
-Current Plan: 1
+Current Plan: Not started
 Total Plans in Phase: 14
-Status: Executing Phase 06
-Last activity: 2026-05-20 -- Phase 06 execution started
+Status: Milestone complete
+Last activity: 2026-05-20
 
 Progress: [██████████] 97%
 
@@ -39,7 +39,7 @@ Progress: [██████████] 97%
 
 **Velocity:**
 
-- Total plans completed: 4
+- Total plans completed: 11
 - Average duration: 24.5 min
 - Total execution time: 98 min (1.6 h)
 
@@ -49,6 +49,7 @@ Progress: [██████████] 97%
 |------------|-------|--------|----------|
 | 01-rename  | 3     | 96 min | 32 min   |
 | 02-cleanup | 1     | 2 min  | 2 min    |
+| 06 | 7 | - | - |
 
 *Updated after each plan completion*
 
