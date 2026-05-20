@@ -200,17 +200,45 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 def add_rover_args(parser: argparse.ArgumentParser) -> None:
     """Register rover-only CLI flags.
 
-    EMPTY in Phase 3 — Phase 4 fills this in with ``--cmd-vel-topic``,
-    ``--ros-namespace``, ``--ros-domain-id`` (ROVER-05). The argument
-    group is added unconditionally so plan-checkers can confirm that
-    the dispatch is wired even before Phase 4 lands flags.
+    Per ROVER-05 + Phase 4. Mirrors ``add_drone_args``' argument-group
+    pattern (``robot_api/adapters/mavsdk_drone.py:269-290``).
 
     Plan-checker invariant (DESIGN-NOTES line 128): no flag may be in
-    both ``add_drone_args`` and ``add_rover_args``. The empty body
-    automatically satisfies this; future rover flags must not duplicate
-    drone flags.
+    both ``add_drone_args`` and ``add_rover_args``. Verified by
+    ``test_cli_help_dispatch.py::test_drone_help_excludes_rover_flag``
+    and ``test_rover_help_excludes_drone_flag``.
+
+    IMPORTANT LOCATION CHOICE (per Phase 4 RESEARCH § "Where
+    ``add_rover_args`` lives"): this body lives in ``robot_follow_app.py``,
+    NOT in ``robot_api/adapters/ros2_rover.py``, because the ``--help``
+    path runs ``add_rover_args`` and must NOT trigger
+    ``Ros2RoverAdapter.__init__``'s defensive ``import rclpy`` →
+    ``RuntimeError`` on a no-rclpy dev box. Argparse flag registration
+    is pure Python with zero ROS dependencies.
     """
-    parser.add_argument_group("rover-ros2 (Phase 4)")
+    group = parser.add_argument_group("rover-ros2")
+    group.add_argument(
+        "--cmd-vel-topic",
+        default="/cmd_vel",
+        help="ROS topic to publish geometry_msgs/Twist setpoints on "
+             "(default: /cmd_vel).",
+    )
+    group.add_argument(
+        "--ros-namespace",
+        default="",
+        help="ROS namespace prefix for the rover node (default: empty — "
+             "node publishes on the configured --cmd-vel-topic without "
+             "namespacing).",
+    )
+    group.add_argument(
+        "--ros-domain-id",
+        type=int,
+        default=0,
+        help="ROS_DOMAIN_ID for network isolation (default: 0). Non-zero "
+             "values isolate the rover from other ROS nodes on the same "
+             "LAN. Passed to the adapter; rclpy honors ROS_DOMAIN_ID at "
+             "init via environment variable.",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
