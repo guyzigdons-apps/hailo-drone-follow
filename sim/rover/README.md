@@ -7,8 +7,11 @@ install path.  This README is the operator-facing entry point.
 
 ## What's here
 
-- `rover.sdf` — diff-drive rover model with a forward camera
-  (Garden plugin: `gz::sim::systems::DiffDrive`).
+- `rover/model.sdf` + `rover/model.config` — diff-drive rover model
+  package with a forward camera (Garden plugin:
+  `gz::sim::systems::DiffDrive`). Resolved by the worlds via
+  `<include><uri>model://rover</uri></include>`; the launcher exports
+  `GZ_SIM_RESOURCE_PATH=sim/rover/:…` so `gz sim` finds it.
 - `worlds/walk_across_then_approach.sdf` — primary actor world; the
   rover spawns at origin, actor walks across the frame at X=4 then
   approaches.  Phase 6 RINT-04 uses this as the E2E test target.

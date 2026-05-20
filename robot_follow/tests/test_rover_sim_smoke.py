@@ -20,7 +20,8 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ROVER_DIR = PROJECT_ROOT / "sim" / "rover"
-ROVER_SDF = ROVER_DIR / "rover.sdf"
+ROVER_SDF = ROVER_DIR / "rover" / "model.sdf"
+ROVER_MODEL_CONFIG = ROVER_DIR / "rover" / "model.config"
 ROVER_WORLDS_DIR = ROVER_DIR / "worlds"
 ROVER_README = ROVER_DIR / "README.md"
 START_ROVER_SH = ROVER_DIR / "start_rover_sim.sh"
