@@ -200,21 +200,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 def add_rover_args(parser: argparse.ArgumentParser) -> None:
     """Register rover-only CLI flags.
 
-    Per ROVER-05 + Phase 4. Mirrors ``add_drone_args``' argument-group
-    pattern (``robot_api/adapters/mavsdk_drone.py:269-290``).
-
-    Plan-checker invariant (DESIGN-NOTES line 128): no flag may be in
-    both ``add_drone_args`` and ``add_rover_args``. Verified by
-    ``test_cli_help_dispatch.py::test_drone_help_excludes_rover_flag``
-    and ``test_rover_help_excludes_drone_flag``.
-
-    IMPORTANT LOCATION CHOICE (per Phase 4 RESEARCH § "Where
-    ``add_rover_args`` lives"): this body lives in ``robot_follow_app.py``,
-    NOT in ``robot_api/adapters/ros2_rover.py``, because the ``--help``
-    path runs ``add_rover_args`` and must NOT trigger
-    ``Ros2RoverAdapter.__init__``'s defensive ``import rclpy`` →
-    ``RuntimeError`` on a no-rclpy dev box. Argparse flag registration
-    is pure Python with zero ROS dependencies.
+    Lives here (not in ros2_rover.py) so ``--help`` doesn't trigger the
+    rover adapter's lazy ``import rclpy``.
     """
     group = parser.add_argument_group("rover-ros2")
     group.add_argument(
@@ -324,17 +311,8 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 def main():
-    # Restore default SIGPIPE so `robot-follow --help | head -5` terminates
-    # cleanly instead of leaking a BrokenPipeError traceback when the
-    # downstream reader closes the pipe. The pipeline init re-parses
-    # sys.argv internally (hailo_drone_detection_manager.py:819) so -h
-    # fires there, not in main — without this signal the partial write
-    # surfaces as a Python traceback rather than a normal CLI termination.
-    try:
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    except (AttributeError, ValueError):
-        # AttributeError on Windows (no SIGPIPE); ValueError if not main thread.
-        pass
+    # So `--help | head` exits cleanly instead of leaking BrokenPipeError.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
     shared_state = SharedDetectionState()
     shutdown = asyncio.Event()
@@ -522,45 +500,12 @@ def main():
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
     def run_robot():
-        """Run robot control in a background thread with its own asyncio loop.
-
-        Phase 3 plan 03-08 renamed ``run_drone`` → ``run_robot`` and
-        added ``--robot`` dispatch. The drone path constructs
-        ``MavsdkDroneAdapter`` and drives it via
-        ``robot_api.orchestrator.run_robot_loop`` (unchanged from 03-07).
-        The rover path raises ``NotImplementedError`` until Phase 4
-        lands ``Ros2RoverAdapter`` — at which point THIS stub will be
-        replaced by ROVER-04's friendly
-        ``RuntimeError("ROS 2 not sourced — run sudo apt install
-        ros-humble-ros-base then re-source setup_env.sh")`` path.
-
-        B1 carry-through (03-07 → 03-08): the mission-duration watchdog
-        wrap from 03-07's ``run_drone`` is PRESERVED mechanically — not
-        deleted, not moved into ``run_robot_loop``. The wrap uses
-        ``getattr(args, "mission_duration", math.inf)`` so rover users
-        (no ``--mission-duration`` flag registered in
-        ``add_rover_args``) get ``math.inf`` (no deadline) while drone
-        users honor their ``--mission-duration`` value (default 300s
-        per ``add_drone_args``). The watchdog lives HERE, not in
-        ``run_robot_loop``, to keep the orchestrator robot-agnostic.
-        """
+        """Run robot control in a background thread with its own asyncio loop."""
         if args.robot == "drone":
             adapter = MavsdkDroneAdapter(args, controller_config)
         elif args.robot == "rover":
-            # Phase 4 Plan 04-04: replace the NotImplementedError stub
-            # from Phase 3 03-08 with real Ros2RoverAdapter construction.
-            #
-            # The import is LAZY (inside this branch, not at module top)
-            # for two reasons:
-            #   1. So `--robot drone` runs on a no-rclpy dev box continue
-            #      to work without surfacing rover-only errors.
-            #   2. So the ROVER-04 friendly RuntimeError (raised by
-            #      Ros2RoverAdapter.__init__ when rclpy/geometry_msgs are
-            #      missing) only fires when the user actually selects
-            #      --robot rover. The catch below logs + returns so the
-            #      outer pipeline continues without robot control —
-            #      mirroring the drone branch's outer try/except at the
-            #      bottom of run_robot.
+            # Lazy import so `--robot drone` works on a no-rclpy box and the
+            # friendly RuntimeError only fires when the user actually picks rover.
             try:
                 from robot_follow.robot_api.adapters.ros2_rover import (
                     Ros2RoverAdapter,
@@ -578,8 +523,6 @@ def main():
 
         async def _main():
             duration = getattr(args, "mission_duration", math.inf)
-            # Pass ui_state so run_robot_loop publishes mode + velocity to the web UI per
-            # 03-11 gap closure (axes-only contract preserved — adapter remains UI-agnostic).
             loop_task = asyncio.create_task(
                 run_robot_loop(adapter, shared_state, controller_config, shutdown, ui_state=ui_state)
             )

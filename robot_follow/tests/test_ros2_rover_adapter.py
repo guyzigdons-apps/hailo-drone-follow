@@ -1,33 +1,4 @@
-"""ROS 2 rover adapter unit tests.
-
-Phase 4 Plan 04-03 landed ros2_rover.py — Ros2RoverAdapter +
-ROVER_CAPS. Every test PASSES against the real adapter with rclpy
-injected via the ``rclpy_mock`` fixture (no markers — the wave-0
-scaffold's deferred-pass annotations were removed in Plan 04-03).
-
-Coverage map (per RESEARCH § Test classes):
-    TestImportSafety              — ROVER-04 (defensive RuntimeError)
-    TestProtocolShape             — ROVER-01, ROVER-07
-    TestSignalHandlerPreservation — ROVER-02, ROVER-08
-    TestTwistPublish              — ROVER-06 (no conversion, Q6 lock)
-    TestLifecycle                 — ROVER-03 (spin_once timeout),
-                                    shutdown ordering
-    TestCustomCliArgs             — ROVER-05 plumbing (custom topic /
-                                    namespace / domain)
-
-    | Class                          | # tests |
-    | TestImportSafety               | 2       |
-    | TestProtocolShape              | 3       |
-    | TestSignalHandlerPreservation  | 2       |
-    | TestTwistPublish               | 5       |
-    | TestLifecycle                  | 5       |
-    | TestCustomCliArgs              | 3       |
-    | **Total**                      | **20**  |
-
-The ``rclpy_mock`` fixture uses ``monkeypatch.setitem(sys.modules, …)``
-(per RESEARCH § 7 / threat T-04-01-01) so the injections roll back at
-teardown and cannot leak into other tests in the suite.
-"""
+"""ROS 2 rover adapter unit tests (rclpy injected via fixture)."""
 
 from __future__ import annotations
 
@@ -42,29 +13,14 @@ from unittest.mock import MagicMock
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# rclpy_mock fixture
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture
 def rclpy_mock(monkeypatch):
-    """Inject MagicMock stand-ins for rclpy + geometry_msgs into ``sys.modules``.
+    """Inject MagicMock rclpy + geometry_msgs into sys.modules.
 
-    Must be applied BEFORE the adapter is constructed — the adapter's
-    ``__init__`` does ``import rclpy`` and ``from geometry_msgs.msg
-    import Twist`` lazily, so with these mocks in ``sys.modules`` the
-    lazy imports succeed and the adapter constructs cleanly on this
-    no-rclpy dev box.
-
-    Uses ``monkeypatch.setitem`` so each entry is auto-removed at
-    teardown (threat T-04-01-01: prevent mock leakage between tests).
-    The friendly-error test deliberately does NOT use this fixture; it
-    deletes ``rclpy`` from ``sys.modules`` to exercise the import-failure
-    path.
+    monkeypatch auto-rolls back so the injection cannot leak across tests.
     """
     rclpy = MagicMock(name="rclpy")
-    rclpy.signals.SignalHandlerOptions.NO = "NO"  # sentinel
+    rclpy.signals.SignalHandlerOptions.NO = "NO"
     rclpy.executors.SingleThreadedExecutor = MagicMock(name="SingleThreadedExecutor")
     rclpy.node.Node = MagicMock(name="Node")
 
@@ -88,13 +44,7 @@ def rclpy_mock(monkeypatch):
     yield {"rclpy": rclpy, "Twist": FakeTwist}
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _det(cx=0.5, cy=0.5, bh=0.3):
-    """Build a Detection (mirrors test_mavsdk_drone_adapter.py:49-57)."""
     from robot_follow.follow_api.types import Detection
 
     return Detection(
@@ -108,11 +58,6 @@ def _det(cx=0.5, cy=0.5, bh=0.3):
 
 
 def _default_args(**overrides):
-    """Default argparse Namespace for adapter construction.
-
-    Plan 04-02 adds these flags via ``add_rover_args``; until then the
-    namespace just carries the defaults the adapter would read.
-    """
     defaults = dict(
         cmd_vel_topic="/cmd_vel",
         ros_namespace="",
@@ -123,13 +68,6 @@ def _default_args(**overrides):
 
 
 def _build_adapter(rclpy_mock, **arg_overrides):
-    """Construct ``Ros2RoverAdapter`` against the mocked rclpy.
-
-    Imports the adapter lazily (inside the function body, not at
-    module top) so this test file stays importable regardless of
-    sys.path or rclpy availability — the ``rclpy_mock`` fixture has
-    already populated ``sys.modules`` by the time this runs.
-    """
     from robot_follow.follow_api.config import ControllerConfig
     from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
 
@@ -137,26 +75,11 @@ def _build_adapter(rclpy_mock, **arg_overrides):
     return Ros2RoverAdapter(args, ControllerConfig())
 
 
-# ---------------------------------------------------------------------------
-# TestImportSafety — 2 tests
-# ---------------------------------------------------------------------------
-
-
 class TestImportSafety:
-    """Module import safety and friendly-error behavior."""
-
     def test_module_imports_cleanly_without_rclpy(self):
-        """``import robot_follow.robot_api.adapters.ros2_rover`` succeeds on a
-        no-ROS box (the lazy import is INSIDE ``__init__``, not at module
-        top). Does NOT use the ``rclpy_mock`` fixture — that's the
-        whole point of this test."""
         importlib.import_module("robot_follow.robot_api.adapters.ros2_rover")
 
     def test_friendly_error_when_rclpy_missing(self, monkeypatch):
-        """Constructing the adapter without rclpy in ``sys.modules``
-        raises RuntimeError whose message names ROS 2 and the source
-        command (PITFALLS Pitfall 2). Explicitly REMOVES the mocks —
-        does NOT use the ``rclpy_mock`` fixture."""
         from robot_follow.follow_api.config import ControllerConfig
         from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
 
@@ -164,29 +87,18 @@ class TestImportSafety:
         with pytest.raises(RuntimeError) as exc_info:
             Ros2RoverAdapter(_default_args(), ControllerConfig())
         msg = str(exc_info.value)
-        assert "ROS 2 not" in msg, f"missing 'ROS 2 not' in: {msg!r}"
-        assert "source /opt/ros/humble/setup.bash" in msg, (
-            f"missing setup-bash hint in: {msg!r}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# TestProtocolShape — 3 tests
-# ---------------------------------------------------------------------------
+        assert "ROS 2 not" in msg
+        assert "source /opt/ros/humble/setup.bash" in msg
 
 
 class TestProtocolShape:
-    """``Ros2RoverAdapter`` must structurally implement the Robot protocol."""
-
     def test_implements_robot_protocol(self, rclpy_mock):
-        """``isinstance(adapter, Robot)`` works via @runtime_checkable."""
         from robot_follow.robot_api.robot import Robot
 
         adapter = _build_adapter(rclpy_mock)
         assert isinstance(adapter, Robot)
 
     def test_caps_is_rover_caps(self, rclpy_mock):
-        """caps.axes == {FORWARD, YAW}; yaw_unit == 'rad/s'; ALTITUDE absent."""
         from robot_follow.follow_api.types import Axis
         from robot_follow.robot_api.adapters.ros2_rover import ROVER_CAPS
 
@@ -197,7 +109,6 @@ class TestProtocolShape:
         assert Axis.ALTITUDE not in adapter.caps.axes
 
     def test_has_six_methods(self, rclpy_mock):
-        """Mirrors test_robot_protocol_shape.py:39-48 — hasattr loop."""
         from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
 
         for m in (
@@ -211,32 +122,16 @@ class TestProtocolShape:
             assert hasattr(Ros2RoverAdapter, m), f"missing method: {m}"
 
 
-# ---------------------------------------------------------------------------
-# TestSignalHandlerPreservation — 2 tests (ROVER-02, ROVER-08)
-# ---------------------------------------------------------------------------
-
-
 class TestSignalHandlerPreservation:
-    """ROVER-02 / ROVER-08 — rclpy.init must NOT clobber the SIGINT handler."""
-
     def test_connect_calls_init_with_signal_handler_options_no(self, rclpy_mock):
-        """After ``await adapter.connect()``, ``rclpy.init`` was called
-        with the ``signal_handler_options="NO"`` sentinel."""
         adapter = _build_adapter(rclpy_mock)
         asyncio.run(adapter.connect())
         rclpy = rclpy_mock["rclpy"]
-        # Inspect kwargs of the most recent init call.
-        assert rclpy.init.called, "rclpy.init was never called"
+        assert rclpy.init.called
         _args, kwargs = rclpy.init.call_args
-        assert kwargs.get("signal_handler_options") == "NO", (
-            f"expected signal_handler_options='NO', got {kwargs!r}"
-        )
+        assert kwargs.get("signal_handler_options") == "NO"
 
     def test_sigint_handler_survives_connect(self, rclpy_mock):
-        """ROVER-08 smoke: set a fake SIGINT handler, await connect(),
-        assert the handler is still bound. Mocked rclpy never touches
-        signal state, but this test locks the contract so the production
-        adapter's own ``assert before is after`` is exercised."""
         prior = signal.getsignal(signal.SIGINT)
         try:
             def fake_handler(*_):
@@ -250,17 +145,8 @@ class TestSignalHandlerPreservation:
             signal.signal(signal.SIGINT, prior)
 
 
-# ---------------------------------------------------------------------------
-# TestTwistPublish — 5 tests (ROVER-06)
-# ---------------------------------------------------------------------------
-
-
 class TestTwistPublish:
-    """ROVER-06 — ``send_command`` writes a Twist with no unit conversion."""
-
     def test_publishes_twist_with_forward_and_yaw_rate(self, rclpy_mock):
-        """forward_m_s=1.5, yaw_rate=0.3 → linear.x=1.5, angular.z=0.3,
-        all other Twist components = 0.0."""
         from robot_follow.follow_api.types import RobotCommand, SafetyContext
 
         adapter = _build_adapter(rclpy_mock)
@@ -269,7 +155,7 @@ class TestTwistPublish:
         cmd = RobotCommand(forward_m_s=1.5, yaw_rate=0.3, down_m_s=0.0)
         ctx = SafetyContext.from_detection(_det())
         asyncio.run(adapter.send_command(cmd, ctx))
-        assert adapter._publisher.publish.called, "publisher.publish was not called"
+        assert adapter._publisher.publish.called
         twist = adapter._publisher.publish.call_args.args[0]
         assert twist.linear.x == pytest.approx(1.5)
         assert twist.angular.z == pytest.approx(0.3)
@@ -279,10 +165,7 @@ class TestTwistPublish:
         assert twist.angular.y == pytest.approx(0.0)
 
     def test_send_command_no_conversion_yaw_rate(self, rclpy_mock):
-        """yaw_rate=0.5 rad/s → angular.z==0.5 (NOT 0.5 * π/180).
-        Locks ROVER-06: rover adapter publishes yaw_rate verbatim
-        because RobotCommand.yaw_rate is already in rad/s — no deg→rad
-        conversion (unlike the drone adapter which does deg/s)."""
+        # yaw_rate=0.5 rad/s must hit angular.z verbatim, not 0.5 * π/180.
         from robot_follow.follow_api.types import RobotCommand, SafetyContext
 
         adapter = _build_adapter(rclpy_mock)
@@ -295,7 +178,6 @@ class TestTwistPublish:
         assert twist.angular.z == pytest.approx(0.5)
 
     def test_send_command_short_circuits_on_target_lost(self, rclpy_mock):
-        """Q6 lock: target_lost=True → publisher.publish is NOT called."""
         from robot_follow.follow_api.types import RobotCommand, SafetyContext
 
         adapter = _build_adapter(rclpy_mock)
@@ -303,15 +185,11 @@ class TestTwistPublish:
         asyncio.run(adapter.start_session())
         cmd = RobotCommand(forward_m_s=1.0, yaw_rate=0.5, down_m_s=0.0)
         lost_ctx = SafetyContext.lost(last_target_x=0.7)
-        # Reset publish mock so we measure only this call.
         adapter._publisher.publish.reset_mock()
         asyncio.run(adapter.send_command(cmd, lost_ctx))
-        assert not adapter._publisher.publish.called, (
-            "publish should not be called when target is lost"
-        )
+        assert not adapter._publisher.publish.called
 
     def test_send_zero_publishes_all_zeros(self, rclpy_mock):
-        """``send_zero`` publishes a Twist with all 6 fields = 0.0."""
         adapter = _build_adapter(rclpy_mock)
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
@@ -327,9 +205,6 @@ class TestTwistPublish:
         assert twist.angular.z == pytest.approx(0.0)
 
     def test_on_target_lost_publishes_zero_twist(self, rclpy_mock):
-        """Rover does NOT yaw-spin on target loss — ``on_target_lost``
-        publishes an all-zero Twist (unlike the drone, which spins
-        toward last-seen side)."""
         adapter = _build_adapter(rclpy_mock)
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
@@ -341,37 +216,23 @@ class TestTwistPublish:
         assert twist.angular.z == pytest.approx(0.0)
 
 
-# ---------------------------------------------------------------------------
-# TestLifecycle — 5 tests
-# ---------------------------------------------------------------------------
-
-
 class TestLifecycle:
-    """connect / start_session / shutdown ordering and idempotency."""
-
     def test_start_session_creates_node_and_publisher(self, rclpy_mock):
-        """Node called with namespace=self._namespace; create_publisher
-        called with (Twist, '/cmd_vel', 10)."""
         adapter = _build_adapter(rclpy_mock)
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
         rclpy = rclpy_mock["rclpy"]
-        # The adapter constructs Node(namespace=...); inspect call kwargs.
-        assert rclpy.node.Node.called, "Node constructor was never called"
+        assert rclpy.node.Node.called
         _args, kwargs = rclpy.node.Node.call_args
         assert kwargs.get("namespace") == adapter._namespace
-        # The Node instance must have had create_publisher called on it
-        # with (Twist, "/cmd_vel", 10). Probe via the node mock.
         node_instance = rclpy.node.Node.return_value
         assert node_instance.create_publisher.called
-        publish_args, _pub_kwargs = node_instance.create_publisher.call_args
-        # Args: (Twist, topic, qos_depth)
+        publish_args, _ = node_instance.create_publisher.call_args
         assert publish_args[0] is rclpy_mock["Twist"]
         assert publish_args[1] == "/cmd_vel"
         assert publish_args[2] == 10
 
     def test_start_session_starts_executor_thread(self, rclpy_mock):
-        """After start_session(), adapter._executor_thread.is_alive()."""
         adapter = _build_adapter(rclpy_mock)
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
@@ -381,36 +242,29 @@ class TestLifecycle:
             asyncio.run(adapter.shutdown())
 
     def test_shutdown_idempotent(self, rclpy_mock):
-        """Calling shutdown() twice in a row must not raise."""
         adapter = _build_adapter(rclpy_mock)
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
         asyncio.run(adapter.shutdown())
-        # Second call must be a no-op (not raise).
         asyncio.run(adapter.shutdown())
 
     def test_shutdown_orders_node_destroy_before_try_shutdown(self, rclpy_mock):
-        """PITFALLS 'Looks Done But Isn't' line 197 — destroy_node must
-        be called BEFORE rclpy.try_shutdown(); record mock_calls and
-        compare indices."""
+        # destroy_node must precede try_shutdown — otherwise the node holds a
+        # dangling reference into a torn-down context.
         rclpy = rclpy_mock["rclpy"]
         adapter = _build_adapter(rclpy_mock)
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
-        # Track call order across both mocks via a parent mock.
         parent = MagicMock()
         parent.attach_mock(rclpy.node.Node.return_value.destroy_node, "destroy_node")
         parent.attach_mock(rclpy.try_shutdown, "try_shutdown")
         asyncio.run(adapter.shutdown())
         names = [c[0] for c in parent.mock_calls]
-        assert "destroy_node" in names, f"destroy_node never called: {names!r}"
-        assert "try_shutdown" in names, f"try_shutdown never called: {names!r}"
-        assert names.index("destroy_node") < names.index("try_shutdown"), (
-            f"destroy_node must precede try_shutdown; saw: {names!r}"
-        )
+        assert "destroy_node" in names
+        assert "try_shutdown" in names
+        assert names.index("destroy_node") < names.index("try_shutdown")
 
     def test_shutdown_sets_shutdown_event(self, rclpy_mock):
-        """After shutdown(), adapter._shutdown_event.is_set() is True."""
         adapter = _build_adapter(rclpy_mock)
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
@@ -418,91 +272,37 @@ class TestLifecycle:
         assert adapter._shutdown_event.is_set()
 
 
-# ---------------------------------------------------------------------------
-# TestCustomCliArgs — 3 tests (ROVER-05)
-# ---------------------------------------------------------------------------
-
-
 class TestCustomCliArgs:
-    """ROVER-05 — --cmd-vel-topic / --ros-namespace / --ros-domain-id."""
-
     def test_custom_cmd_vel_topic(self, rclpy_mock):
-        """args.cmd_vel_topic='/rover/cmd_vel' → create_publisher called
-        with that topic."""
         adapter = _build_adapter(rclpy_mock, cmd_vel_topic="/rover/cmd_vel")
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
-        rclpy = rclpy_mock["rclpy"]
-        node_instance = rclpy.node.Node.return_value
+        node_instance = rclpy_mock["rclpy"].node.Node.return_value
         publish_args, _ = node_instance.create_publisher.call_args
         assert publish_args[1] == "/rover/cmd_vel"
 
     def test_custom_namespace(self, rclpy_mock):
-        """args.ros_namespace='robot1' → Node called with namespace='robot1'."""
         adapter = _build_adapter(rclpy_mock, ros_namespace="robot1")
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
-        rclpy = rclpy_mock["rclpy"]
-        _args, kwargs = rclpy.node.Node.call_args
+        _args, kwargs = rclpy_mock["rclpy"].node.Node.call_args
         assert kwargs.get("namespace") == "robot1"
 
     def test_domain_id_sets_env(self, rclpy_mock, monkeypatch):
-        """args.ros_domain_id=7 → os.environ['ROS_DOMAIN_ID']=='7'."""
         monkeypatch.delenv("ROS_DOMAIN_ID", raising=False)
-        adapter = _build_adapter(rclpy_mock, ros_domain_id=7)
-        # Construction (or connect) must have set the env var.
-        # We accept either timing; check after connect just in case.
-        asyncio.run(adapter.connect())
+        _build_adapter(rclpy_mock, ros_domain_id=7)
         assert os.environ.get("ROS_DOMAIN_ID") == "7"
 
 
-# ---------------------------------------------------------------------------
-# TestCompositionRootIntegration — 2 tests (Plan 04-04 wire-through smoke)
-# ---------------------------------------------------------------------------
-
-
 class TestCompositionRootIntegration:
-    """ROVER-08 end-to-end + dispatch contract.
-
-    Plan 04-04 wires run_robot()'s rover branch to construct
-    Ros2RoverAdapter (replacing the Phase 3 03-08 NotImplementedError
-    stub). These tests lock the contract:
-
-    1. The lazy import path ``from robot_follow.robot_api.adapters.ros2_rover
-       import Ros2RoverAdapter`` succeeds and constructs an adapter
-       against the same args namespace argparse would emit for
-       --robot rover.
-
-    2. The ROVER-08 SIGINT-preservation contract survives the full
-       composition-root construction path (not just the adapter
-       unit-test path covered by TestSignalHandlerPreservation
-       earlier in this file). Together those two classes lock the
-       contract at BOTH the unit and integration layers.
-
-    Both tests use the rclpy_mock fixture so they run on this
-    no-rclpy dev box. A real-rclpy SITL smoke is Plan 04-05
-    territory.
-    """
+    """Smoke tests for run_robot()'s rover branch — locks the dispatch
+    contract and the SIGINT preservation at the integration layer."""
 
     def test_run_robot_constructs_ros2_rover_adapter_when_robot_is_rover(self, rclpy_mock):
-        """Dispatch contract: --robot rover → Ros2RoverAdapter.
-
-        Exercises the same lazy-import path Plan 04-04 added inside
-        run_robot()'s rover branch. We don't invoke run_robot directly
-        — that would require GStreamer / shared_state / pipeline-thread
-        mocks far heavier than the contract under test. The contract
-        is two lines: lazy import + adapter construction; both are
-        exercised here.
-        """
-        from types import SimpleNamespace
-        from robot_follow.robot_api.adapters.ros2_rover import (
-            Ros2RoverAdapter,
-        )
+        from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
         from robot_follow.follow_api.config import ControllerConfig
+        from robot_follow.follow_api.types import Axis
 
-        # Mirror what argparse emits for `--robot rover`: the three
-        # ROVER-05 flags (registered by add_rover_args in 04-02)
-        # plus the global --robot.
         args = SimpleNamespace(
             robot="rover",
             cmd_vel_topic="/cmd_vel",
@@ -512,25 +312,10 @@ class TestCompositionRootIntegration:
         adapter = Ros2RoverAdapter(args, ControllerConfig())
         assert isinstance(adapter, Ros2RoverAdapter)
         assert adapter.caps.yaw_unit == "rad/s"
-        # ROVER-07: no ALTITUDE axis even at the composition-root layer.
-        from robot_follow.follow_api.types import Axis
         assert Axis.ALTITUDE not in adapter.caps.axes
 
     def test_sigint_handler_survives_full_composition_root_path(self, rclpy_mock):
-        """ROVER-08 wire-through-the-app smoke.
-
-        Pairs with TestSignalHandlerPreservation::test_sigint_handler_survives_connect
-        above (which covers the same contract at the adapter unit
-        layer). This integration-layer smoke proves the lazy import
-        path Plan 04-04 added doesn't accidentally introduce a SIGINT
-        clobber between args parsing and adapter.connect().
-        """
-        import asyncio
-        import signal
-        from types import SimpleNamespace
-        from robot_follow.robot_api.adapters.ros2_rover import (
-            Ros2RoverAdapter,
-        )
+        from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
         from robot_follow.follow_api.config import ControllerConfig
 
         def fake_handler(*_):
@@ -546,17 +331,7 @@ class TestCompositionRootIntegration:
                 ros_domain_id=0,
             )
             adapter = Ros2RoverAdapter(args, ControllerConfig())
-            # ROVER-08 contract: signal.getsignal(SIGINT) is fake_handler
-            # AFTER await adapter.connect() returns. With rclpy mocked,
-            # rclpy.init does NOT touch signal state — the adapter's
-            # post-init `assert getsignal(SIGINT) is before` is what
-            # we're verifying ran AND passed.
             asyncio.run(adapter.connect())
-            assert signal.getsignal(signal.SIGINT) is fake_handler, (
-                "ROVER-08 contract violated: SIGINT handler was clobbered "
-                "between args parsing and adapter.connect()"
-            )
+            assert signal.getsignal(signal.SIGINT) is fake_handler
         finally:
-            # Restore the pre-test SIGINT handler so subsequent tests
-            # don't see fake_handler.
             signal.signal(signal.SIGINT, original)
