@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 1
+current_plan: 2
 status: executing
-stopped_at: Completed 03-07-PLAN.md
-last_updated: "2026-05-19T16:33:48.208Z"
-last_activity: 2026-05-19 -- Phase 03 planning complete
+stopped_at: Completed 04-04-PLAN.md
+last_updated: "2026-05-20T11:19:50.789Z"
+last_activity: 2026-05-20
 progress:
   total_phases: 6
-  completed_phases: 2
-  total_plans: 25
-  completed_plans: 23
-  percent: 33
+  completed_phases: 3
+  total_plans: 32
+  completed_plans: 31
+  percent: 50
 ---
 
 # Project State
@@ -22,18 +22,18 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 **Core value:** The pipeline keeps a target person in frame and computes safe velocity commands for the robot, even when the target is briefly occluded — without operator input.
-**Current focus:** Phase 03 — abstraction
+**Current focus:** Phase 04 — rover-adapter
 
 ## Current Position
 
-Phase: 03 (abstraction) — EXECUTING
-Plan: 1 of 10
-Current Plan: 1
+Phase: 04 (rover-adapter) — EXECUTING
+Plan: 2 of 14
+Current Plan: 2
 Total Plans in Phase: 14
 Status: Ready to execute
-Last activity: 2026-05-19 -- Phase 03 planning complete
+Last activity: 2026-05-20
 
-Progress: [█████████░] 86%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
@@ -72,6 +72,7 @@ Progress: [█████████░] 86%
 | Phase 03 P05 | 3min | 2 tasks | 3 files |
 | Phase 03-abstraction P06 | 105min | 3 tasks | 5 files |
 | Phase 03 P07 | 35min | 2 tasks | 14 files |
+| Phase 04-rover-adapter P04-04 | ~95 min | 2 tasks tasks | 2 files files |
 
 ## Accumulated Context
 
@@ -185,6 +186,15 @@ Progress: [█████████░] 86%
 - **`git log --follow` confirmed across the move.** Top of follow log shows `e6ba475 (Phase 3 03-05 git mv) → fc111c4 (Phase 2 02-04 CLEAN-13) → d0d4afb (Phase 2 02-04 CLEAN-11) → ...` — full pre-move history preserved. Bisection across the rename works.
 - **`source setup_env.sh` cannot persist across executor `Bash` tool calls** (each call spawns a fresh shell). Worked around by invoking the venv Python directly at `hailo-apps/venv_hailo_apps/bin/python` and prepending `bin/` to `$PATH` for pytest runs that need `robot-follow` / `drone-follow` console scripts on PATH (`test_install_smoke.py`). Documenting so future Phase 3+ executors don't waste time chasing PATH gremlins.
 
+### Phase 4 decisions (2026-05-20, 04-04 execute)
+
+- **Lazy import of `Ros2RoverAdapter` INSIDE the rover dispatch branch, NOT at module top.** Even though `robot_follow.robot_api.adapters.ros2_rover` is importable on a no-rclpy box (its rclpy import is itself lazy per Plan 04-03 contract), keeping the import inside the `elif args.robot == "rover":` branch makes the failure boundary explicit: the friendly ROVER-04 RuntimeError fires only when the user actually selects `--robot rover`, not when they merely import `robot_follow_app` or run `--robot drone --help`. Verification gate `grep -cE '^from robot_follow.robot_api.adapters.ros2_rover' robot_follow/robot_follow_app.py` returns 0 (only the in-function lazy import exists).
+- **`except RuntimeError` catch is narrow — NOT widened to `except (RuntimeError, ConnectionError)`.** Plan-checker watch-list #8: ConnectionError is the failure mode for post-init SIGINT-clobber detection inside the adapter; widening the catch here would mask it. ConnectionError continues to propagate to the outer try/except wrap at the bottom of `run_robot()` (the `LOGGER.warning("[robot] Control loop failed …")` path).
+- **B1 mission_duration deadline wrap (Phase 3 03-07/03-08) + 03-11 ui_state kwarg gap closure both preserved byte-identical.** Rover has no `--mission-duration` flag registered (`add_rover_args` is silent), so `getattr(args, "mission_duration", math.inf)` falls back to `math.inf` and rover has effectively no deadline. The FIRST_COMPLETED race still wraps `run_robot_loop`. The `ui_state=ui_state` kwarg passed to `run_robot_loop` survives untouched — the adapter remains UI-agnostic (axes-only contract); `run_robot_loop` is robot-agnostic and publishes mode + velocity to the web UI via `ui_state` regardless of which adapter is in use.
+- **Integration smoke does NOT subprocess `run_robot()`.** The contract under test is "lazy import + adapter construction + SIGINT survives" — two lines of dispatch + one connect() call. Driving the full `run_robot()` function would require GStreamer / shared_state / pipeline-thread mocks far heavier than the contract being tested. The new `TestCompositionRootIntegration` class instead calls the same statements `run_robot` calls, directly. Pairs with `TestSignalHandlerPreservation` (adapter unit-level ROVER-08) from 04-03 — together they lock the contract at BOTH the unit and integration layers.
+- **Carry-through gate runs against `main()` instead of `run_robot`.** PLAN's command imported `run_robot` directly, which fails because `run_robot` is a closure inside `main()` (lines 512+ post-04-04). Substituted `inspect.getsource(main)` — all 5 substring assertions still hold because run_robot's body is contained in main's source. Tooling adaptation only; no semantic deviation.
+- **`gsd-sdk query state.add-decision` failed silently again (same as 03-03 memo).** Handler expects a "Decisions" section but STATE.md uses the phase-keyed nested style. Fell back to direct edit. Pattern is locked in across Phase 3 + Phase 4 — future executors on this project should expect to edit STATE.md directly for the per-plan decision subsection.
+
 ### Blockers/Concerns
 
 - SIGINT behavior under Humble specifically: smoke-test `SignalHandlerOptions.NO` early in Phase 4 before full adapter build.
@@ -197,6 +207,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-19T13:21:15.980Z
-Stopped at: Completed 03-07-PLAN.md
+Last session: 2026-05-20T11:19:36.743Z
+Stopped at: Completed 04-04-PLAN.md
 Resume file: None

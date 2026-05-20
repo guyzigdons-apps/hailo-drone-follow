@@ -80,7 +80,7 @@ ROS 2 Humble rclpy adapter publishing `geometry_msgs/Twist` on `/cmd_vel`. Backg
 - [ ] **ROVER-05**: `add_rover_args(parser)` registers `--cmd-vel-topic` (default `/cmd_vel`), `--ros-namespace` (default empty), `--ros-domain-id` (default 0). Loaded only when `--robot rover` is selected.
 - [ ] **ROVER-06**: At adapter boundary, `RobotCommand.yaw_rate` is already in `caps.yaw_unit` (rad/s for rover; the controller emitted it in the unit declared by `caps.yaw_unit`); rover adapter assigns it directly to `Twist.angular.z` with **no conversion**. `forward_m_s` passes straight to `Twist.linear.x` (m/s on both sides). The drone adapter analogously passes `RobotCommand.yaw_rate` (deg/s for drone) directly to MAVSDK's `VelocityBodyYawspeed.yawspeed_deg_s`. **No yaw-unit conversion happens in any adapter; the controller speaks each robot's native unit via `caps.yaw_unit`.** (Resolves Phase 3 research Q5 contradiction with the prior ROVER-06 wording.)
 - [ ] **ROVER-07**: `RoverCapabilities = Capabilities(axes=frozenset({Axis.FORWARD, Axis.YAW}), yaw_unit="rad/s")` — the rover has no `ALTITUDE` axis, full stop. No offboard / arm / takeoff lifecycle is exposed via `Capabilities`; `Ros2RoverAdapter.start_session()` is the no-op that captures "rover publishes immediately once the rclpy node is up".
-- [ ] **ROVER-08**: Smoke test on Humble: after `Ros2RoverAdapter.start_session()`, drone-follow's `on_signal` (set in `drone_follow_app.py`) is the active SIGINT handler (`signal.getsignal(signal.SIGINT) is on_signal`). Test runs in CI / dev.
+- [x] **ROVER-08**: Smoke test on Humble: after `Ros2RoverAdapter.start_session()`, drone-follow's `on_signal` (set in `drone_follow_app.py`) is the active SIGINT handler (`signal.getsignal(signal.SIGINT) is on_signal`). Test runs in CI / dev.
 
 ### Rover sim
 
@@ -184,7 +184,7 @@ Tracked but not in current roadmap. All require physical hardware to exercise.
 | ROVER-05 | Phase 4 | Pending |
 | ROVER-06 | Phase 4 | Pending |
 | ROVER-07 | Phase 4 | Pending |
-| ROVER-08 | Phase 4 | Pending |
+| ROVER-08 | Phase 4 | Complete |
 | RSIM-01 | Phase 5 | Pending |
 | RSIM-02 | Phase 5 | Pending |
 | RSIM-03 | Phase 5 | Pending |
