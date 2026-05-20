@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robot abstraction + rover support (sim-only)
-current_plan: 2
+current_plan: 1
 status: executing
 stopped_at: Completed 04-04-PLAN.md
-last_updated: "2026-05-20T11:19:50.789Z"
-last_activity: 2026-05-20
+last_updated: "2026-05-20T14:20:07.319Z"
+last_activity: 2026-05-20 -- Phase 06 execution started
 progress:
   total_phases: 6
-  completed_phases: 3
-  total_plans: 32
-  completed_plans: 31
-  percent: 50
+  completed_phases: 5
+  total_plans: 38
+  completed_plans: 38
+  percent: 83
 ---
 
 # Project State
@@ -22,16 +22,16 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-05-12)
 
 **Core value:** The pipeline keeps a target person in frame and computes safe velocity commands for the robot, even when the target is briefly occluded — without operator input.
-**Current focus:** Phase 04 — rover-adapter
+**Current focus:** Phase 06 — sim-integration
 
 ## Current Position
 
-Phase: 04 (rover-adapter) — EXECUTING
-Plan: 2 of 14
-Current Plan: 2
+Phase: 06 (sim-integration) — EXECUTING
+Plan: 1 of ?
+Current Plan: 1
 Total Plans in Phase: 14
-Status: Ready to execute
-Last activity: 2026-05-20
+Status: Executing Phase 06
+Last activity: 2026-05-20 -- Phase 06 execution started
 
 Progress: [██████████] 97%
 

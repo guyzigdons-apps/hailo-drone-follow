@@ -135,7 +135,7 @@ Validated requirements: VIS-01..03, CTRL-01..06, DRONE-01..03, UI-01..03, REC-01
   3. Ctrl+C from `drone-follow --robot rover` produces zero additional `/cmd_vel` messages within 100 ms; rclpy node is destroyed cleanly before `rclpy.try_shutdown()` (RINT-06 shutdown integration test).
   4. `configs/rover_simulation.json` ships with rover-safe defaults (no altitude knobs, `track_buffer` ≈ 30 frames, lower `kp_yaw`); `configs/drone_simulation.json` (or equivalent) still uses original values; both load without validation errors (RINT-01, RINT-03).
 **Plans**: 7 plans
-  - [ ] 06-01-PLAN.md — Wave 1: rover_simulation.json + ControllerConfig ByteTracker fields + SafetyContext bbox_bottom_norm (RINT-01)
+  - [x] 06-01-PLAN.md — Wave 1: rover_simulation.json + ControllerConfig ByteTracker fields + SafetyContext bbox_bottom_norm (RINT-01)
   - [ ] 06-02-PLAN.md — Wave 1: sim/rover/README.md port-isolation table append (RINT-05)
   - [ ] 06-03-PLAN.md — Wave 2: ByteTracker config-driven refactor in hailo_drone_detection_manager + create_app wiring (RINT-03)
   - [ ] 06-04-PLAN.md — Wave 2: rover bottom-edge slow-down in ros2_rover.py.send_command (RINT-02)
@@ -155,4 +155,4 @@ Phases 1 → 2 → 3 → (4 and 5 in parallel) → 6
 | 3. Abstraction | v1.1 | 12/12 | In Progress (gate failed) |  |
 | 4. Rover adapter | v1.1 | 4/5 | In Progress|  |
 | 5. Rover sim | v1.1 | 0/6 | Planned | - |
-| 6. Sim integration | v1.1 | 0/TBD | Not started | - |
+| 6. Sim integration | v1.1 | 1/7 | In Progress|  |
