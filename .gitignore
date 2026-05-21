@@ -11,8 +11,15 @@ venv/
 *.log
 logs/
 recordings/
-robot_follow/ui/node_modules/
-robot_follow/ui/build/
+node_modules/
+
+# Python tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # hailo-apps and sim/PX4-Autopilot are tracked as git submodules — see
 # .gitmodules. Don't ignore them.
@@ -35,3 +42,7 @@ txrx.key
 
 # GStreamer Shark profiling output
 gstshark_*/
+
+# Generated architecture decks (the .pptx.py script is the source; the .pptx
+# is the render).
+*.pptx

@@ -1,12 +1,17 @@
 # Robot Follow
 
-AI-powered person-following robot application using Hailo NPU for real-time detection, ByteTracker for multi-object tracking, and MAVSDK for PX4 flight control. Includes ReID (re-identification) to recover a lost target by appearance.
+AI-powered person-following robot application using Hailo NPU for real-time detection, ByteTracker for multi-object tracking, and a pluggable robot-adapter layer for control. Ships with two adapters out of the box:
+
+- **`--robot drone`** *(default)* — MAVSDK over USB serial / UDP to a PX4 flight controller (e.g. Cube Orange+).
+- **`--robot rover`** — `geometry_msgs/Twist` on `/cmd_vel` for a skid-steer rover via ROS 2.
+
+Includes ReID (re-identification) to recover a lost target by appearance.
 
 Runs on Raspberry Pi 5 + Hailo-8L or on an x86_64 dev machine with a Hailo-8 PCIe card.
 
 For complete setup and deployment instructions with OpenHD, see [SETUP_GUIDE.md](SETUP_GUIDE.md).
 
-> **Note:** As of v1.1 the Python package is `robot_follow` (formerly `drone_follow`) and the primary CLI is `robot-follow`. The `drone-follow` console-script alias is preserved permanently — it maps to the same `main()` entry point so the boot service, `~/Desktop/drone-follow.conf`, and existing field deployments keep working unchanged. Both `robot-follow --help` and `drone-follow --help` produce identical output.
+> **Note:** As of v1.1 the Python package is `robot_follow` (formerly `drone_follow`) and the primary CLI is `robot-follow`. The `--robot {drone,rover}` flag selects which adapter to load (default `drone`). The `drone-follow` console-script alias is preserved permanently — it maps to the same `main()` entry point so the boot service, `~/Desktop/drone-follow.conf`, and existing field deployments keep working unchanged. Both `robot-follow --help` and `drone-follow --help` produce identical output.
 
 ## Installation
 
@@ -148,10 +153,11 @@ robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 
 | Flag | Default | Description |
 |---|---|---|
+| `--robot {drone,rover}` | `drone` | Robot adapter. `drone` = MAVSDK / PX4; `rover` = ROS 2 `geometry_msgs/Twist` on `/cmd_vel`. The `--help` output adapts to the selected adapter (drone-only flags disappear under `--robot rover` and vice versa). |
 | `--input SOURCE` | — | Camera source: `rpi`, `usb`, `udp://host:port`, `shm://path`, or file path |
-| `--serial` | off | Connect via USB serial (`/dev/ttyACM0`); overrides `--connection` |
+| `--serial` | off | Connect via USB serial (`/dev/ttyACM0`); overrides `--connection`. *(drone only)* |
 | `--connection URL` | `udpin://0.0.0.0:14540` | MAVSDK connection string |
-| `--takeoff-landing` | off | Auto arm/takeoff/land. Without this, the pilot switches to OFFBOARD via GCS. |
+| `--takeoff-landing` | off | Auto arm/takeoff/land. Without this, the pilot switches to OFFBOARD via GCS. *(drone only)* |
 | `--display` | auto-on when no UI flag | Local X11 window with overlay (tile rectangles stripped, target person's bbox highlighted via class-id remap). |
 | `--webui` | off | Web UI with live MJPEG video and click-to-follow (port 5001). Mutually exclusive with `--openhd`. |
 | `--openhd` | off | Send overlay video to OpenHD via UDP RTP. Mutually exclusive with `--webui`. |
@@ -273,6 +279,42 @@ robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 
 **USB camera with sim:** Always add `--yaw-only` — forward commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
 
+## Rover Mode
+
+Run with the rover adapter to drive a skid-steer rover (diff-drive plugin in sim; real hardware needs a ROS 2 base subscribing to `/cmd_vel`). The controller emits `RobotCommand.yaw_rate` in **rad/s** (rover) vs **deg/s** (drone); the adapter publishes `geometry_msgs/Twist` with NED→ENU sign correction and applies its own EMA smoothing.
+
+Prerequisites: ROS 2 Humble installed at `/opt/ros/humble`, `ros-humble-geometry-msgs`, `ros-humble-ros-base`. Bring them in with `sudo ./install.sh --rover` (idempotent; pulls the apt deps plus the Gazebo Garden bits for sim).
+
+**Run against a real rover:**
+
+```bash
+source /opt/ros/humble/setup.bash
+source setup_env.sh
+robot-follow --robot rover --input usb --webui \
+    --config configs/rover_simulation.json
+```
+
+**Run against the bundled rover sim** (Gazebo + diff-drive model + ros_gz_bridge for `/cmd_vel`):
+
+```bash
+# Terminal 1 — sim:
+sim/rover/start_rover_sim.sh                      # default world (walk_across_then_approach)
+sim/rover/start_rover_sim.sh --world random_walk  # alternate
+
+# Terminal 2 — follow:
+source /opt/ros/humble/setup.bash
+source setup_env.sh
+robot-follow --robot rover --input udp://0.0.0.0:5600 \
+    --config configs/rover_simulation.json
+```
+
+Rover-specific behaviours (rover adapter only — drone path untouched):
+
+- **Bottom-edge stop** — when the person's bbox bottom enters the lowest 15% of the frame (`bbox_bottom_norm >= 0.85`), forward is overridden to 0.0; yaw stays active so the rover can still rotate to recenter. Prevents close-range collisions where the person is below the camera's depression angle.
+- **Yaw-aware forward attenuation** — positive forward is scaled by `max(0, 1 - |yaw|/max_yawspeed)`. Skid-steer can't curve, so driving forward at full speed while turning hard slides the person off the side of the frame; the rover effectively pivots first when the target is far off-center, then accelerates as it re-centers. Retreat (negative forward) is unattenuated so the rover can back up and turn simultaneously to recover a near-edge target.
+
+See [`sim/rover/README.md`](sim/rover/README.md) for the full sim story.
+
 ## OpenHD Integration
 
 For FPV video with detection overlays streamed to an OpenHD ground station:
@@ -393,22 +435,26 @@ Uninstall: `sudo scripts/boot/uninstall.sh`
 
 ```
 robot_follow/
-  follow_api/          Pure domain logic (no HW deps) — types, config, controller math, shared state
-  drone_api/           MAVSDK flight controller adapter — offboard velocity commands, takeoff/landing
+  follow_api/          Pure domain logic (no HW deps) — types, Capabilities, config, controller math, shared state
+  robot_api/           Robot abstraction — Robot protocol, orchestrator, and per-robot adapters
+    adapters/
+      mavsdk_drone.py  PX4 offboard velocity / takeoff / landing / altitude-hold P
+      ros2_rover.py    geometry_msgs/Twist on /cmd_vel (skid-steer); rover-specific safety overrides
   pipeline_adapter/    Hailo/GStreamer pipeline, ByteTracker, ReID manager
   servers/             HTTP/UDP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001), OpenHD parameter bridge (UDP 5510/5511)
   ui/                  React web dashboard
   robot_follow_app.py  Composition root and CLI entrypoint
 reid_analysis/         ReID embedding extraction and gallery matching strategies
-configs/               Real-drone controller presets (outdoor_follow, etc.)
+configs/               Controller presets (outdoor_follow, rover_simulation, etc.)
 sim/
   PX4-Autopilot/       PX4 git submodule (v1.14.0)
   bridge/              Gazebo camera -> UDP video bridge
-  configs/             Simulation parameter presets
+  configs/             Drone simulation parameter presets
   worlds/              Gazebo world SDF files
   mavlink_relay.py     UDP relay for remote simulation
-  setup_sim.sh         One-time sim setup
-  start_sim.sh         Launch PX4 SITL + Gazebo + bridge
+  setup_sim.sh         One-time sim setup (drone)
+  start_sim.sh         Launch PX4 SITL + Gazebo + bridge (drone)
+  rover/               Rover sim — diff-drive SDF model, worlds, start_rover_sim.sh
 ```
 
 **Data flow:**
@@ -416,14 +462,16 @@ sim/
 Camera -> GStreamer -> Hailo NPU (YOLOv8n) -> ByteTracker
   -> Target Selection (auto: largest / locked: specific ID)
   -> ReID (if locked target lost, --reid-timeout) -> SharedDetectionState
-  -> Control Loop (10 Hz) -> MAVSDK Offboard Velocity -> PX4 Flight Controller
+  -> Control Loop (10 Hz) -> Robot Adapter
+       drone: MAVSDK offboard velocity -> PX4 Flight Controller
+       rover: geometry_msgs/Twist     -> ROS 2 /cmd_vel
 ```
 
-The `follow_api` package has zero external dependencies, making the controller logic testable without hardware.
+The `follow_api` package has zero external dependencies (no MAVSDK, no rclpy, no Hailo), making the controller logic testable without hardware. Robot-specific behaviour (drone tilt-retreat, rover bottom-edge stop, rover yaw-aware forward attenuation) lives inside each adapter, never in the controller.
 
 ## Control Surfaces
 
-drone-follow exposes the same control surface through three independent channels — they all read and write the **same** in-process `ControllerConfig`, `FollowTargetState`, and `SharedUIState`, so any of them can be used interchangeably:
+robot-follow exposes the same control surface through three independent channels — they all read and write the **same** in-process `ControllerConfig`, `FollowTargetState`, and `SharedUIState`, so any of them can be used interchangeably:
 
 | Channel | Started by | Edits config | Selects target | Toggles recording | Reads detections |
 |---|---|---|---|---|---|
