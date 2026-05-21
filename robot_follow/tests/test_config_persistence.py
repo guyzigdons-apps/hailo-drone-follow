@@ -217,7 +217,15 @@ def test_rover_simulation_json_loads_with_rover_safe_defaults():
 
     # Rover-safe controller knobs
     assert cfg.yaw_only is False, "rover must drive forward to follow"
-    assert cfg.kp_yaw == 3.0, "rover-safe yaw gain (vs drone 4.0)"
+    # kp_yaw is in caps.yaw_unit (drone deg/s, rover rad/s); same numeric
+    # value is ~57× larger physical rate for the rover (1 rad ≈ 57 deg).
+    # 0.05 rad/s per √deg is the rover-safe equivalent of the drone's
+    # 4.0 deg/s per √deg gain (sized to give similar physical turn rate).
+    assert cfg.kp_yaw == 0.05, "rover-safe yaw gain (in rad/s units)"
+    assert cfg.max_yawspeed == 0.8, (
+        "rover-safe max yaw clamp in rad/s; diff-drive plugin caps at 2.0 "
+        "rad/s, so the controller-side clamp must be below that to be useful"
+    )
     assert cfg.max_forward == 1.0, "rover-safe top speed"
     assert cfg.max_backward == 1.0
     assert cfg.max_forward_accel == 0, "slew cap disabled for rover"

@@ -1,6 +1,7 @@
 {
   "yaw_only": false,
-  "kp_yaw": 3.0,
+  "kp_yaw": 0.05,
+  "max_yawspeed": 0.8,
   "max_forward": 1.0,
   "max_backward": 1.0,
   "max_forward_accel": 0,
