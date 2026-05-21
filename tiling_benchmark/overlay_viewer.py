@@ -45,8 +45,10 @@ try:
     # Allow `python tiling_benchmark/overlay_viewer.py` (script mode) AND
     # `python -m tiling_benchmark.overlay_viewer` (module mode).
     from .preview_cache import PreviewCache
+    from .analyze_pxt import is_phantom
 except ImportError:  # pragma: no cover - script-mode fallback
     from preview_cache import PreviewCache  # type: ignore
+    from analyze_pxt import is_phantom  # type: ignore
 
 # Distinct BGR colours — matches bench/overlay_dets.py palette order.
 PALETTE = [
@@ -229,6 +231,13 @@ class OverlayViewer:
         # Phase 2 state: live confidence floor + tile overlay controls.
         self._conf_min_var = tk.DoubleVar(value=self.conf_min)
         self._show_tiles_var = tk.BooleanVar(value=False)
+        # Phantom filter: default ON. Hides class-0 person detections whose
+        # bbox is shaped/sized like a parent tile (yolov8n_4_classes_vga
+        # low-contrast-tile artefact; see analyze_pxt.is_phantom).
+        self._hide_phantoms_var = tk.BooleanVar(value=True)
+        # Per-run phantom count for the current frame (rebuilt each render
+        # when hiding is ON; used for the HUD legend).
+        self._phantoms_hidden_per_run: dict[str, int] = {}
         # Phase 4 state: sidebar zoom slider (two-way synced with wheel) +
         # opt-in native-res zoom (full-res cv2 decode past cache density).
         self._zoom_var = tk.DoubleVar(value=1.0)
@@ -313,6 +322,16 @@ class OverlayViewer:
         # full-res cv2 decode for pixel-accurate inspection (slow).
         tk.Checkbutton(tiles_lf, text="Native-res when zoomed",
                        variable=self._native_zoom_var,
+                       fg="white", bg="#202020",
+                       activebackground="#202020",
+                       activeforeground="white",
+                       selectcolor="#404040",
+                       command=self._render).pack(anchor="w")
+        # Phantom filter: hides class-0 person detections matching the
+        # tile-shape / large-person fallback heuristic (see
+        # analyze_pxt.is_phantom).
+        tk.Checkbutton(tiles_lf, text="Hide phantoms",
+                       variable=self._hide_phantoms_var,
                        fg="white", bg="#202020",
                        activebackground="#202020",
                        activeforeground="white",
@@ -734,15 +753,21 @@ class OverlayViewer:
 
         # Draw bboxes for visible runs.
         conf_min = float(self._conf_min_var.get())
+        hide_phantoms = bool(self._hide_phantoms_var.get())
+        self._phantoms_hidden_per_run = {}
         visible_runs: list[Run] = []
         for r in self.runs:
             if not r.visible_var.get():
                 continue
             visible_runs.append(r)
             colour = _rgb(r.colour_bgr)
+            n_phantoms = 0
             for det in r.idx.get(self.frame_no, []):
                 conf = float(det.get("confidence", 0.0))
                 if conf < conf_min:
+                    continue
+                if hide_phantoms and r.tile_rects and is_phantom(det, r.tile_rects):
+                    n_phantoms += 1
                     continue
                 bx, by, bw, bh = det["bbox"]
                 # bbox in source-px
@@ -763,6 +788,8 @@ class OverlayViewer:
                 cv2.putText(disp, tag, (dx1, max(15, dy1 - 4)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1,
                             cv2.LINE_AA)
+            if hide_phantoms and n_phantoms > 0:
+                self._phantoms_hidden_per_run[r.label] = n_phantoms
 
         # Tile rectangles, drawn between bboxes and HUD so the bboxes win
         # the foreground but the HUD overpaints the tiles where they
@@ -910,7 +937,9 @@ class OverlayViewer:
         for r in visible_runs:
             # disp is RGB; palette is BGR — swap channels for legend swatches.
             rgb_colour = (r.colour_bgr[2], r.colour_bgr[1], r.colour_bgr[0])
-            cv2.putText(disp, r.label, (pad, y),
+            n_ph = self._phantoms_hidden_per_run.get(r.label, 0)
+            txt = r.label if n_ph == 0 else f"{r.label}  (phantoms hidden: {n_ph})"
+            cv2.putText(disp, txt, (pad, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                         rgb_colour, 2, cv2.LINE_AA)
             y += line_h

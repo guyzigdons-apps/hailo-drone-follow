@@ -94,22 +94,66 @@ def _compute_tile_rects(config: dict) -> list[tuple[float, float, float, float]]
     return rects
 
 
-def _is_tile_shaped(bbox: list, tile_rects: list[tuple[float, float, float, float]],
-                    tol: float) -> bool:
-    """True if bbox (x,y,w,h normalized) matches any tile rect within tol."""
+def is_phantom(det: dict, tile_rects: list[tuple[float, float, float, float]],
+               tol: float = 0.01) -> bool:
+    """Return True if det is a class-0 phantom against the given tile grid.
+
+    A detection is treated as a phantom iff BOTH of these hold:
+      1. The detection is class-0 (person). We check ``label == 'person'``
+         (case-insensitive) OR ``class_id == 1`` for HEFs where the label
+         string is missing. ``vehicle``/``face``/``license_plate`` are
+         NEVER filtered — the artefact is class-0-specific.
+      2. The bbox matches a tile rectangle in one of two ways:
+         (a) Exact tile shape — ``(x, y, w, h)`` agrees with some tile rect
+             within ``tol`` (normalized).
+         (b) Large-person fallback — the bbox area is >=75% of a tile's
+             area AND its centre lies within ``0.5 * tile_w`` (and tile_h)
+             of that tile's centre. Catches "almost-tile" variants like
+             ``bbox=(0.006, 0.007, 0.989, 0.991)`` that don't satisfy (a)
+             but are clearly the same artefact.
+
+    ``tile_rects`` is the list of normalized (x, y, w, h) rectangles from
+    the originating run's tiling config; reconstruct it with
+    :func:`_compute_tile_rects`.
+    """
     if not tile_rects:
         return False
-    x, y, w, h = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+    label = (det.get("label") or "").lower()
+    if label != "person" and det.get("class_id") != 1:
+        return False
+    bbox = det.get("bbox") or []
+    if len(bbox) < 4:
+        return False
+    bx, by, bw, bh = (float(bbox[0]), float(bbox[1]),
+                      float(bbox[2]), float(bbox[3]))
+    det_area = bw * bh
+    det_cx, det_cy = bx + bw / 2.0, by + bh / 2.0
     for (tx, ty, tw, th) in tile_rects:
-        if (abs(x - tx) <= tol and abs(y - ty) <= tol
-                and abs(w - tw) <= tol and abs(h - th) <= tol):
+        # (a) exact-tile match
+        if (abs(bx - tx) < tol and abs(by - ty) < tol
+                and abs(bw - tw) < tol and abs(bh - th) < tol):
             return True
+        # (b) large-person fallback
+        tile_area = tw * th
+        if tile_area > 0 and det_area >= 0.75 * tile_area:
+            t_cx, t_cy = tx + tw / 2.0, ty + th / 2.0
+            if (abs(det_cx - t_cx) < 0.5 * tw
+                    and abs(det_cy - t_cy) < 0.5 * th):
+                return True
     return False
 
 
+# Back-compat alias — the previous filter is now subsumed by is_phantom.
+def _is_tile_shaped(bbox: list,
+                    tile_rects: list[tuple[float, float, float, float]],
+                    tol: float) -> bool:
+    return is_phantom({"label": "person", "bbox": bbox}, tile_rects, tol)
+
+
 def filter_tile_shaped(frames_doc: dict, tol: float) -> tuple[int, int]:
-    """Mutate frames_doc in place, removing detections whose bbox matches any
-    tile rectangle of the doc's own config. Returns (dropped, original_total)."""
+    """Mutate frames_doc in place, removing class-0 phantom detections
+    (per :func:`is_phantom`) using the doc's own config's tile grid.
+    Returns ``(dropped, original_total)``."""
     cfg = frames_doc.get("config", {}) or {}
     tile_rects = _compute_tile_rects(cfg)
     if not tile_rects:
@@ -120,10 +164,46 @@ def filter_tile_shaped(frames_doc: dict, tol: float) -> tuple[int, int]:
         keep = []
         for det in fr["detections"]:
             total += 1
-            if _is_tile_shaped(det.get("bbox", []), tile_rects, tol):
+            if is_phantom(det, tile_rects, tol):
                 dropped += 1
                 continue
             keep.append(det)
+        fr["detections"] = keep
+    return dropped, total
+
+
+def filter_classes(frames_doc: dict,
+                   keep_labels: list[str] | None,
+                   keep_class_ids: list[int] | None) -> tuple[int, int]:
+    """Mutate frames_doc in place, dropping detections whose label is not
+    in ``keep_labels`` AND whose class_id is not in ``keep_class_ids``.
+
+    Either or both filter inputs may be None/empty. If both are empty,
+    nothing is filtered. Returns ``(dropped, original_total)``.
+    """
+    keep_label_set: set[str] | None = (
+        {s.lower() for s in keep_labels} if keep_labels else None
+    )
+    keep_cid_set: set[int] | None = (
+        {int(c) for c in keep_class_ids} if keep_class_ids else None
+    )
+    if keep_label_set is None and keep_cid_set is None:
+        return 0, sum(len(fr["detections"]) for fr in frames_doc["frames"])
+    dropped = 0
+    total = 0
+    for fr in frames_doc["frames"]:
+        keep = []
+        for det in fr["detections"]:
+            total += 1
+            label = (det.get("label") or "").lower()
+            cid = det.get("class_id")
+            label_ok = keep_label_set is not None and label in keep_label_set
+            cid_ok = (keep_cid_set is not None and cid is not None
+                      and int(cid) in keep_cid_set)
+            if label_ok or cid_ok:
+                keep.append(det)
+            else:
+                dropped += 1
         fr["detections"] = keep
     return dropped, total
 
@@ -311,23 +391,56 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, default=None,
                     help="Optional path to dump the full analysis as JSON.")
     ap.add_argument("--drop-tile-shaped", action="store_true",
-                    help="Drop detections whose bbox matches a tile rectangle in the "
-                         "originating config's grid (within tolerance). Filters out "
-                         "phantom class-person detections caused by yolov8n_4_classes "
-                         "emitting bbox~(0,0,1,1) on low-contrast tiles.")
+                    help="Drop class-0 'person' phantom detections caused by the "
+                         "yolov8n_4_classes_vga HEF on low-contrast tiles. Uses the "
+                         "combined filter: (a) exact tile-rect match OR (b) area >= "
+                         "75%% of a tile centered within 0.5*tile_w of the tile centre. "
+                         "vehicle/face/license_plate are never filtered.")
     ap.add_argument("--tile-shape-tol", type=float, default=0.01,
-                    help="Normalized tolerance for the tile-shape match (default 0.01).")
+                    help="Normalized tolerance for the exact-tile-shape arm of the "
+                         "phantom filter (default 0.01).")
+    ap.add_argument("--filter-classes", nargs="+", default=None,
+                    metavar="LABEL",
+                    help="Keep only detections whose label is in this list (case-"
+                         "insensitive). Use to restrict to e.g. 'person vehicle' "
+                         "for downstream yolov8m runs. Default: keep all classes.")
+    ap.add_argument("--keep-classes-from-class-ids", nargs="+", type=int,
+                    default=None, metavar="CID",
+                    help="Same as --filter-classes but matches on integer class_id "
+                         "(useful for HEFs without label strings). May be combined "
+                         "with --filter-classes; a detection is kept if it matches "
+                         "either.")
     args = ap.parse_args(argv)
+
+    def _apply_filters(doc: dict, file_label: str) -> None:
+        if args.drop_tile_shaped:
+            dropped, total = filter_tile_shaped(doc, args.tile_shape_tol)
+            pct = (100.0 * dropped / total) if total else 0.0
+            print(f"[phantom] {file_label}: dropped {dropped} phantoms "
+                  f"({pct:.1f}%)")
+        if args.filter_classes or args.keep_classes_from_class_ids:
+            dropped, total = filter_classes(
+                doc,
+                args.filter_classes,
+                args.keep_classes_from_class_ids,
+            )
+            pct = (100.0 * dropped / total) if total else 0.0
+            keep_desc_parts: list[str] = []
+            if args.filter_classes:
+                keep_desc_parts.append(",".join(args.filter_classes))
+            if args.keep_classes_from_class_ids:
+                keep_desc_parts.append(
+                    "cid={" + ",".join(str(c) for c in
+                                       args.keep_classes_from_class_ids) + "}"
+                )
+            keep_desc = " | ".join(keep_desc_parts) or "<none>"
+            print(f"[class] {file_label}: dropped {dropped} not-in[{keep_desc}] "
+                  f"({pct:.1f}%)")
 
     gt_doc = load_frames(args.gt)
     gt_total_before = sum(len(f["detections"]) for f in gt_doc["frames"])
     print(f"GT: {args.gt} ({len(gt_doc['frames'])} frames, {gt_total_before} dets)")
-
-    if args.drop_tile_shaped:
-        dropped, total = filter_tile_shaped(gt_doc, args.tile_shape_tol)
-        pct = (100.0 * dropped / total) if total else 0.0
-        print(f"[phantom filter] GT {args.gt.stem}: "
-              f"dropped {dropped} of {total} detections ({pct:.1f}%)")
+    _apply_filters(gt_doc, args.gt.name)
 
     bins = DEFAULT_BINS_PX
     results: list[tuple[str, dict]] = []
@@ -337,17 +450,16 @@ def main(argv=None) -> int:
                  "bins_px": [list(b) for b in bins],
                  "drop_tile_shaped": bool(args.drop_tile_shaped),
                  "tile_shape_tol": float(args.tile_shape_tol),
+                 "filter_classes": list(args.filter_classes) if args.filter_classes else None,
+                 "keep_classes_from_class_ids": list(args.keep_classes_from_class_ids)
+                                                 if args.keep_classes_from_class_ids else None,
                  "configs": {}}
     for p in args.pred:
         pred_doc = load_frames(p)
         label = pred_doc.get("label") or p.stem
         n_dets = sum(len(f["detections"]) for f in pred_doc["frames"])
         print(f"Pred: {p} (label={label!r}, {n_dets} dets)")
-        if args.drop_tile_shaped:
-            dropped, total = filter_tile_shaped(pred_doc, args.tile_shape_tol)
-            pct = (100.0 * dropped / total) if total else 0.0
-            print(f"[phantom filter] pred {label}: "
-                  f"dropped {dropped} of {total} detections ({pct:.1f}%)")
+        _apply_filters(pred_doc, p.name)
         r = analyze_one(gt_doc, pred_doc, args.iou, args.video_h, bins)
         results.append((label, r))
         full_dump["configs"][label] = r
