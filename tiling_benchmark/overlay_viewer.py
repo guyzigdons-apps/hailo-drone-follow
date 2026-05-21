@@ -229,6 +229,11 @@ class OverlayViewer:
         # Phase 2 state: live confidence floor + tile overlay controls.
         self._conf_min_var = tk.DoubleVar(value=self.conf_min)
         self._show_tiles_var = tk.BooleanVar(value=False)
+        # Phase 4 state: sidebar zoom slider (two-way synced with wheel) +
+        # opt-in native-res zoom (full-res cv2 decode past cache density).
+        self._zoom_var = tk.DoubleVar(value=1.0)
+        self._suppress_zoom_callback = False
+        self._native_zoom_var = tk.BooleanVar(value=False)
         # Tile-source radio holds the label of the currently selected run.
         # Default to the first run (all runs start visible).
         self._tile_source_var = tk.StringVar(
@@ -302,6 +307,17 @@ class OverlayViewer:
         self._tile_source_radio_frame = tk.Frame(tiles_lf, bg="#202020")
         self._tile_source_radio_frame.pack(fill=tk.X, padx=(16, 0))
         self._rebuild_tile_source_radios()
+        # Phase 4: opt-in native-res zoom. When OFF (default), zooming past
+        # cache resolution stays on the cache with INTER_NEAREST upscale (fast
+        # but pixelated). When ON, restores the Phase-3 auto-fallback to a
+        # full-res cv2 decode for pixel-accurate inspection (slow).
+        tk.Checkbutton(tiles_lf, text="Native-res when zoomed",
+                       variable=self._native_zoom_var,
+                       fg="white", bg="#202020",
+                       activebackground="#202020",
+                       activeforeground="white",
+                       selectcolor="#404040",
+                       command=self._render).pack(anchor="w")
 
         # Conf-min slider (live).
         conf_lf = tk.LabelFrame(sidebar, text="Confidence",
@@ -352,6 +368,23 @@ class OverlayViewer:
                                 selectcolor="#0066cc",
                                 command=self._on_speed_change)
             rb.pack(side=tk.LEFT, padx=1)
+
+        # Zoom slider (two-way synced with mouse-wheel zoom).
+        zoom_lf = tk.LabelFrame(sidebar, text="Zoom", fg="white",
+                                bg="#202020", labelanchor="nw",
+                                padx=6, pady=4)
+        zoom_lf.pack(fill=tk.X, padx=6, pady=4)
+        self._zoom_scale = tk.Scale(
+            zoom_lf, from_=ZOOM_MIN, to=ZOOM_MAX, resolution=0.1,
+            orient=tk.HORIZONTAL,
+            variable=self._zoom_var,
+            bg="#202020", fg="white",
+            troughcolor="#404040",
+            highlightthickness=0,
+            label="Zoom",
+            command=self._on_zoom_slider_changed,
+        )
+        self._zoom_scale.pack(fill=tk.X)
 
         # Transport
         tr_lf = tk.LabelFrame(sidebar, text="Transport", fg="white",
@@ -444,6 +477,32 @@ class OverlayViewer:
         # Slider drag callback. The DoubleVar already holds the new value.
         self._render()
 
+    def _on_zoom_slider_changed(self, _val: str) -> None:
+        # If the wheel handler (or reset) just programmatically set
+        # _zoom_var to keep the slider in sync, swallow the resulting
+        # callback to avoid an infinite render loop.
+        if self._suppress_zoom_callback:
+            return
+        new_zoom = float(self._zoom_var.get())
+        new_zoom = max(ZOOM_MIN, min(ZOOM_MAX, new_zoom))
+        if new_zoom == self.zoom_factor:
+            return
+        # Slider has no cursor anchor — zoom around the current viewport
+        # centre (i.e. keep pan_x/pan_y as-is). The clamping in
+        # _viewport_src_rect will re-centre if the new viewport overruns
+        # the source extents.
+        self.zoom_factor = new_zoom
+        self._render()
+
+    def _sync_zoom_slider(self) -> None:
+        """Push self.zoom_factor into the slider DoubleVar without firing
+        the slider's command callback (avoids infinite recursion)."""
+        self._suppress_zoom_callback = True
+        try:
+            self._zoom_var.set(self.zoom_factor)
+        finally:
+            self._suppress_zoom_callback = False
+
     def _bind_events(self) -> None:
         # Canvas mouse
         self.canvas.bind("<MouseWheel>", self._on_wheel)        # Win/macOS
@@ -530,11 +589,12 @@ class OverlayViewer:
             return float(self.src_w)
         return cw / scale
 
-    def _should_use_cache(self) -> bool:
-        """True when zoom is moderate enough that cached preview pixels are
-        at least as dense (per source-pixel) as what we'd render to canvas.
+    def _cache_is_dense_enough(self) -> bool:
+        """True when cached preview pixels are at least as dense (per
+        source-pixel) as what we'd render to canvas — i.e. the cache has not
+        been zoomed past its native resolution.
 
-        Per spec: prefer cache when
+        Threshold (per Phase-3 spec): cache wins when
             canvas_w / effective_src_w_visible <= cache_w / source_w
         i.e. the per-canvas-pixel density of source-pixels we'd be sampling
         does not exceed what the cache stores per source-pixel.
@@ -548,6 +608,23 @@ class OverlayViewer:
         canvas_density = cw / viewport_src_w           # canvas-px / src-px
         cache_density = self.cache.frame_shape[1] / self.src_w
         return canvas_density <= cache_density
+
+    def _should_use_cache(self) -> bool:
+        """Whether to read this frame from the preview cache.
+
+        Default (native-res checkbox OFF): always use the cache when one is
+        available — even past its native resolution. This costs an
+        INTER_NEAREST upscale (pixelated but fast) and avoids the ~60 ms
+        HEVC software decode that the full-res path requires per frame.
+
+        Native-res checkbox ON: fall back to the Phase-3 auto-detection —
+        cache when its density covers the canvas, full-res otherwise.
+        """
+        if self.cache is None:
+            return False
+        if not self._native_zoom_var.get():
+            return True
+        return self._cache_is_dense_enough()
 
     def _full_res_get(self, n: int) -> np.ndarray:
         """Return a full-resolution RGB frame for frame n, using a small LRU
@@ -779,9 +856,17 @@ class OverlayViewer:
                   tile_source_run: "Run | None" = None,
                   tile_rects_drawn: int = 0,
                   source_tag: str = "full") -> None:
+        # If the frame came from the cache but the user has zoomed past the
+        # cache's native resolution, badge the HUD with "px*" — they're
+        # looking at upscaled cache pixels, not real source pixels. The "*"
+        # hints "would be sharper with native-res zoom enabled".
+        if source_tag == "cache" and not self._cache_is_dense_enough():
+            badge = "cache px*"
+        else:
+            badge = source_tag
         lines: list[str] = []
         lines.append(
-            f"frame {self.frame_no} / {self.total_frames - 1}  [{source_tag}]"
+            f"frame {self.frame_no} / {self.total_frames - 1}  [{badge}]"
         )
         lines.append(f"zoom {self.zoom_factor:.2f}x")
         if self._cursor_canvas is not None:
@@ -902,6 +987,8 @@ class OverlayViewer:
         self.zoom_factor = 1.0
         self.pan_x = self.src_w / 2.0
         self.pan_y = self.src_h / 2.0
+        # Keep the sidebar slider in sync without retriggering its callback.
+        self._sync_zoom_slider()
         self._render()
 
     def _cancel_playback(self) -> None:
@@ -967,6 +1054,8 @@ class OverlayViewer:
         self.pan_x += (sx_before - sx_after)
         self.pan_y += (sy_before - sy_after)
 
+        # Keep the sidebar slider in sync without retriggering its callback.
+        self._sync_zoom_slider()
         self._render()
 
     def _on_drag_start(self, event) -> None:
