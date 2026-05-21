@@ -67,6 +67,7 @@ if str(_HERE) not in sys.path:
 from tiling_record import (  # noqa: E402
     DYNAMIC_TILE_CROPPER_PIPELINE,
     _center_tile_static,
+    _grid_to_static_tiles,
 )
 
 # Probe whether the python bindings expose get_class_id() on detections —
@@ -263,6 +264,13 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
             help="Set show-tiles=true on the community overlay (no visible effect with "
                  "the bench fakesink, but the property is forwarded for consistency).",
         )
+        parser.add_argument(
+            "--extra-grid", action="append", default=[],
+            metavar="TX,TY,OX,OY",
+            help="Additional tile grid enumerated alongside the main grid (as static "
+                 "tiles via tiles-static). Format 'tiles_x,tiles_y,overlap_x,overlap_y'. "
+                 "Repeatable. Useful for multi-scale GT: --extra-grid 1,1,0,0 --extra-grid 3,2,0,0",
+        )
 
     def on_eos(self):
         hailo_logger.info("EOS received; writing bench summary and shutting down")
@@ -342,14 +350,26 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                 extras.append("0.000000,0.000000,1.000000,1.000000")
             if self.options_menu.include_center_tile:
                 extras.append(_center_tile_static(self.options_menu.center_tile_size))
+            extra_grids_parsed: list[tuple[int, int, float, float]] = []
+            for spec in self.options_menu.extra_grid:
+                parts = [p.strip() for p in spec.split(",")]
+                if len(parts) != 4:
+                    raise ValueError(
+                        f"--extra-grid expects 'tx,ty,ox,oy', got {spec!r}"
+                    )
+                tx, ty = int(parts[0]), int(parts[1])
+                ox, oy = float(parts[2]), float(parts[3])
+                extra_grids_parsed.append((tx, ty, ox, oy))
+                extras.extend(_grid_to_static_tiles(tx, ty, ox, oy))
             tiles_static = ";".join(extras)
             hailo_logger.info(
                 "Bench grid: %dx%d, overlap (x=%.2f, y=%.2f), full_frame=%s, "
-                "center_tile=%s (size=%.2f), tiles_static=%s",
+                "center_tile=%s (size=%.2f), extra_grids=%s, tiles_static=%s",
                 tiles_x, tiles_y, overlap_x, overlap_y,
                 self.options_menu.include_full_frame,
                 self.options_menu.include_center_tile,
                 self.options_menu.center_tile_size,
+                extra_grids_parsed,
                 tiles_static,
             )
 
@@ -455,6 +475,13 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                 "include_center_tile": bool(self.options_menu.include_center_tile),
                 "center_tile_size": (float(self.options_menu.center_tile_size)
                                      if self.options_menu.include_center_tile else 0.0),
+                "extra_grids": [
+                    [int(p.split(",")[0].strip()),
+                     int(p.split(",")[1].strip()),
+                     float(p.split(",")[2].strip()),
+                     float(p.split(",")[3].strip())]
+                    for p in self.options_menu.extra_grid
+                ],
             },
             "video": {
                 "path": self.video_source,

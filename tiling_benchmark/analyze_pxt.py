@@ -31,6 +31,102 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 from analyze_bench import iou_xywh, det_class_key, index_by_frame, load_frames  # noqa: E402
 
+
+# NOTE: duplicated from tiling_record._grid_to_static_tiles to avoid pulling
+# the GStreamer import (tiling_record imports gst). Keep the math identical.
+def _grid_to_static_tiles(tiles_x: int, tiles_y: int,
+                          overlap_x: float, overlap_y: float) -> list[str]:
+    """Convert a regular tiles_x*tiles_y grid into a list of normalized
+    'x,y,w,h' rectangles. Math: T = 1/(N - (N-1)*o); step = T*(1-o).
+    For N==1 returns a single full-axis tile."""
+    if tiles_x < 1 or tiles_y < 1:
+        return []
+    def axis(n: int, o: float):
+        if n == 1:
+            return [(0.0, 1.0)]
+        T = 1.0 / (n - (n - 1) * o)
+        S = T * (1.0 - o)
+        return [(i * S, T) for i in range(n)]
+    rects = []
+    for (y, h) in axis(tiles_y, overlap_y):
+        for (x, w) in axis(tiles_x, overlap_x):
+            rects.append(f"{x:.6f},{y:.6f},{w:.6f},{h:.6f}")
+    return rects
+
+
+def _center_tile_rect(size: float) -> tuple[float, float, float, float]:
+    """Centered square tile of side `size` (fraction of frame)."""
+    x = (1.0 - size) / 2.0
+    return (x, x, size, size)
+
+
+def _compute_tile_rects(config: dict) -> list[tuple[float, float, float, float]]:
+    """Reconstruct the originating run's tile rectangles in normalized coords.
+
+    Mirrors the driver: main grid + optional include_full_frame + optional
+    include_center_tile + optional extra_grids list.
+    """
+    rects: list[tuple[float, float, float, float]] = []
+    tiles_x = int(config.get("tiles_x", 0) or 0)
+    tiles_y = int(config.get("tiles_y", 0) or 0)
+    overlap_x = float(config.get("overlap_x", 0.0) or 0.0)
+    overlap_y = float(config.get("overlap_y", 0.0) or 0.0)
+    for s in _grid_to_static_tiles(tiles_x, tiles_y, overlap_x, overlap_y):
+        parts = s.split(",")
+        rects.append((float(parts[0]), float(parts[1]),
+                      float(parts[2]), float(parts[3])))
+    # The driver only prepends a full-frame extra when the main grid is
+    # non-trivial (not 1x1), but for filtering purposes the full-frame rect
+    # (0,0,1,1) is equivalent to the 1x1 main grid we already added above,
+    # so we always cover (0,0,1,1) when include_full_frame is set.
+    if config.get("include_full_frame"):
+        rects.append((0.0, 0.0, 1.0, 1.0))
+    if config.get("include_center_tile"):
+        size = float(config.get("center_tile_size", 0.4) or 0.4)
+        rects.append(_center_tile_rect(size))
+    for entry in (config.get("extra_grids") or []):
+        # entry is tuple-like / list-like (tx, ty, ox, oy)
+        tx, ty, ox, oy = entry[0], entry[1], entry[2], entry[3]
+        for s in _grid_to_static_tiles(int(tx), int(ty), float(ox), float(oy)):
+            parts = s.split(",")
+            rects.append((float(parts[0]), float(parts[1]),
+                          float(parts[2]), float(parts[3])))
+    return rects
+
+
+def _is_tile_shaped(bbox: list, tile_rects: list[tuple[float, float, float, float]],
+                    tol: float) -> bool:
+    """True if bbox (x,y,w,h normalized) matches any tile rect within tol."""
+    if not tile_rects:
+        return False
+    x, y, w, h = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+    for (tx, ty, tw, th) in tile_rects:
+        if (abs(x - tx) <= tol and abs(y - ty) <= tol
+                and abs(w - tw) <= tol and abs(h - th) <= tol):
+            return True
+    return False
+
+
+def filter_tile_shaped(frames_doc: dict, tol: float) -> tuple[int, int]:
+    """Mutate frames_doc in place, removing detections whose bbox matches any
+    tile rectangle of the doc's own config. Returns (dropped, original_total)."""
+    cfg = frames_doc.get("config", {}) or {}
+    tile_rects = _compute_tile_rects(cfg)
+    if not tile_rects:
+        return 0, sum(len(fr["detections"]) for fr in frames_doc["frames"])
+    dropped = 0
+    total = 0
+    for fr in frames_doc["frames"]:
+        keep = []
+        for det in fr["detections"]:
+            total += 1
+            if _is_tile_shaped(det.get("bbox", []), tile_rects, tol):
+                dropped += 1
+                continue
+            keep.append(det)
+        fr["detections"] = keep
+    return dropped, total
+
 # Object-height bins in *source pixels*. Each (lo, hi] in px height. The bins
 # straddle the small/medium/large boundaries that matter for tiling decisions.
 DEFAULT_BINS_PX = [(0, 16), (16, 32), (32, 64), (64, 128), (128, 256), (256, 4096)]
@@ -214,11 +310,24 @@ def main(argv=None) -> int:
                     help="GT source height in pixels (for binning).")
     ap.add_argument("--out", type=Path, default=None,
                     help="Optional path to dump the full analysis as JSON.")
+    ap.add_argument("--drop-tile-shaped", action="store_true",
+                    help="Drop detections whose bbox matches a tile rectangle in the "
+                         "originating config's grid (within tolerance). Filters out "
+                         "phantom class-person detections caused by yolov8n_4_classes "
+                         "emitting bbox~(0,0,1,1) on low-contrast tiles.")
+    ap.add_argument("--tile-shape-tol", type=float, default=0.01,
+                    help="Normalized tolerance for the tile-shape match (default 0.01).")
     args = ap.parse_args(argv)
 
     gt_doc = load_frames(args.gt)
-    print(f"GT: {args.gt} ({len(gt_doc['frames'])} frames, "
-          f"{sum(len(f['detections']) for f in gt_doc['frames'])} dets)")
+    gt_total_before = sum(len(f["detections"]) for f in gt_doc["frames"])
+    print(f"GT: {args.gt} ({len(gt_doc['frames'])} frames, {gt_total_before} dets)")
+
+    if args.drop_tile_shaped:
+        dropped, total = filter_tile_shaped(gt_doc, args.tile_shape_tol)
+        pct = (100.0 * dropped / total) if total else 0.0
+        print(f"[phantom filter] GT {args.gt.stem}: "
+              f"dropped {dropped} of {total} detections ({pct:.1f}%)")
 
     bins = DEFAULT_BINS_PX
     results: list[tuple[str, dict]] = []
@@ -226,12 +335,19 @@ def main(argv=None) -> int:
                  "video_w": args.video_w, "video_h": args.video_h,
                  "iou": args.iou,
                  "bins_px": [list(b) for b in bins],
+                 "drop_tile_shaped": bool(args.drop_tile_shaped),
+                 "tile_shape_tol": float(args.tile_shape_tol),
                  "configs": {}}
     for p in args.pred:
         pred_doc = load_frames(p)
         label = pred_doc.get("label") or p.stem
         n_dets = sum(len(f["detections"]) for f in pred_doc["frames"])
         print(f"Pred: {p} (label={label!r}, {n_dets} dets)")
+        if args.drop_tile_shaped:
+            dropped, total = filter_tile_shaped(pred_doc, args.tile_shape_tol)
+            pct = (100.0 * dropped / total) if total else 0.0
+            print(f"[phantom filter] pred {label}: "
+                  f"dropped {dropped} of {total} detections ({pct:.1f}%)")
         r = analyze_one(gt_doc, pred_doc, args.iou, args.video_h, bins)
         results.append((label, r))
         full_dump["configs"][label] = r

@@ -82,8 +82,9 @@ CONFIGS = [
     # source — near-perfect match to the model's native 640x480 input). For
     # other source dimensions the tile counts stay fixed but the source-px
     # tile size scales. 25% overlap is enough — see plan rationale.
-    {"label": "GT-12x9-25", "tiles_x": 12, "tiles_y": 9, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": None, "source_h": None, "is_gt": True},
+    {"label": "GT-12x9-25-multi", "tiles_x": 12, "tiles_y": 9, "overlap_x": 0.25, "overlap_y": 0.25,
+     "source_w": None, "source_h": None, "is_gt": True,
+     "extra_grids": [(1, 1, 0.0, 0.0), (3, 2, 0.0, 0.0)]},
 
     # No-tiling baselines.
     {"label": "1x1-native",  "tiles_x": 1, "tiles_y": 1, "overlap_x": 0.0, "overlap_y": 0.0,
@@ -131,6 +132,8 @@ def run_one(cfg: dict, video: str, out_dir: Path, extra_args: list[str]) -> tupl
     ]
     if cfg.get("include_full_frame"):
         cmd.append("--include-full-frame")
+    for (gx, gy, gox, goy) in cfg.get("extra_grids", []):
+        cmd += ["--extra-grid", f"{gx},{gy},{gox},{goy}"]
     cmd += extra_args
     print(f"\n=== Running config '{cfg['label']}' ===")
     print(" ".join(cmd), flush=True)
