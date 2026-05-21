@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Rover-scale "small actor" world for v1.1.
+
+  Why this world exists:
+    The default Walking actor mesh is ~1.7 m tall. At the rover's camera height
+    (~0.25 m) and standard target_bbox_height=0.25, a 1.7 m person needs to be
+    ~6-8 m away to fit the desired bbox — which means most of the actor is
+    above the rover's vertical FOV at close range, and the rover can never
+    physically "follow" the actor (it would have to drive at running pace to
+    catch up + a runaway).
+
+    This world scales the actor down to roughly rover-height (~0.5 m, matching
+    the rover's 0.40 × 0.30 × 0.15 m chassis + wheels) and brings the
+    trajectory in close. The rover can now see a creature its own size and
+    follow it within sensible distances (1-3 m).
+
+  Differences from walk_across_then_approach.sdf:
+    - <skin>/<animation>/<scale> set to 0.3 → actor mesh shrinks ~3x
+    - Actor Z pose dropped from 1.0 → 0.3 (feet roughly on ground at new scale)
+    - X coordinates halved (4 → 2, -2 → -1) so the actor stays within the
+      rover's effective close-range follow window
+    - Y coordinates halved (-6/+6 → -3/+3, -12 → -6) to match the compressed
+      world scale
+    - Trajectory times unchanged — motion still happens at a walkable pace,
+      just over a smaller box.
+
+  Trajectory phases (small-actor scaled; times unchanged):
+    Phase 0 (0..5):    hold at (2, -3), rover boots / drone-follow connects
+    Phase 1 (5..17):   walk across frame at X=2 from Y=-3 to Y=+3
+    Phase 2 (18..24):  return to centerline at (2, 0)
+    Phase 3 (25..38):  turn and walk straight toward rover, X=2 -> X=-1
+                       (rover physically meets the small actor at close range)
+    Phase 4 (39..72):  U-turn south of rover before returning to start
+-->
+<sdf version="1.9">
+  <world name="small_actor">
+    <include>
+      <uri>model://rover</uri>
+      <pose>0 0 0.15 0 0 0</pose>
+    </include>
+
+    <actor name="person">
+      <skin>
+        <filename>model://Walking actor/meshes/walk.dae</filename>
+        <scale>0.3</scale>
+      </skin>
+      <animation name="walking">
+        <filename>model://Walking actor/meshes/walk.dae</filename>
+        <scale>0.3</scale>
+        <interpolate_x>true</interpolate_x>
+      </animation>
+      <script>
+        <loop>true</loop>
+        <delay_start>0</delay_start>
+        <auto_start>true</auto_start>
+        <trajectory id="0" type="walking">
+          <!-- Phase 0: hold at (2,-3) for 5 s (rover boots, controller wakes) -->
+          <waypoint>
+            <time>0</time>
+            <pose>2 -3 0.3 0 0 1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>5</time>
+            <pose>2 -3 0.3 0 0 1.5708</pose>
+          </waypoint>
+
+          <!-- Phase 1: walk across frame, -Y to +Y at X=2 (~0.5 m/s for the
+               small actor, scaled to feel natural at its body size) -->
+          <waypoint>
+            <time>17</time>
+            <pose>2 3 0.3 0 0 1.5708</pose>
+          </waypoint>
+
+          <!-- Phase 2: turn around and walk back to centerline -->
+          <waypoint>
+            <time>18</time>
+            <pose>2 3 0.3 0 0 -1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>24</time>
+            <pose>2 0 0.3 0 0 -1.5708</pose>
+          </waypoint>
+
+          <!-- Phase 3: turn to face rover, walk straight toward it.
+               3 m over 13 s (~0.23 m/s — slow approach scaled to actor size);
+               passes through rover origin to exercise the close-approach +
+               bottom-edge slow-down (RINT-02) response. -->
+          <waypoint>
+            <time>25</time>
+            <pose>2 0 0.3 0 0 3.14159</pose>
+          </waypoint>
+          <waypoint>
+            <time>38</time>
+            <pose>-1 0 0.3 0 0 3.14159</pose>
+          </waypoint>
+
+          <!-- Phase 4: U-turn south of rover before returning to start. -->
+          <waypoint>
+            <time>39</time>
+            <pose>-1 0 0.3 0 0 -1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>51</time>
+            <pose>-1 -6 0.3 0 0 -1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>52</time>
+            <pose>-1 -6 0.3 0 0 0</pose>
+          </waypoint>
+          <waypoint>
+            <time>65</time>
+            <pose>2 -6 0.3 0 0 0</pose>
+          </waypoint>
+          <waypoint>
+            <time>66</time>
+            <pose>2 -6 0.3 0 0 1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>72</time>
+            <pose>2 -3 0.3 0 0 1.5708</pose>
+          </waypoint>
+        </trajectory>
+      </script>
+    </actor>
+
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <plugin name='gz::sim::systems::Physics' filename='gz-sim-physics-system'/>
+    <plugin name='gz::sim::systems::UserCommands' filename='gz-sim-user-commands-system'/>
+    <plugin name='gz::sim::systems::SceneBroadcaster' filename='gz-sim-scene-broadcaster-system'/>
+    <plugin name='gz::sim::systems::Contact' filename='gz-sim-contact-system'/>
+    <plugin name='gz::sim::systems::Sensors' filename='gz-sim-sensors-system'>
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <gravity>0 0 -9.8</gravity>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>1 1</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction><ode/></friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>500 500</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.8 0.8 0.8 1</specular>
+          </material>
+        </visual>
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>1</mass>
+          <inertia><ixx>1</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1</iyy><iyz>0</iyz><izz>1</izz></inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
+      </link>
+      <pose>0 0 0 0 0 0</pose>
+      <self_collide>false</self_collide>
+    </model>
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1</intensity>
+      <direction>0.001 0.625 -0.78</direction>
+      <diffuse>0.904 0.904 0.904 1</diffuse>
+      <specular>0.271 0.271 0.271 1</specular>
+    </light>
+  </world>
+</sdf>
