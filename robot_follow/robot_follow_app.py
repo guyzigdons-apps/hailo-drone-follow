@@ -327,6 +327,9 @@ def main():
     # rule: enabled when neither --openhd nor --webui is set.
     from robot_follow.pipeline_adapter.tracker_factory import TRACKER_CHOICES, DEFAULT_TRACKER
     pre = argparse.ArgumentParser(add_help=False)
+    # Robot adapter (pre-parsed so main() can do main-thread rover preinit
+    # before any Hailo pipeline construction — see rover_preinit below.)
+    pre.add_argument("--robot", choices=("drone", "rover"), default="drone")
     # UI / output branches
     pre.add_argument("--webui", action="store_true")
     pre.add_argument("--webui-port", type=int, default=5001)
@@ -432,6 +435,31 @@ def main():
             dump_embeddings_path=pre_args.reid_dump_embeddings,
         )
 
+    # Phase 6 workaround: when --robot rover, initialize rclpy + Node on
+    # the MAIN thread BEFORE the Hailo gstreamer plugins load. Worker-thread
+    # Node creation races with Hailo plugin loading and SIGABRT/SIGSEGVs the
+    # process. See Ros2RoverAdapter.init_on_main_thread for details.
+    rover_preinit = None
+    if pre_args.robot == "rover":
+        try:
+            from robot_follow.robot_api.adapters.ros2_rover import (
+                Ros2RoverAdapter,
+            )
+            # Placeholder ControllerConfig — the adapter only uses config during
+            # send_command (later, on the worker thread). connect/start_session
+            # only read self._topic/_namespace/_domain_id from args; safe defaults
+            # are baked into __init__'s getattr() calls.
+            rover_preinit = Ros2RoverAdapter(pre_args, ControllerConfig())
+            rover_preinit.init_on_main_thread()
+            LOGGER.info("[rover] rclpy + Node initialized on main thread")
+        except RuntimeError as e:
+            LOGGER.error(
+                "[rover] main-thread rclpy init failed: %s\n"
+                "Pipeline continues without robot control.",
+                e,
+            )
+            rover_preinit = None
+
     from robot_follow.pipeline_adapter import create_app
 
     recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
@@ -518,20 +546,26 @@ def main():
         if args.robot == "drone":
             adapter = MavsdkDroneAdapter(args, controller_config)
         elif args.robot == "rover":
-            # Lazy import so `--robot drone` works on a no-rclpy box and the
-            # friendly RuntimeError only fires when the user actually picks rover.
-            try:
-                from robot_follow.robot_api.adapters.ros2_rover import (
-                    Ros2RoverAdapter,
-                )
-                adapter = Ros2RoverAdapter(args, controller_config)
-            except RuntimeError as e:
-                LOGGER.error(
-                    "[rover] adapter construction failed: %s\n"
-                    "Pipeline continues without robot control.",
-                    e,
-                )
-                return
+            if rover_preinit is not None:
+                # Reuse the main-thread preinit (avoids the Hailo-plugin race).
+                # Swap the placeholder config for the real one.
+                adapter = rover_preinit
+                adapter._config = controller_config
+            else:
+                # Lazy import so `--robot drone` works on a no-rclpy box and the
+                # friendly RuntimeError only fires when the user actually picks rover.
+                try:
+                    from robot_follow.robot_api.adapters.ros2_rover import (
+                        Ros2RoverAdapter,
+                    )
+                    adapter = Ros2RoverAdapter(args, controller_config)
+                except RuntimeError as e:
+                    LOGGER.error(
+                        "[rover] adapter construction failed: %s\n"
+                        "Pipeline continues without robot control.",
+                        e,
+                    )
+                    return
         else:
             raise ValueError(f"Unknown --robot value: {args.robot}")
 

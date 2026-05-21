@@ -90,7 +90,18 @@ class Ros2RoverAdapter:
         self._config = config
 
     async def connect(self) -> None:
-        """Initialize rclpy without taking the SIGINT handler."""
+        """Initialize rclpy without taking the SIGINT handler.
+
+        Idempotent: returns immediately if rclpy is already initialized
+        (e.g. by main-thread pre-init that avoids the Hailo-plugin race
+        described in init_on_main_thread).
+        """
+        # `is True` (not just truthy) so MagicMock-rclpy from the test
+        # fixture, which returns a truthy MagicMock from .ok(), does not
+        # accidentally short-circuit and skip the rclpy.init call the
+        # test asserts on.
+        if self._rclpy.ok() is True:
+            return
         before_sigint = signal.getsignal(signal.SIGINT)
         self._rclpy.init(
             args=None,
@@ -105,6 +116,13 @@ class Ros2RoverAdapter:
             )
 
     async def start_session(self) -> None:
+        """Create the Node + publisher + spin thread.
+
+        Idempotent: returns immediately if the Node was already created
+        (e.g. by main-thread pre-init).
+        """
+        if self._node is not None:
+            return
         self._node = self._Node("robot_follow_rover", namespace=self._namespace)
         self._publisher = self._node.create_publisher(self._Twist, self._topic, 10)
         self._executor = self._SingleThreadedExecutor()
@@ -115,6 +133,36 @@ class Ros2RoverAdapter:
             daemon=True,
         )
         self._executor_thread.start()
+
+    def init_on_main_thread(self) -> None:
+        """Initialize rclpy + Node + publisher synchronously on the main thread.
+
+        WORKAROUND: rclpy.Node creation from a worker thread races with the
+        Hailo gstreamer pipeline's plugin loading and SIGABRT/SIGSEGV's the
+        process at the C-level rcl_node_init call. Reproduced reliably with
+        `robot-follow --robot rover --input udp://... --webui`; the abort
+        signal even changes (SIGABRT ↔ SIGSEGV) depending on whether
+        `--webui` is set, which is a tell-tale sign of heap-state corruption
+        whose symptom depends on memory layout. None of the obvious
+        single-cause reproducers (Gst MainLoop, MAVSDK/gRPC import, Hailo
+        plugin load, 3 servers+threads) trigger it in isolation — only the
+        full robot-follow startup combo reproduces.
+
+        Call this on the main thread BEFORE any Hailo work begins. The
+        worker thread's subsequent `connect()` / `start_session()` calls
+        will detect the pre-initialized state and short-circuit.
+        """
+        # Calling the async methods directly here would require an event
+        # loop; both methods are non-blocking in this implementation (just
+        # rclpy.init + Node construction + thread.start), so we run them
+        # via asyncio.run on a fresh loop.
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self.connect())
+            loop.run_until_complete(self.start_session())
+        finally:
+            loop.close()
 
     def _spin_loop(self) -> None:
         # spin_once with timeout (not rclpy.spin / executor.spin) so the
