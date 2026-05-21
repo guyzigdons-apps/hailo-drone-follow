@@ -229,7 +229,10 @@ def test_rover_simulation_json_loads_with_rover_safe_defaults():
     assert cfg.max_forward == 1.0, "rover-safe top speed"
     assert cfg.max_backward == 1.0
     assert cfg.max_forward_accel == 0, "slew cap disabled for rover"
-    assert cfg.target_bbox_height == 0.25
+    # 0.15 (was 0.25): keep more standoff so the person reliably stays in
+    # frame as the rover yaws — bbox jitter at close range was making the
+    # actor easy to lose, and skid-steer recovery is slower than the drone.
+    assert cfg.target_bbox_height == 0.15
     assert cfg.bottom_margin_safety == 0.25
     assert cfg.top_margin_safety == 0.10
     assert cfg.smooth_yaw is True

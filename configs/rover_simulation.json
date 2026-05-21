@@ -5,7 +5,7 @@
   "max_forward": 1.0,
   "max_backward": 1.0,
   "max_forward_accel": 0,
-  "target_bbox_height": 0.25,
+  "target_bbox_height": 0.15,
   "bottom_margin_safety": 0.25,
   "top_margin_safety": 0.10,
   "smooth_yaw": true,

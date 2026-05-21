@@ -220,6 +220,17 @@ class Ros2RoverAdapter:
             self._filtered_forward = forward_raw
             forward_out = forward_raw
 
+        # Yaw-aware forward attenuation: skid-steer can't curve, so driving
+        # forward at full speed while yawing hard slides the person off the
+        # side of the frame. Scale POSITIVE forward by (1 - |yaw|/max_yaw)
+        # so the rover effectively pivots first when the target is far
+        # off-center, then accelerates as it re-centers. Negative forward
+        # (retreat) is unattenuated — backing up while turning to recover
+        # a near-edge target is exactly the right move.
+        if forward_out > 0.0 and self._config.max_yawspeed > 0:
+            yaw_align = max(0.0, 1.0 - abs(yaw_out) / self._config.max_yawspeed)
+            forward_out = forward_out * yaw_align
+
         twist = self._Twist()
         twist.linear.x = forward_out
         # YAW SIGN FLIP: the controller emits yaw_rate using the drone's NED /
