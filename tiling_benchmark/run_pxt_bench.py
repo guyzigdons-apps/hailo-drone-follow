@@ -84,7 +84,7 @@ CONFIGS = [
     # tile size scales. 25% overlap is enough — see plan rationale.
     {"label": "GT-12x9-25-multi", "tiles_x": 12, "tiles_y": 9, "overlap_x": 0.25, "overlap_y": 0.25,
      "source_w": None, "source_h": None, "is_gt": True,
-     "extra_grids": [(1, 1, 0.0, 0.0), (3, 2, 0.0, 0.0)]},
+     "extra_grids": [(1, 1, 0.0, 0.0), (3, 2, 0.25, 0.25)]},
 
     # No-tiling baselines.
     {"label": "1x1-native",  "tiles_x": 1, "tiles_y": 1, "overlap_x": 0.0, "overlap_y": 0.0,
