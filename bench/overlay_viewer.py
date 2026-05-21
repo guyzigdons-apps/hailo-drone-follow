@@ -18,9 +18,9 @@ Phase 1 features:
   * Keyboard shortcuts: q/Esc=quit, space=play/pause, [ ]=step,
     Home/End=jump to ends, f=reset view.
 
-Phase 2 (stubbed disabled in sidebar):
-  * Tile-rectangle overlay.
-  * Conf-min slider.
+Phase 2 features:
+  * Tile-rectangle overlay (toggleable) with per-run tile source.
+  * Live confidence-floor slider that filters bboxes as you drag.
 
 Usage:
   python bench/overlay_viewer.py \\
@@ -68,11 +68,62 @@ def bgr_to_hex(bgr: tuple[int, int, int]) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def load_frames_indexed(path: Path) -> tuple[str, dict[int, list[dict]]]:
+def load_frames_indexed(
+    path: Path,
+) -> tuple[str, dict[int, list[dict]], dict]:
     with path.open() as f:
         doc = json.load(f)
     idx = {int(fr["frame"]): fr["detections"] for fr in doc["frames"]}
-    return doc.get("label") or path.stem, idx
+    config = doc.get("config") or {}
+    return doc.get("label") or path.stem, idx, config
+
+
+def grid_tiles(tiles_x: int, tiles_y: int,
+               ox: float, oy: float) -> list[tuple[float, float, float, float]]:
+    """Return list of (x, y, w, h) in normalized [0,1] frame coords.
+
+    Mirrors bench/tiling_record.py:_grid_to_static_tiles. For N==1 along an
+    axis, the single tile spans the full axis.
+    """
+    if tiles_x < 1 or tiles_y < 1:
+        return []
+
+    def axis(n: int, o: float) -> list[tuple[float, float]]:
+        if n == 1:
+            return [(0.0, 1.0)]
+        T = 1.0 / (n - (n - 1) * o)
+        S = T * (1.0 - o)
+        return [(i * S, T) for i in range(n)]
+
+    rects: list[tuple[float, float, float, float]] = []
+    for (y, h) in axis(tiles_y, oy):
+        for (x, w) in axis(tiles_x, ox):
+            rects.append((x, y, w, h))
+    return rects
+
+
+def tile_rects_from_config(
+    cfg: dict,
+) -> list[tuple[float, float, float, float]]:
+    """Reconstruct the full tile list (grid + extras) from a frames.json
+    ``config`` block. Output is in normalized [0,1] frame coordinates.
+    """
+    if not cfg:
+        return []
+    tiles_x = int(cfg.get("tiles_x", 0) or 0)
+    tiles_y = int(cfg.get("tiles_y", 0) or 0)
+    ox = float(cfg.get("overlap_x", 0.0) or 0.0)
+    oy = float(cfg.get("overlap_y", 0.0) or 0.0)
+    rects = grid_tiles(tiles_x, tiles_y, ox, oy)
+    if cfg.get("include_full_frame"):
+        rects.append((0.0, 0.0, 1.0, 1.0))
+    if cfg.get("include_center_tile"):
+        s = float(cfg.get("center_tile_size", 0.0) or 0.0)
+        if s > 0.0:
+            s = min(s, 1.0)
+            off = (1.0 - s) / 2.0
+            rects.append((off, off, s, s))
+    return rects
 
 
 def parse_frames_arg(arg: str) -> tuple[Path, str | None]:
@@ -86,10 +137,14 @@ class Run:
     """One frames.json overlay source."""
 
     def __init__(self, label: str, idx: dict[int, list[dict]],
-                 colour_bgr: tuple[int, int, int]):
+                 colour_bgr: tuple[int, int, int],
+                 config: dict | None = None):
         self.label = label
         self.idx = idx
         self.colour_bgr = colour_bgr
+        self.config: dict = config or {}
+        self.tile_rects: list[tuple[float, float, float, float]] = \
+            tile_rects_from_config(self.config)
         self.visible_var: tk.BooleanVar | None = None  # set after Tk root exists
 
 
@@ -130,8 +185,24 @@ class OverlayViewer:
         self._photo_ref: ImageTk.PhotoImage | None = None
 
         # Create per-run Tk visibility BooleanVars now that root exists.
+        # Trace each so the tile-source radio can react when its currently
+        # selected run gets hidden.
         for r in self.runs:
             r.visible_var = tk.BooleanVar(value=True)
+            r.visible_var.trace_add("write", self._on_visibility_changed)
+
+        # Phase 2 state: live confidence floor + tile overlay controls.
+        self._conf_min_var = tk.DoubleVar(value=self.conf_min)
+        self._show_tiles_var = tk.BooleanVar(value=False)
+        # Tile-source radio holds the label of the currently selected run.
+        # Default to the first run (all runs start visible).
+        self._tile_source_var = tk.StringVar(
+            value=self.runs[0].label if self.runs else ""
+        )
+        # Container for tile-source radiobutton widgets so we can rebuild it
+        # when visibility changes (only visible runs are listed).
+        self._tile_source_radio_frame: tk.Frame | None = None
+        self._tile_source_radios: list[tk.Radiobutton] = []
 
         self._build_ui()
         self._bind_events()
@@ -171,42 +242,46 @@ class OverlayViewer:
             swatch = tk.Label(row, text="    ", bg=bgr_to_hex(r.colour_bgr),
                               width=2, relief=tk.RAISED, bd=1)
             swatch.pack(side=tk.LEFT, padx=(0, 6))
+            # Re-render is driven by the trace_add on r.visible_var, which
+            # also rebuilds the tile-source radio list.
             cb = tk.Checkbutton(row, text=r.label, variable=r.visible_var,
                                 fg="white", bg="#202020",
                                 activebackground="#202020",
                                 activeforeground="white",
-                                selectcolor="#404040",
-                                command=self._render)
+                                selectcolor="#404040")
             cb.pack(side=tk.LEFT, anchor="w")
 
-        # Tiles (Phase 2 stub)
+        # Tiles overlay
         tiles_lf = tk.LabelFrame(sidebar, text="Overlays", fg="white",
                                  bg="#202020", labelanchor="nw",
                                  padx=6, pady=4)
         tiles_lf.pack(fill=tk.X, padx=6, pady=4)
-        self._show_tiles_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(tiles_lf, text="Show tiles  (Phase 2)",
+        tk.Checkbutton(tiles_lf, text="Show tiles",
                        variable=self._show_tiles_var,
                        fg="white", bg="#202020",
                        activebackground="#202020",
                        activeforeground="white",
                        selectcolor="#404040",
-                       state=tk.DISABLED).pack(anchor="w")
+                       command=self._render).pack(anchor="w")
+        # Tile-source radio (one row per currently-visible run).
+        self._tile_source_radio_frame = tk.Frame(tiles_lf, bg="#202020")
+        self._tile_source_radio_frame.pack(fill=tk.X, padx=(16, 0))
+        self._rebuild_tile_source_radios()
 
-        # Conf-min slider stub (Phase 2)
-        conf_lf = tk.LabelFrame(sidebar, text=f"Conf-min ({self.conf_min:.2f})",
+        # Conf-min slider (live).
+        conf_lf = tk.LabelFrame(sidebar, text="Confidence",
                                 fg="white", bg="#202020", labelanchor="nw",
                                 padx=6, pady=4)
         conf_lf.pack(fill=tk.X, padx=6, pady=4)
         self._conf_slider = tk.Scale(conf_lf, from_=0.0, to=1.0,
                                      resolution=0.01,
                                      orient=tk.HORIZONTAL,
+                                     variable=self._conf_min_var,
                                      bg="#202020", fg="white",
                                      troughcolor="#404040",
                                      highlightthickness=0,
-                                     state=tk.DISABLED,
-                                     label="(Phase 2)")
-        self._conf_slider.set(self.conf_min)
+                                     label="Min confidence",
+                                     command=self._on_conf_changed)
         self._conf_slider.pack(fill=tk.X)
 
         # Frame scrubber
@@ -291,6 +366,48 @@ class OverlayViewer:
                     "drag: pan")
         tk.Label(help_lf, text=help_txt, fg="white", bg="#202020",
                  justify=tk.LEFT, anchor="w").pack(fill=tk.X)
+
+    def _rebuild_tile_source_radios(self) -> None:
+        """Repopulate the tile-source radio with one entry per visible run.
+
+        Called on init and whenever a run's visibility checkbox toggles. If
+        the currently selected tile source has just been hidden, fall back
+        to the first remaining visible run. If no runs are visible the
+        radio is empty (tile overlay will be skipped at draw time).
+        """
+        frame = self._tile_source_radio_frame
+        if frame is None:
+            return
+        for w in self._tile_source_radios:
+            w.destroy()
+        self._tile_source_radios = []
+
+        visible_runs = [r for r in self.runs
+                        if r.visible_var is not None and r.visible_var.get()]
+        visible_labels = [r.label for r in visible_runs]
+        if self._tile_source_var.get() not in visible_labels:
+            self._tile_source_var.set(visible_labels[0] if visible_labels else "")
+
+        for r in visible_runs:
+            rb = tk.Radiobutton(frame, text=r.label,
+                                variable=self._tile_source_var,
+                                value=r.label,
+                                fg="white", bg="#202020",
+                                activebackground="#202020",
+                                activeforeground="white",
+                                selectcolor="#404040",
+                                command=self._render)
+            rb.pack(anchor="w")
+            self._tile_source_radios.append(rb)
+
+    def _on_visibility_changed(self, *_args) -> None:
+        # Triggered by Tk trace_add on each Run.visible_var.
+        self._rebuild_tile_source_radios()
+        self._render()
+
+    def _on_conf_changed(self, _val: str) -> None:
+        # Slider drag callback. The DoubleVar already holds the new value.
+        self._render()
 
     def _bind_events(self) -> None:
         # Canvas mouse
@@ -417,6 +534,7 @@ class OverlayViewer:
         scale_y = ch / float(y1 - y0)
 
         # Draw bboxes for visible runs.
+        conf_min = float(self._conf_min_var.get())
         visible_runs: list[Run] = []
         for r in self.runs:
             if not r.visible_var.get():
@@ -425,7 +543,7 @@ class OverlayViewer:
             colour = r.colour_bgr
             for det in r.idx.get(self.frame_no, []):
                 conf = float(det.get("confidence", 0.0))
-                if conf < self.conf_min:
+                if conf < conf_min:
                     continue
                 bx, by, bw, bh = det["bbox"]
                 # bbox in source-px
@@ -447,8 +565,15 @@ class OverlayViewer:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1,
                             cv2.LINE_AA)
 
+        # Tile rectangles, drawn between bboxes and HUD so the bboxes win
+        # the foreground but the HUD overpaints the tiles where they
+        # overlap.
+        tile_source_run, tile_rects_drawn = self._draw_tiles(
+            disp, x0, y0, x1, y1, scale_x, scale_y, visible_runs,
+        )
+
         # HUD on the rescaled canvas (NOT on source — that's the key fix).
-        self._draw_hud(disp, visible_runs)
+        self._draw_hud(disp, visible_runs, tile_source_run, tile_rects_drawn)
 
         # Push to canvas.
         rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
@@ -457,7 +582,46 @@ class OverlayViewer:
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self._photo_ref)
 
-    def _draw_hud(self, disp: np.ndarray, visible_runs: list[Run]) -> None:
+    def _draw_tiles(self, disp: np.ndarray,
+                    x0: int, y0: int, x1: int, y1: int,
+                    scale_x: float, scale_y: float,
+                    visible_runs: list[Run]) -> tuple[Run | None, int]:
+        """Overlay the tile rectangles from the selected source run.
+
+        Returns ``(source_run, n_rects_drawn)`` for the HUD legend. If the
+        overlay is disabled, no source is selected, or no runs are visible,
+        returns ``(None, 0)``.
+        """
+        if not self._show_tiles_var.get() or not visible_runs:
+            return None, 0
+        wanted = self._tile_source_var.get()
+        source_run: Run | None = next(
+            (r for r in visible_runs if r.label == wanted), None
+        )
+        if source_run is None:
+            return None, 0
+
+        colour = (255, 255, 255)  # neutral white so it doesn't fight bboxes.
+        drawn = 0
+        for (nx, ny, nw, nh) in source_run.tile_rects:
+            sx1 = nx * self.src_w
+            sy1 = ny * self.src_h
+            sx2 = (nx + nw) * self.src_w
+            sy2 = (ny + nh) * self.src_h
+            # Cull rectangles entirely outside the viewport.
+            if sx2 < x0 or sx1 > x1 or sy2 < y0 or sy1 > y1:
+                continue
+            dx1 = int((sx1 - x0) * scale_x)
+            dy1 = int((sy1 - y0) * scale_y)
+            dx2 = int((sx2 - x0) * scale_x)
+            dy2 = int((sy2 - y0) * scale_y)
+            cv2.rectangle(disp, (dx1, dy1), (dx2, dy2), colour, 1)
+            drawn += 1
+        return source_run, drawn
+
+    def _draw_hud(self, disp: np.ndarray, visible_runs: list[Run],
+                  tile_source_run: "Run | None" = None,
+                  tile_rects_drawn: int = 0) -> None:
         lines: list[str] = []
         lines.append(f"frame {self.frame_no} / {self.total_frames - 1}")
         lines.append(f"zoom {self.zoom_factor:.2f}x")
@@ -468,9 +632,14 @@ class OverlayViewer:
         else:
             lines.append("src px: -")
 
+        tile_line: str | None = None
+        if tile_source_run is not None:
+            tile_line = (f"tile src: {tile_source_run.label}"
+                         f"  (n={tile_rects_drawn})")
+
         # Background strip behind HUD for legibility.
         line_h = 22
-        n_lines = len(lines) + len(visible_runs)
+        n_lines = len(lines) + len(visible_runs) + (1 if tile_line else 0)
         pad = 6
         box_w = 320
         box_h = pad * 2 + line_h * max(1, n_lines)
@@ -489,6 +658,11 @@ class OverlayViewer:
             cv2.putText(disp, r.label, (pad, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                         r.colour_bgr, 2, cv2.LINE_AA)
+            y += line_h
+        if tile_line is not None:
+            cv2.putText(disp, tile_line, (pad, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                        (255, 255, 255), 1, cv2.LINE_AA)
             y += line_h
 
     # -------------------------------------------------- events
@@ -701,11 +875,11 @@ def main(argv=None) -> int:
         if not p.is_file():
             print(f"ERROR: frames file not found: {p}")
             return 1
-        lbl, idx = load_frames_indexed(p)
+        lbl, idx, cfg = load_frames_indexed(p)
         if lbl_override:
             lbl = lbl_override
         colour = PALETTE[i % len(PALETTE)]
-        runs.append(Run(label=lbl, idx=idx, colour_bgr=colour))
+        runs.append(Run(label=lbl, idx=idx, colour_bgr=colour, config=cfg))
 
     root = tk.Tk()
     try:
