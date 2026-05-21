@@ -89,6 +89,15 @@ class Ros2RoverAdapter:
         self._shutdown_event = threading.Event()
         self._config = config
 
+        # EMA smoothing state (rover-side; drone has its own SmoothingState
+        # in mavsdk_drone.py). Initialised lazily on the first send_command
+        # call so the first tick passes raw through — same gentle warmup as
+        # the drone's filter, but starting from the first observed command
+        # rather than zero (avoids attenuating the initial yaw response
+        # below cmd.yaw_rate when the rover first sees the target).
+        self._filtered_yaw: Optional[float] = None
+        self._filtered_forward: Optional[float] = None
+
     async def connect(self) -> None:
         """Initialize rclpy without taking the SIGINT handler.
 
@@ -179,8 +188,40 @@ class Ros2RoverAdapter:
             return
         if self._publisher is None:
             return
+        # EMA smoothing (low-pass filter) on both axes. The controller emits
+        # a fresh P-controller setpoint every tick; with the rover's modest
+        # dynamics + ~100 ms control-loop latency, even a well-tuned gain
+        # can ring. Smoothing here matches what mavsdk_drone.py does in
+        # _apply_smoothing — but it lives in this adapter, not in a shared
+        # helper, because the smoothing is conceptually robot-specific
+        # (the drone smooths POST-altitude-P, before MAVSDK; the rover
+        # smooths POST-controller, before Twist publish). Honors
+        # smooth_yaw / yaw_alpha / smooth_forward / forward_alpha from
+        # ControllerConfig (set in configs/rover_simulation.json).
+        yaw_raw = cmd.yaw_rate
+        if self._config.smooth_yaw and self._filtered_yaw is not None:
+            self._filtered_yaw = (
+                self._config.yaw_alpha * yaw_raw
+                + (1.0 - self._config.yaw_alpha) * self._filtered_yaw
+            )
+            yaw_out = self._filtered_yaw
+        else:
+            self._filtered_yaw = yaw_raw
+            yaw_out = yaw_raw
+
+        forward_raw = cmd.forward_m_s
+        if self._config.smooth_forward and self._filtered_forward is not None:
+            self._filtered_forward = (
+                self._config.forward_alpha * forward_raw
+                + (1.0 - self._config.forward_alpha) * self._filtered_forward
+            )
+            forward_out = self._filtered_forward
+        else:
+            self._filtered_forward = forward_raw
+            forward_out = forward_raw
+
         twist = self._Twist()
-        twist.linear.x = cmd.forward_m_s
+        twist.linear.x = forward_out
         # YAW SIGN FLIP: the controller emits yaw_rate using the drone's NED /
         # MAVSDK convention where +z body axis points DOWN and clockwise-from-
         # above is positive yawspeed. ROS REP-103 uses ENU with +z body axis
@@ -190,7 +231,7 @@ class Ros2RoverAdapter:
         # This is a frame-of-reference adaptation, NOT a unit conversion —
         # the Q5 lock about deg/s vs rad/s magnitudes is preserved (the
         # controller emits in caps.yaw_unit; the adapter only flips sign).
-        twist.angular.z = -cmd.yaw_rate
+        twist.angular.z = -yaw_out
         # RINT-02 / Q1 lock: when the person's bbox bottom enters the lowest
         # 15% of the frame, override forward to 0.0 (stop driving). Yaw is
         # PRESERVED — the rover can still rotate to recenter. cmd is not

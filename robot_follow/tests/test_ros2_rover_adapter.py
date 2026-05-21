@@ -569,6 +569,86 @@ class TestYawSignSteersTowardPerson:
         )
 
 
+class TestEmaSmoothing:
+    """EMA smoothing on yaw + forward axes (rover-side; matches mavsdk_drone's
+    _apply_smoothing). First call passes raw through; subsequent calls
+    converge via alpha-weighted EMA.
+    """
+
+    def test_first_call_passes_raw_through(self, rclpy_mock):
+        """Initial filter state is None → first tick is unfiltered.
+
+        Avoids the drone's first-tick attenuation (where filter starts at
+        0 → first published value is alpha * raw). The rover starts at the
+        first observed command, so the initial yaw response isn't muted.
+        """
+        from robot_follow.follow_api.types import RobotCommand, SafetyContext
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        cmd = RobotCommand(forward_m_s=0.5, yaw_rate=0.2)
+        ctx = SafetyContext.from_detection(_det())
+        asyncio.run(adapter.send_command(cmd, ctx))
+        twist = adapter._publisher.publish.call_args[0][0]
+        assert twist.linear.x == pytest.approx(0.5)
+        assert twist.angular.z == pytest.approx(-0.2)  # sign flip only
+
+    def test_repeated_calls_converge_via_ema(self, rclpy_mock):
+        """N constant commands → output decays toward the new setpoint.
+
+        With yaw_alpha=0.3 (default), starting from yaw_out=0.2 (first call)
+        and re-issuing yaw_rate=0.0 (target reached), the filter geometrically
+        decays: 0.2 → 0.14 → 0.098 → 0.069 → ... Asserts the second tick
+        is between raw (0) and previous (0.2) — proving smoothing fires.
+        """
+        from robot_follow.follow_api.types import RobotCommand, SafetyContext
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        ctx = SafetyContext.from_detection(_det())
+        # First call: filter = raw = 0.2
+        asyncio.run(adapter.send_command(
+            RobotCommand(forward_m_s=0.0, yaw_rate=0.2), ctx,
+        ))
+        # Second call: new raw = 0.0; filter = 0.3 * 0.0 + 0.7 * 0.2 = 0.14
+        adapter._publisher.publish.reset_mock()
+        asyncio.run(adapter.send_command(
+            RobotCommand(forward_m_s=0.0, yaw_rate=0.0), ctx,
+        ))
+        twist = adapter._publisher.publish.call_args[0][0]
+        # angular.z = -filtered_yaw → -0.14 (with sign flip)
+        assert twist.angular.z == pytest.approx(-0.14, abs=1e-3), (
+            f"EMA must smooth between previous filtered yaw and new raw "
+            f"(got angular.z={twist.angular.z}; expected ~-0.14)"
+        )
+
+    def test_smooth_yaw_disabled_skips_filter(self, rclpy_mock):
+        """When smooth_yaw=False, yaw_rate passes through unchanged on
+        every tick (only the sign flip applies).
+        """
+        from robot_follow.follow_api.config import ControllerConfig
+        from robot_follow.follow_api.types import RobotCommand, SafetyContext
+        from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
+        cfg = ControllerConfig(smooth_yaw=False, smooth_forward=False)
+        adapter = Ros2RoverAdapter(_default_args(), cfg)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        ctx = SafetyContext.from_detection(_det())
+        # Two ticks with different setpoints — neither should be filtered.
+        asyncio.run(adapter.send_command(
+            RobotCommand(forward_m_s=0.0, yaw_rate=0.5), ctx,
+        ))
+        adapter._publisher.publish.reset_mock()
+        asyncio.run(adapter.send_command(
+            RobotCommand(forward_m_s=0.0, yaw_rate=0.0), ctx,
+        ))
+        twist = adapter._publisher.publish.call_args[0][0]
+        assert twist.angular.z == pytest.approx(0.0), (
+            "smooth_yaw=False must publish the current raw cmd, not a "
+            "filtered blend of previous + current"
+        )
+
+
 class TestSigintShutdown:
     """RINT-06: SIGINT shutdown contract pins (test-only; adapter unchanged).
 
