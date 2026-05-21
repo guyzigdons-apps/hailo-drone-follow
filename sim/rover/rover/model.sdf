@@ -86,8 +86,18 @@
       <child>camera_link</child>
     </joint>
 
+    <!-- 4-wheel skid-steer look (Husky / ClearPath style).
+         Front (left_wheel / right_wheel) are the DRIVEN wheels — wired into
+         the DiffDrive plugin below.
+         Rear (left_rear_wheel / right_rear_wheel) are free-spinning passive
+         wheels for the look + ground-contact stability (replaces the original
+         single rear caster). Lower lateral friction (mu2=0.2) on the rear
+         wheels lets the rover skid-turn in place without the rear digging in.
+         Diff-drive kinematics unchanged: wheel_separation/wheel_radius and
+         the controller's RobotCommand contract are identical. -->
+
     <link name="left_wheel">
-      <pose>0 0.20 0 -1.5708 0 0</pose>
+      <pose>0.12 0.20 0 -1.5708 0 0</pose>
       <inertial><mass>0.5</mass>
         <inertia><ixx>0.001</ixx><ixy>0</ixy><ixz>0</ixz>
                  <iyy>0.001</iyy><iyz>0</iyz>
@@ -103,7 +113,7 @@
       </collision>
     </link>
     <link name="right_wheel">
-      <pose>0 -0.20 0 -1.5708 0 0</pose>
+      <pose>0.12 -0.20 0 -1.5708 0 0</pose>
       <inertial><mass>0.5</mass>
         <inertia><ixx>0.001</ixx><ixy>0</ixy><ixz>0</ixz>
                  <iyy>0.001</iyy><iyz>0</iyz>
@@ -119,18 +129,36 @@
       </collision>
     </link>
 
-    <link name="caster">
-      <pose>-0.18 0 -0.05 0 0 0</pose>
-      <inertial><mass>0.1</mass>
-        <inertia><ixx>1e-4</ixx><ixy>0</ixy><ixz>0</ixz>
-                 <iyy>1e-4</iyy><iyz>0</iyz>
-                 <izz>1e-4</izz></inertia>
+    <link name="left_rear_wheel">
+      <pose>-0.12 0.20 0 -1.5708 0 0</pose>
+      <inertial><mass>0.5</mass>
+        <inertia><ixx>0.001</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>0.001</iyy><iyz>0</iyz>
+                 <izz>0.001</izz></inertia>
       </inertial>
       <visual name="visual">
-        <geometry><sphere><radius>0.05</radius></sphere></geometry>
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
       </visual>
       <collision name="collision">
-        <geometry><sphere><radius>0.05</radius></sphere></geometry>
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>0.2</mu2></ode></friction></surface>
+      </collision>
+    </link>
+    <link name="right_rear_wheel">
+      <pose>-0.12 -0.20 0 -1.5708 0 0</pose>
+      <inertial><mass>0.5</mass>
+        <inertia><ixx>0.001</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>0.001</iyy><iyz>0</iyz>
+                 <izz>0.001</izz></inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
+      </visual>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>0.2</mu2></ode></friction></surface>
       </collision>
     </link>
 
@@ -148,8 +176,23 @@
         <limit><lower>-1.79769e+308</lower><upper>1.79769e+308</upper></limit>
       </axis>
     </joint>
-    <joint name="caster_joint" type="ball">
-      <parent>chassis</parent><child>caster</child>
+    <!-- Rear wheels are free-spinning (revolute joints not driven by the
+         plugin). They follow the front wheels' rotation passively via
+         ground contact when the rover drives straight, and skid when
+         turning (low mu2 minimizes resistance). -->
+    <joint name="left_rear_wheel_joint" type="revolute">
+      <parent>chassis</parent><child>left_rear_wheel</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit><lower>-1.79769e+308</lower><upper>1.79769e+308</upper></limit>
+      </axis>
+    </joint>
+    <joint name="right_rear_wheel_joint" type="revolute">
+      <parent>chassis</parent><child>right_rear_wheel</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit><lower>-1.79769e+308</lower><upper>1.79769e+308</upper></limit>
+      </axis>
     </joint>
 
     <!-- Garden-era diff-drive plugin.
