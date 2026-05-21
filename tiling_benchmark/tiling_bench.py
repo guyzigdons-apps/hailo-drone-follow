@@ -364,7 +364,7 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
             tiles_static = ";".join(extras)
             hailo_logger.info(
                 "Bench grid: %dx%d, overlap (x=%.2f, y=%.2f), full_frame=%s, "
-                "center_tile=%s (size=%.2f), extra_grids=%s, tiles_static=%s",
+                "center_tile=%s (size=%.2f), extra_grids=%s, tiles_static(extras)=%s",
                 tiles_x, tiles_y, overlap_x, overlap_y,
                 self.options_menu.include_full_frame,
                 self.options_menu.include_center_tile,
@@ -372,6 +372,36 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                 extra_grids_parsed,
                 tiles_static,
             )
+
+            # Pre-compute the final tiles-static string (grid_rects + extras)
+            # for diagnostic logging. The same computation runs again inside
+            # DYNAMIC_TILE_CROPPER_PIPELINE — that's the string actually fed to
+            # the gst element. Mirroring it here makes the log
+            # show exactly what hailotilecropper_dynamic will receive (and
+            # therefore which rectangles will produce a cropped tile).
+            _grid_rects = (_grid_to_static_tiles(tiles_x, tiles_y, overlap_x, overlap_y)
+                           if (tiles_x > 0 and tiles_y > 0) else [])
+            _extra_rects = [r for r in tiles_static.split(";") if r.strip()] if tiles_static else []
+            _all_rects = _grid_rects + _extra_rects
+            _final_tiles_static = ";".join(_all_rects)
+            hailo_logger.info(
+                "Bench cropper final tiles-static (%d rects: %d grid + %d extras): %s",
+                len(_all_rects), len(_grid_rects), len(_extra_rects), _final_tiles_static,
+            )
+            # Warn loudly if the inference batch_size from upstream config
+            # doesn't match the actual tile count — the GStreamerTilingApp
+            # parent computes batch_size = tiles_x * tiles_y (single-scale)
+            # without accounting for extras, so the hailonet element ends up
+            # under-sized for runs with --include-full-frame / --include-center-tile
+            # / --extra-grid. hailonet handles this by splitting tiles across
+            # multiple internal batches, but it changes throughput characteristics
+            # so it's worth surfacing.
+            if len(_all_rects) != self.batch_size:
+                hailo_logger.warning(
+                    "tiles count %d != hailonet batch_size %d "
+                    "(extras run in separate sub-batches)",
+                    len(_all_rects), self.batch_size,
+                )
 
             tile_cropper_pipeline = DYNAMIC_TILE_CROPPER_PIPELINE(
                 detection_pipeline,
