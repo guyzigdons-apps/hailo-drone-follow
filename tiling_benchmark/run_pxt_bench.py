@@ -18,6 +18,36 @@ import sys
 import time
 from pathlib import Path
 
+
+def probe_video_dims(video_path: str | Path) -> tuple[int, int]:
+    """Return (width, height) of the first video stream via ffprobe.
+
+    Exits non-zero with a clear error if ffprobe fails or no video stream
+    is found.
+    """
+    cmd = ["ffprobe", "-v", "error", "-of", "json",
+           "-show_streams", str(video_path)]
+    try:
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    except FileNotFoundError:
+        print("ERROR: ffprobe not found on PATH", file=sys.stderr)
+        sys.exit(1)
+    if proc.returncode != 0:
+        print(f"ERROR: ffprobe failed for {video_path}: "
+              f"{proc.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: ffprobe JSON parse failed for {video_path}: {e}",
+              file=sys.stderr)
+        sys.exit(1)
+    for s in data.get("streams", []):
+        if s.get("codec_type") == "video":
+            return int(s["width"]), int(s["height"])
+    print(f"ERROR: no video stream found in {video_path}", file=sys.stderr)
+    sys.exit(1)
+
 HERE = Path(__file__).resolve().parent
 BENCH_SCRIPT = HERE / "tiling_bench.py"
 ANALYZE_SCRIPT = HERE / "analyze_pxt.py"
@@ -42,36 +72,42 @@ LABELS_JSON = "/usr/local/hailo/resources/json/hailo_4_classes.json"
 # Each entry produces:
 #   <out_dir>/pxt_<label>.json         — headline summary
 #   <out_dir>/pxt_<label>.frames.json  — per-frame normalized detections
+#
+# `source_w` / `source_h` of None means "use the video's native dims, probed
+# via ffprobe at startup". Explicit values are only used by the
+# `1x1-640x480` baseline (shrunk source). Tile counts are deliberately
+# fixed across source resolutions — see plan doc for the tradeoff.
 CONFIGS = [
-    # Pseudo-ground-truth: small tiles (~650x484 source-px, near-perfect match
-    # to the model's native 640x480 input). 25% overlap is enough — see plan
-    # rationale.
+    # Pseudo-ground-truth: small tiles (~650x484 source-px at a 6016x3384
+    # source — near-perfect match to the model's native 640x480 input). For
+    # other source dimensions the tile counts stay fixed but the source-px
+    # tile size scales. 25% overlap is enough — see plan rationale.
     {"label": "GT-12x9-25", "tiles_x": 12, "tiles_y": 9, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": 6016, "source_h": 3384, "is_gt": True},
+     "source_w": None, "source_h": None, "is_gt": True},
 
     # No-tiling baselines.
     {"label": "1x1-native",  "tiles_x": 1, "tiles_y": 1, "overlap_x": 0.0, "overlap_y": 0.0,
-     "source_w": 6016, "source_h": 3384},
+     "source_w": None, "source_h": None},
     {"label": "1x1-640x480", "tiles_x": 1, "tiles_y": 1, "overlap_x": 0.0, "overlap_y": 0.0,
      "source_w": 640, "source_h": 480},
 
     # Sweep at native source resolution, increasing tile count.
     {"label": "2x2-native",  "tiles_x": 2, "tiles_y": 2, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": 6016, "source_h": 3384},
+     "source_w": None, "source_h": None},
     {"label": "3x2-native",  "tiles_x": 3, "tiles_y": 2, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": 6016, "source_h": 3384},
+     "source_w": None, "source_h": None},
     {"label": "3x3-native",  "tiles_x": 3, "tiles_y": 3, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": 6016, "source_h": 3384},
+     "source_w": None, "source_h": None},
     {"label": "4x3-native",  "tiles_x": 4, "tiles_y": 3, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": 6016, "source_h": 3384},
+     "source_w": None, "source_h": None},
     {"label": "6x4-native",  "tiles_x": 6, "tiles_y": 4, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": 6016, "source_h": 3384},
+     "source_w": None, "source_h": None},
     {"label": "8x6-native",  "tiles_x": 8, "tiles_y": 6, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": 6016, "source_h": 3384},
+     "source_w": None, "source_h": None},
 
     # Hybrid: 4x3 (4:3-aspect tiles) + whole-frame rescue for large objects.
     {"label": "4x3-native+full", "tiles_x": 4, "tiles_y": 3, "overlap_x": 0.25, "overlap_y": 0.25,
-     "source_w": 6016, "source_h": 3384, "include_full_frame": True},
+     "source_w": None, "source_h": None, "include_full_frame": True},
 ]
 
 
@@ -122,6 +158,15 @@ def main():
         print(f"ERROR: video not found: {args.video}", file=sys.stderr)
         sys.exit(1)
 
+    # Probe the input video for native dims and substitute into every config
+    # whose source_w/source_h is None.
+    native_w, native_h = probe_video_dims(args.video)
+    for cfg in CONFIGS:
+        if cfg.get("source_w") is None:
+            cfg["source_w"] = native_w
+        if cfg.get("source_h") is None:
+            cfg["source_h"] = native_h
+
     selected = CONFIGS
     if args.only:
         keep = set(args.only)
@@ -130,6 +175,19 @@ def main():
         if missing:
             print(f"ERROR: unknown labels in --only: {sorted(missing)}", file=sys.stderr)
             sys.exit(1)
+
+    # Startup banner — show detected source dims and per-config source dims.
+    print("=" * 78)
+    print(f"video:        {args.video}")
+    print(f"native dims:  {native_w}x{native_h}")
+    print(f"out dir:      {out_dir}")
+    print("configs:")
+    for cfg in selected:
+        print(f"  {cfg['label']:>18}  source={cfg['source_w']}x{cfg['source_h']}"
+              f"  grid={cfg['tiles_x']}x{cfg['tiles_y']}"
+              f"  overlap={cfg['overlap_x']:.2f}/{cfg['overlap_y']:.2f}"
+              f"{'  +full' if cfg.get('include_full_frame') else ''}")
+    print("=" * 78)
 
     results = []
     for cfg in selected:
