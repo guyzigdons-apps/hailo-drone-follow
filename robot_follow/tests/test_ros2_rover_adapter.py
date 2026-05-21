@@ -148,7 +148,6 @@ class TestSignalHandlerPreservation:
 
 class TestTwistPublish:
     def test_publishes_twist_with_forward_and_yaw_rate(self, rclpy_mock):
-        from robot_follow.follow_api.config import ControllerConfig
         from robot_follow.follow_api.types import RobotCommand, SafetyContext
 
         adapter = _build_adapter(rclpy_mock)
@@ -159,10 +158,7 @@ class TestTwistPublish:
         asyncio.run(adapter.send_command(cmd, ctx))
         assert adapter._publisher.publish.called
         twist = adapter._publisher.publish.call_args.args[0]
-        # Forward is scaled by yaw-align: 1.5 * (1 - 0.3 / max_yawspeed).
-        # See TestYawAlignForwardAttenuation for the dedicated coverage.
-        cfg_max_yaw = ControllerConfig().max_yawspeed
-        assert twist.linear.x == pytest.approx(1.5 * (1.0 - 0.3 / cfg_max_yaw))
+        assert twist.linear.x == pytest.approx(1.5)
         # Sign flip per ENU/NED frame adaptation in send_command (see
         # ros2_rover.py): controller emits clockwise-from-above +ve
         # (drone NED); rover publishes counter-clockwise-from-above +ve
@@ -410,13 +406,8 @@ class TestBottomEdgeNaturalStop:
         asyncio.run(adapter.send_command(cmd, ctx))
         adapter._publisher.publish.assert_called_once()
         twist = adapter._publisher.publish.call_args[0][0]
-        # Forward scaled by yaw-align (0.5 * (1 - 0.1/max_yawspeed)); the
-        # bottom-edge override is NOT firing here. Yaw-align coverage lives
-        # in TestYawAlignForwardAttenuation.
-        from robot_follow.follow_api.config import ControllerConfig
-        cfg_max_yaw = ControllerConfig().max_yawspeed
-        assert twist.linear.x == pytest.approx(0.5 * (1.0 - 0.1 / cfg_max_yaw)), (
-            f"below threshold: forward must pass through (yaw-align only) "
+        assert twist.linear.x == 0.5, (
+            f"below threshold: forward must pass through "
             f"(got linear.x={twist.linear.x})"
         )
         # Sign flip per NED→ENU frame adaptation in send_command.
@@ -599,13 +590,7 @@ class TestEmaSmoothing:
         ctx = SafetyContext.from_detection(_det())
         asyncio.run(adapter.send_command(cmd, ctx))
         twist = adapter._publisher.publish.call_args[0][0]
-        # Forward scaled by yaw-align (0.5 * (1 - 0.2/max_yawspeed)). EMA
-        # first-call passthrough is unaffected; yaw_out used by the
-        # attenuation IS the EMA-passed-through value, so the formula
-        # composes cleanly.
-        from robot_follow.follow_api.config import ControllerConfig
-        cfg_max_yaw = ControllerConfig().max_yawspeed
-        assert twist.linear.x == pytest.approx(0.5 * (1.0 - 0.2 / cfg_max_yaw))
+        assert twist.linear.x == pytest.approx(0.5)
         assert twist.angular.z == pytest.approx(-0.2)  # sign flip only
 
     def test_repeated_calls_converge_via_ema(self, rclpy_mock):
@@ -662,64 +647,6 @@ class TestEmaSmoothing:
             "smooth_yaw=False must publish the current raw cmd, not a "
             "filtered blend of previous + current"
         )
-
-
-class TestYawAlignForwardAttenuation:
-    """Yaw-aware forward attenuation: skid-steer can't curve, so when the
-    rover is yawing hard the person slides off the side of the frame.
-    Positive forward is scaled by max(0, 1 - |yaw|/max_yawspeed); retreat
-    (negative forward) is unattenuated so a near-edge target can still be
-    recovered while backing up.
-    """
-
-    def _build(self, rclpy_mock, **cfg_overrides):
-        from robot_follow.follow_api.config import ControllerConfig
-        from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
-        config = ControllerConfig()
-        # Disable EMA to keep math direct; attenuation is independent of it.
-        config.smooth_yaw = False
-        config.smooth_forward = False
-        for k, v in cfg_overrides.items():
-            setattr(config, k, v)
-        adapter = Ros2RoverAdapter(_default_args(), config)
-        asyncio.run(adapter.connect())
-        asyncio.run(adapter.start_session())
-        return adapter, config
-
-    def test_yaw_at_max_attenuates_forward_to_zero(self, rclpy_mock):
-        from robot_follow.follow_api.types import RobotCommand, SafetyContext
-        adapter, config = self._build(rclpy_mock)
-        cmd = RobotCommand(forward_m_s=1.0, yaw_rate=config.max_yawspeed)
-        asyncio.run(adapter.send_command(cmd, SafetyContext.from_detection(_det())))
-        twist = adapter._publisher.publish.call_args[0][0]
-        assert twist.linear.x == pytest.approx(0.0)
-
-    def test_yaw_zero_leaves_forward_unchanged(self, rclpy_mock):
-        from robot_follow.follow_api.types import RobotCommand, SafetyContext
-        adapter, _ = self._build(rclpy_mock)
-        cmd = RobotCommand(forward_m_s=1.0, yaw_rate=0.0)
-        asyncio.run(adapter.send_command(cmd, SafetyContext.from_detection(_det())))
-        twist = adapter._publisher.publish.call_args[0][0]
-        assert twist.linear.x == pytest.approx(1.0)
-
-    def test_retreat_unattenuated_under_hard_yaw(self, rclpy_mock):
-        """Backing up while turning to recover a near-edge target is the
-        right move — retreat must keep its full magnitude regardless of yaw."""
-        from robot_follow.follow_api.types import RobotCommand, SafetyContext
-        adapter, config = self._build(rclpy_mock)
-        cmd = RobotCommand(forward_m_s=-0.8, yaw_rate=config.max_yawspeed)
-        asyncio.run(adapter.send_command(cmd, SafetyContext.from_detection(_det())))
-        twist = adapter._publisher.publish.call_args[0][0]
-        assert twist.linear.x == pytest.approx(-0.8)
-
-    def test_yaw_beyond_max_clamps_attenuation_at_zero(self, rclpy_mock):
-        """max(0, ...) clamp: yaw above max doesn't drive forward negative."""
-        from robot_follow.follow_api.types import RobotCommand, SafetyContext
-        adapter, config = self._build(rclpy_mock)
-        cmd = RobotCommand(forward_m_s=1.0, yaw_rate=config.max_yawspeed * 2.0)
-        asyncio.run(adapter.send_command(cmd, SafetyContext.from_detection(_det())))
-        twist = adapter._publisher.publish.call_args[0][0]
-        assert twist.linear.x == pytest.approx(0.0)
 
 
 class TestSigintShutdown:
