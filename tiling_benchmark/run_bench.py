@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 BENCH_SCRIPT = HERE / "tiling_bench.py"
 ANALYZE_SCRIPT = HERE / "analyze_bench.py"
 DEFAULT_VIDEO = "/home/giladn/Videos/Drone/mafat_car.mp4"
-DEFAULT_OUT_DIR = Path("/tmp")
+DEFAULT_OUT_DIR = Path(__file__).resolve().parent / "pxt_runs"
 
 # All runs go through the visdrone SSD-MobileNet model so detections from
 # different tile configs use the same class space — required for mAP to be

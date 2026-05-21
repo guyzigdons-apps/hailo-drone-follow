@@ -4,10 +4,10 @@
 
 **Goal:** Quantify the effective "pixels per target" the Hailo detection network needs to reliably find people and vehicles in DJI drone footage, by running an inference sweep across multiple tiling layouts and source resolutions against a high-recall pseudo-ground-truth.
 
-**Architecture:** Reuses the existing `bench/tiling_bench.py` GStreamer benchmark harness (it already dumps normalized per-frame detections to `<run>.frames.json`). A new driver `run_pxt_bench.py` defines the experiment list (a GT config + a sweep matrix) and dispatches `tiling_bench.py` once per config. A new analyzer `analyze_pxt.py` joins each candidate's detections to the GT detections frame-by-frame, then bins the GT objects by their height in **source pixels** to produce a recall-vs-size curve per class. An optional overlay viewer `overlay_dets.py` renders the saved per-frame JSON on top of the source video on the fly (no annotated video file written).
+**Architecture:** Reuses the existing `tiling_benchmark/tiling_bench.py` GStreamer benchmark harness (it already dumps normalized per-frame detections to `<run>.frames.json`). A new driver `run_pxt_bench.py` defines the experiment list (a GT config + a sweep matrix) and dispatches `tiling_bench.py` once per config. A new analyzer `analyze_pxt.py` joins each candidate's detections to the GT detections frame-by-frame, then bins the GT objects by their height in **source pixels** to produce a recall-vs-size curve per class. An optional overlay viewer `overlay_dets.py` renders the saved per-frame JSON on top of the source video on the fly (no annotated video file written).
 
 **Tech Stack:**
-- GStreamer + `hailotilecropper_dynamic` (already wired up in `bench/tiling_bench.py` / `tiling_record.py`)
+- GStreamer + `hailotilecropper_dynamic` (already wired up in `tiling_benchmark/tiling_bench.py` / `tiling_record.py`)
 - Hailo-10H + `hailo_yolov8n_4_classes_vga.hef` — the **default HEF** used by the upstream tiling app. Input shape **640×480 (W×H)**, 4 classes via on-chip NMS, label strings from `hailo_4_classes.json` (`person`, `vehicle`, `face`, `license_plate`).
 - Python 3, OpenCV (for overlay viewer only)
 - JSON for all artefacts (one summary + one per-frame JSON per run, plus an aggregate analysis JSON)
@@ -33,9 +33,9 @@
 | Detection threshold | 0.5 (from labels JSON `detection_threshold`); max 200 boxes total. |
 | Classes (HEF NMS output) | indices 0–3 → label strings `person`, `vehicle`, `face`, `license_plate` (note: labels JSON has 5 entries because index 0 is `unlabeled`, then the four real classes shift by 1 in display — the post-process .so handles the offset). |
 | Headline classes | **`person`** and **`vehicle`** (these are the two the user called out as "person and car"; "car" is folded into "vehicle" in this model). `face` and `license_plate` are still scored — they may be too small to ever cross threshold and are useful as a sanity-check for very-small-object recall. |
-| Output root | `/home/giladn/Videos/Drone/Training/pxt_runs/` — JSONs collected at the root, one pair per run label |
+| Output root | `tiling_benchmark/pxt_runs/` — JSONs collected at the root, one pair per run label |
 
-> **If the user later asks for a visdrone- or yolov8m-specific run:** the existing `bench/run_bench.py` covers visdrone SSD MobileNet; Task 8 (below) covers a small-scale yolov8m / visdrone comparison on a subset of the matrix. Don't break either path; `run_pxt_bench.py` is additive.
+> **If the user later asks for a visdrone- or yolov8m-specific run:** the existing `tiling_benchmark/run_bench.py` covers visdrone SSD MobileNet; Task 8 (below) covers a small-scale yolov8m / visdrone comparison on a subset of the matrix. Don't break either path; `run_pxt_bench.py` is additive.
 
 ---
 
@@ -43,12 +43,12 @@
 
 | File | Status | Responsibility |
 |------|--------|----------------|
-| `bench/run_pxt_bench.py` | **new** | Driver: experiment list, dispatches `tiling_bench.py` per config, prints comparison table, kicks off `analyze_pxt.py`. |
-| `bench/analyze_pxt.py` | **new** | Loads GT + N candidate `*.frames.json` files; per-frame greedy IoU match per class; bins GT objects by source-pixel height; emits per-bin recall, per-class AP, and a CSV-friendly summary. |
-| `bench/overlay_dets.py` | **new** | Stand-alone OpenCV viewer that scrubs the source video and overlays bboxes loaded from one or more `frames.json` files (no encoding). |
-| `bench/tiling_bench.py` | **modify** | Add `--source-width` / `--source-height` pass-through so the driver can explicitly set the videoscale target instead of inheriting the default 1280×800. (Currently the only way to change it is `--width` / `--height`, which the parent parser already accepts — verify in Task 1 that those flags reach `video_width`/`video_height`. If yes, NO modify is needed.) |
-| `bench/run_bench.py` | **untouched** | Existing visdrone SSD MobileNet sweep stays as is. |
-| `docs/superpowers/plans/2026-05-20-bench-tiling-pxt-accuracy.md` | (this file) | The plan. |
+| `tiling_benchmark/run_pxt_bench.py` | **new** | Driver: experiment list, dispatches `tiling_bench.py` per config, prints comparison table, kicks off `analyze_pxt.py`. |
+| `tiling_benchmark/analyze_pxt.py` | **new** | Loads GT + N candidate `*.frames.json` files; per-frame greedy IoU match per class; bins GT objects by source-pixel height; emits per-bin recall, per-class AP, and a CSV-friendly summary. |
+| `tiling_benchmark/overlay_dets.py` | **new** | Stand-alone OpenCV viewer that scrubs the source video and overlays bboxes loaded from one or more `frames.json` files (no encoding). |
+| `tiling_benchmark/tiling_bench.py` | **modify** | Add `--source-width` / `--source-height` pass-through so the driver can explicitly set the videoscale target instead of inheriting the default 1280×800. (Currently the only way to change it is `--width` / `--height`, which the parent parser already accepts — verify in Task 1 that those flags reach `video_width`/`video_height`. If yes, NO modify is needed.) |
+| `tiling_benchmark/run_bench.py` | **untouched** | Existing visdrone SSD MobileNet sweep stays as is. |
+| `docs/superpowers/plans/2026-05-20-tiling-benchmark-pxt-accuracy.md` | (this file) | The plan. |
 
 ---
 
@@ -73,7 +73,7 @@ The model input is **640 × 480 (4:3)**, and the cropper does a centered-letterb
 
 **Why one GT (not two):** the 12×9 / 25 % overlap config gives tiles of 650 × 484 source pixels — within 2 % of the model's native 640 × 480 input on both axes. Going to 50 % overlap costs ~2.5× more inferences without buying much, because the existing 25 % overlap already provides ~163 px of horizontal slack between adjacent tile centers (no object thinner than that can fall between two tiles). One GT, less inference cost.
 
-**Tile-size math:** `tile_px_w = source_w / (tiles_x · (1 - overlap_x) + overlap_x)`. The `hailotilecropper_dynamic` plugin computes the same way (confirmed by `bench/tiling_record.py:236`). Pixel counts above are precomputed for sanity-checking; if a row's tile size deviates from the table at runtime, re-check the overlap convention before panicking.
+**Tile-size math:** `tile_px_w = source_w / (tiles_x · (1 - overlap_x) + overlap_x)`. The `hailotilecropper_dynamic` plugin computes the same way (confirmed by `tiling_benchmark/tiling_record.py:236`). Pixel counts above are precomputed for sanity-checking; if a row's tile size deviates from the table at runtime, re-check the overlap convention before panicking.
 
 **Total inference cost (worst case):** 1035 frames × (108 + 1 + 1 + 4 + 6 + 9 + 12 + 24 + 48 + 13) ≈ 226 tiles/frame × 1035 ≈ 234 K inferences across all configs. The yolov8n 4-classes model on H10 is fast (small backbone, 2-context); estimate ~20–40 min wall-clock total (the dynamic cropper batches efficiently — `tiling_bench` already disables sync).
 
@@ -113,7 +113,7 @@ Suggested dispatch order if running via `superpowers:subagent-driven-development
 
 **Files:**
 - Read-only: `/home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D.MP4`
-- Read-only: `/home/giladn/tappas_apps/repos/hailo-drone-follow/bench/tiling_bench.py`
+- Read-only: `/home/giladn/tappas_apps/repos/hailo-drone-follow/tiling_benchmark/tiling_bench.py`
 
 - [ ] **Step 1: Probe decoded resolution with a 2-second smoke run**
 
@@ -122,14 +122,14 @@ Run a 1×1 yolov8m bench against the test video, capped at native source dims, w
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
 source setup_env.sh
-mkdir -p /home/giladn/Videos/Drone/Training/pxt_runs
-python bench/tiling_bench.py \
+mkdir -p tiling_benchmark/pxt_runs
+python tiling_benchmark/tiling_bench.py \
     --input file:///home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D.MP4 \
     --tiles-x 1 --tiles-y 1 --overlap-x 0 --overlap-y 0 \
     --width 6016 --height 3384 \
     --hef-path /usr/local/hailo/resources/models/hailo10h/hailo_yolov8n_4_classes_vga.hef \
     --labels-json /usr/local/hailo/resources/json/hailo_4_classes.json \
-    --bench-output /home/giladn/Videos/Drone/Training/pxt_runs/smoke_1x1.json \
+    --bench-output tiling_benchmark/pxt_runs/smoke_1x1.json \
     --bench-label smoke_1x1 \
     --disable-sync 2>&1 | tail -40
 ```
@@ -145,7 +145,7 @@ Expected:
 ```bash
 python3 -c "
 import json
-d = json.load(open('/home/giladn/Videos/Drone/Training/pxt_runs/smoke_1x1.frames.json'))
+d = json.load(open('tiling_benchmark/pxt_runs/smoke_1x1.frames.json'))
 labels = {}
 for fr in d['frames']:
     for det in fr['detections']:
@@ -160,7 +160,7 @@ Expected output: a dict whose keys include `person` and `vehicle` (and likely `f
 
 If Step 1 produced `Input Resolution: 6016x3384` in the banner, then no modifications are needed to `tiling_bench.py`: the parent parser's `--width` / `--height` already drive the videoscale target. Skip the `--source-width`/`--source-height` addition mentioned in the File Structure table.
 
-If instead the banner shows the default 1280×800 (i.e. `--width 6016 --height 3384` did not override), then `bench/tiling_bench.py:541` calls `parser.set_defaults(width=1280, height=800)` AFTER the parent parser is built, but `argparse.set_defaults` should still let CLI flags win — verify the actual values via `--help` and re-run with the canonical flag names. **Do not patch the parser unless this verification fails.**
+If instead the banner shows the default 1280×800 (i.e. `--width 6016 --height 3384` did not override), then `tiling_benchmark/tiling_bench.py:541` calls `parser.set_defaults(width=1280, height=800)` AFTER the parent parser is built, but `argparse.set_defaults` should still let CLI flags win — verify the actual values via `--help` and re-run with the canonical flag names. **Do not patch the parser unless this verification fails.**
 
 - [ ] **Step 4: Commit the smoke output (or not)**
 
@@ -168,28 +168,28 @@ The smoke JSONs live outside the repo (`/home/giladn/Videos/...`) so there is no
 
 ---
 
-## Task 1: Add the pxt driver `bench/run_pxt_bench.py`
+## Task 1: Add the pxt driver `tiling_benchmark/run_pxt_bench.py`
 
 > **No chip. Safe to run in parallel with any other no-chip task.**
 
 **Files:**
-- Create: `/home/giladn/tappas_apps/repos/hailo-drone-follow/bench/run_pxt_bench.py`
+- Create: `/home/giladn/tappas_apps/repos/hailo-drone-follow/tiling_benchmark/run_pxt_bench.py`
 
 - [ ] **Step 1: Create the driver**
 
-Write the file end-to-end. It hardcodes the experiment list (matrix above) and dispatches `tiling_bench.py` per config. Output dir is parameterised but defaults to `/home/giladn/Videos/Drone/Training/pxt_runs/`.
+Write the file end-to-end. It hardcodes the experiment list (matrix above) and dispatches `tiling_bench.py` per config. Output dir is parameterised but defaults to `tiling_benchmark/pxt_runs/`.
 
 ```python
 """Driver for the pixels-per-target tiling sweep.
 
 Runs a hardcoded experiment matrix of (source resolution) × (tile grid)
-through bench/tiling_bench.py, then invokes bench/analyze_pxt.py with the
+through tiling_benchmark/tiling_bench.py, then invokes tiling_benchmark/analyze_pxt.py with the
 highest-recall config as pseudo-ground-truth.
 
 Usage:
-  python bench/run_pxt_bench.py
-  python bench/run_pxt_bench.py --skip-existing
-  python bench/run_pxt_bench.py --only GT-12x9-25 1x1-native
+  python tiling_benchmark/run_pxt_bench.py
+  python tiling_benchmark/run_pxt_bench.py --skip-existing
+  python tiling_benchmark/run_pxt_bench.py --only GT-12x9-25 1x1-native
 """
 
 import argparse
@@ -204,7 +204,7 @@ BENCH_SCRIPT = HERE / "tiling_bench.py"
 ANALYZE_SCRIPT = HERE / "analyze_pxt.py"
 
 DEFAULT_VIDEO = "/home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D.MP4"
-DEFAULT_OUT_DIR = Path("/home/giladn/Videos/Drone/Training/pxt_runs")
+DEFAULT_OUT_DIR = Path(__file__).resolve().parent / "pxt_runs"
 
 # The tiling app's default HEF (hailo_yolov8n_4_classes_vga, 640x480 input,
 # 4 classes: person/vehicle/face/license_plate). Pass HEF_PATH=None to let
@@ -381,8 +381,8 @@ if __name__ == "__main__":
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
 source setup_env.sh
-python bench/run_pxt_bench.py --help
-python bench/run_pxt_bench.py --only NOPE 2>&1 | head -5
+python tiling_benchmark/run_pxt_bench.py --help
+python tiling_benchmark/run_pxt_bench.py --only NOPE 2>&1 | head -5
 ```
 
 Expected:
@@ -393,12 +393,12 @@ Expected:
 
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
-git add bench/run_pxt_bench.py
+git add tiling_benchmark/run_pxt_bench.py
 git commit -m "bench: add pixels-per-target tiling sweep driver
 
 run_pxt_bench.py defines a (source resolution × tile grid) experiment
-matrix and dispatches bench/tiling_bench.py per config. Output JSONs land
-under /home/giladn/Videos/Drone/Training/pxt_runs/. Drives analyze_pxt.py
+matrix and dispatches tiling_benchmark/tiling_bench.py per config. Output JSONs land
+under tiling_benchmark/pxt_runs/. Drives analyze_pxt.py
 post-run with the GT-12x9-25 config flagged as pseudo-ground-truth."
 ```
 
@@ -409,8 +409,8 @@ post-run with the GT-12x9-25 config flagged as pseudo-ground-truth."
 > **Chip-bound. Sequential.** Do not start while Task 0 / Task 3 / Task 5 / Task 8 are running. No-chip tasks (1, 4, 6, 7) can run in parallel subagents.
 
 **Files:**
-- Read-only: `bench/run_pxt_bench.py`
-- Output: `/home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.json` + `.frames.json`
+- Read-only: `tiling_benchmark/run_pxt_bench.py`
+- Output: `tiling_benchmark/pxt_runs/pxt_GT-12x9-25.json` + `.frames.json`
 
 - [ ] **Step 1: Estimate runtime by extrapolation**
 
@@ -421,16 +421,16 @@ post-run with the GT-12x9-25 config flagged as pseudo-ground-truth."
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
 source setup_env.sh
-mkdir -p /home/giladn/Videos/Drone/Training/pxt_runs
-nohup python bench/run_pxt_bench.py --only GT-12x9-25 --skip-analyze \
-    > /home/giladn/Videos/Drone/Training/pxt_runs/run_gt.log 2>&1 &
+mkdir -p tiling_benchmark/pxt_runs
+nohup python tiling_benchmark/run_pxt_bench.py --only GT-12x9-25 --skip-analyze \
+    > tiling_benchmark/pxt_runs/run_gt.log 2>&1 &
 echo "GT PID: $!"
 ```
 
 - [ ] **Step 3: Tail the log until you see EOS / BENCH RESULT**
 
 ```bash
-tail -f /home/giladn/Videos/Drone/Training/pxt_runs/run_gt.log
+tail -f tiling_benchmark/pxt_runs/run_gt.log
 ```
 
 Expected (eventually):
@@ -445,7 +445,7 @@ If `frames=1035` is not the count you see, decoder/EOS issue — debug before ru
 ```bash
 python3 -c "
 import json
-d = json.load(open('/home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.frames.json'))
+d = json.load(open('tiling_benchmark/pxt_runs/pxt_GT-12x9-25.frames.json'))
 from collections import Counter
 labs = Counter()
 sizes = []
@@ -474,7 +474,7 @@ Expected: `person` and `car` (or similar COCO labels) dominate; per-frame avg de
 > **Chip-bound. Sequential.** Starts after Task 2 finishes.
 
 **Files:**
-- Read-only: `bench/run_pxt_bench.py`
+- Read-only: `tiling_benchmark/run_pxt_bench.py`
 - Outputs: ten more `pxt_*.json` + `.frames.json` files
 
 - [ ] **Step 1: Kick off**
@@ -482,8 +482,8 @@ Expected: `person` and `car` (or similar COCO labels) dominate; per-frame avg de
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
 source setup_env.sh
-nohup python bench/run_pxt_bench.py --skip-existing --skip-analyze \
-    > /home/giladn/Videos/Drone/Training/pxt_runs/run_sweep.log 2>&1 &
+nohup python tiling_benchmark/run_pxt_bench.py --skip-existing --skip-analyze \
+    > tiling_benchmark/pxt_runs/run_sweep.log 2>&1 &
 echo "sweep PID: $!"
 ```
 
@@ -492,7 +492,7 @@ echo "sweep PID: $!"
 - [ ] **Step 2: Monitor**
 
 ```bash
-tail -f /home/giladn/Videos/Drone/Training/pxt_runs/run_sweep.log
+tail -f tiling_benchmark/pxt_runs/run_sweep.log
 ```
 
 Expect ~10–15 minutes total for the small grids (1×1, 2×2, 3×2, 3×3) and another ~10 minutes for 4×3 / 6×4 / 8×6.
@@ -500,7 +500,7 @@ Expect ~10–15 minutes total for the small grids (1×1, 2×2, 3×2, 3×3) and a
 - [ ] **Step 3: Confirm all outputs exist**
 
 ```bash
-ls -1 /home/giladn/Videos/Drone/Training/pxt_runs/pxt_*.frames.json | wc -l
+ls -1 tiling_benchmark/pxt_runs/pxt_*.frames.json | wc -l
 ```
 
 Expected: **11** files (one per config in the matrix).
@@ -511,12 +511,12 @@ If any are missing, identify which from the log (look for a config whose `BENCH 
 
 ---
 
-## Task 4: Add the pixels-per-target analyzer `bench/analyze_pxt.py`
+## Task 4: Add the pixels-per-target analyzer `tiling_benchmark/analyze_pxt.py`
 
 > **No chip. Safe to dispatch in parallel with Task 2 / Task 3.**
 
 **Files:**
-- Create: `/home/giladn/tappas_apps/repos/hailo-drone-follow/bench/analyze_pxt.py`
+- Create: `/home/giladn/tappas_apps/repos/hailo-drone-follow/tiling_benchmark/analyze_pxt.py`
 
 - [ ] **Step 1: Create the analyzer**
 
@@ -534,12 +534,12 @@ person, do I need a 3x2 grid or a 6x4 grid?". Headline classes are
 HEF emits that the user cares about — 'car' is folded into 'vehicle').
 
 Usage:
-  python bench/analyze_pxt.py \\
-      --gt /home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.frames.json \\
-      --pred /home/giladn/Videos/Drone/Training/pxt_runs/pxt_1x1-native.frames.json \\
-      --pred /home/giladn/Videos/Drone/Training/pxt_runs/pxt_3x2-native.frames.json \\
+  python tiling_benchmark/analyze_pxt.py \\
+      --gt tiling_benchmark/pxt_runs/pxt_GT-12x9-25.frames.json \\
+      --pred tiling_benchmark/pxt_runs/pxt_1x1-native.frames.json \\
+      --pred tiling_benchmark/pxt_runs/pxt_3x2-native.frames.json \\
       --video-w 6016 --video-h 3384 \\
-      --out /home/giladn/Videos/Drone/Training/pxt_runs/pxt_analysis.json
+      --out tiling_benchmark/pxt_runs/pxt_analysis.json
 """
 
 import argparse
@@ -778,9 +778,9 @@ if __name__ == "__main__":
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
 source setup_env.sh
-python bench/analyze_pxt.py \
-    --gt /home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.frames.json \
-    --pred /home/giladn/Videos/Drone/Training/pxt_runs/pxt_1x1-native.frames.json \
+python tiling_benchmark/analyze_pxt.py \
+    --gt tiling_benchmark/pxt_runs/pxt_GT-12x9-25.frames.json \
+    --pred tiling_benchmark/pxt_runs/pxt_1x1-native.frames.json \
     --video-w 6016 --video-h 3384 \
     --iou 0.5
 ```
@@ -793,7 +793,7 @@ Expected:
 
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
-git add bench/analyze_pxt.py
+git add tiling_benchmark/analyze_pxt.py
 git commit -m "bench: add size-binned recall analyzer for pxt sweep
 
 analyze_pxt.py reuses analyze_bench.iou + class-key helpers and adds a
@@ -810,15 +810,15 @@ per candidate config count how many GTs were recovered. Headlines the
 
 **Files:**
 - Read-only: 11 `pxt_*.frames.json`
-- Output: `/home/giladn/Videos/Drone/Training/pxt_runs/pxt_analysis.json`
+- Output: `tiling_benchmark/pxt_runs/pxt_analysis.json`
 
 - [ ] **Step 1: Drive from the runner**
 
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
 source setup_env.sh
-python bench/run_pxt_bench.py --skip-existing \
-    2>&1 | tee /home/giladn/Videos/Drone/Training/pxt_runs/full.log
+python tiling_benchmark/run_pxt_bench.py --skip-existing \
+    2>&1 | tee tiling_benchmark/pxt_runs/full.log
 ```
 
 (All bench JSONs already exist from Tasks 2–3, so this will skip straight to the analysis step.)
@@ -838,12 +838,12 @@ For each headline class, find the *smallest* bin where recall ≥ 80% (an editor
 
 ---
 
-## Task 6: Add the overlay viewer `bench/overlay_dets.py`
+## Task 6: Add the overlay viewer `tiling_benchmark/overlay_dets.py`
 
 > **No chip. Safe to dispatch in parallel with Task 2 / Task 3.**
 
 **Files:**
-- Create: `/home/giladn/tappas_apps/repos/hailo-drone-follow/bench/overlay_dets.py`
+- Create: `/home/giladn/tappas_apps/repos/hailo-drone-follow/tiling_benchmark/overlay_dets.py`
 
 - [ ] **Step 1: Create the viewer**
 
@@ -858,10 +858,10 @@ draws them with a per-file colour. Press SPACE to pause, Q to quit, [/] to
 step backward/forward when paused, +/- to change playback speed.
 
 Usage:
-  python bench/overlay_dets.py \\
+  python tiling_benchmark/overlay_dets.py \\
       --video /home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D.MP4 \\
-      --frames /home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.frames.json:GT \\
-      --frames /home/giladn/Videos/Drone/Training/pxt_runs/pxt_3x2-native.frames.json:3x2
+      --frames tiling_benchmark/pxt_runs/pxt_GT-12x9-25.frames.json:GT \\
+      --frames tiling_benchmark/pxt_runs/pxt_3x2-native.frames.json:3x2
 
 The `:label` suffix is optional; defaults to the JSON's own label field or
 the filename stem if absent.
@@ -1019,10 +1019,10 @@ if __name__ == "__main__":
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
 source setup_env.sh
-DISPLAY=:0 python bench/overlay_dets.py \
+DISPLAY=:0 python tiling_benchmark/overlay_dets.py \
     --video /home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D.MP4 \
-    --frames /home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.frames.json:GT \
-    --frames /home/giladn/Videos/Drone/Training/pxt_runs/pxt_1x1-native.frames.json:1x1
+    --frames tiling_benchmark/pxt_runs/pxt_GT-12x9-25.frames.json:GT \
+    --frames tiling_benchmark/pxt_runs/pxt_1x1-native.frames.json:1x1
 ```
 
 Expected:
@@ -1035,7 +1035,7 @@ If no display is available (headless SSH), skip and rely on the JSON analysis fr
 
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
-git add bench/overlay_dets.py
+git add tiling_benchmark/overlay_dets.py
 git commit -m "bench: add OpenCV overlay viewer for pxt frames.json
 
 overlay_dets.py opens the source video and renders bboxes from one or more
@@ -1050,7 +1050,7 @@ frames.json files with distinct per-file colours. SPACE=pause, Q=quit,
 > **No chip.** Pure writing — can be dispatched as a subagent concurrent with Task 5.
 
 **Files:**
-- Read-only: `/home/giladn/Videos/Drone/Training/pxt_runs/pxt_analysis.json`
+- Read-only: `tiling_benchmark/pxt_runs/pxt_analysis.json`
 - Output: stdout report (no new file)
 
 - [ ] **Step 1: Read the per-class bin tables and identify the "knee"**
@@ -1064,7 +1064,7 @@ For each of `person` and `car`:
 
 - [ ] **Step 2: Write a short markdown report**
 
-Append a section to `docs/superpowers/plans/2026-05-20-bench-tiling-pxt-accuracy.md` (this file) titled `## Findings` with:
+Append a section to `docs/superpowers/plans/2026-05-20-tiling-benchmark-pxt-accuracy.md` (this file) titled `## Findings` with:
 
 - a small markdown table of (config, smallest 80%-recall bin) per class
 - a one-line recommendation, e.g. "to reliably catch a person at 32 px height in source, use ≥ 4×3 tiling at native resolution; cars at the same source height need only 3×2".
@@ -1075,7 +1075,7 @@ This step is human-judgement-only — no automation. If the recall curve is nois
 
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
-git add docs/superpowers/plans/2026-05-20-bench-tiling-pxt-accuracy.md
+git add docs/superpowers/plans/2026-05-20-tiling-benchmark-pxt-accuracy.md
 git commit -m "docs: record findings of the pxt sweep
 
 Adds the headline pixels-per-target threshold per class to the plan doc."
@@ -1090,8 +1090,8 @@ Adds the headline pixels-per-target threshold per class to the plan doc."
 **Why deferred:** the user said they want "a test with other networks, but they will not run on the entire tiling sweep". This task is here so future-me knows the intent; do not execute until asked.
 
 **Files (when executed):**
-- Create: `bench/run_pxt_other_networks.py` — variant driver that takes a HEF path + label set + a *subset* of the matrix.
-- Modify: `bench/analyze_pxt.py` — no change needed; it's class-name-keyed and works for any model.
+- Create: `tiling_benchmark/run_pxt_other_networks.py` — variant driver that takes a HEF path + label set + a *subset* of the matrix.
+- Modify: `tiling_benchmark/analyze_pxt.py` — no change needed; it's class-name-keyed and works for any model.
 
 **Candidate networks (already on disk):**
 
@@ -1113,9 +1113,9 @@ Adds the headline pixels-per-target threshold per class to the plan doc."
 
 3 networks × 5 configs = 15 runs. Wall-clock estimate: ~30 min for yolov8n-4-class (already done), ~60–90 min for yolov8m, ~20 min for SSD MobileNet (small model, but 300×300 input → 4× the tile count needed for the same pxt; this row is mostly here to characterise the model, not the tiling).
 
-- [ ] **Step 1: Write `bench/run_pxt_other_networks.py`**
+- [ ] **Step 1: Write `tiling_benchmark/run_pxt_other_networks.py`**
 
-Copy `bench/run_pxt_bench.py` to a new file, replace `CONFIGS` with the 5-row subset above, and add three more constants for the network. Take the network choice from a CLI flag so the same driver covers all three:
+Copy `tiling_benchmark/run_pxt_bench.py` to a new file, replace `CONFIGS` with the 5-row subset above, and add three more constants for the network. Take the network choice from a CLI flag so the same driver covers all three:
 
 ```python
 NETS = {
@@ -1171,7 +1171,7 @@ Once each network's per-size-bin recall is in JSON, the user can eyeball "at wha
 
 ```bash
 cd /home/giladn/tappas_apps/repos/hailo-drone-follow
-git add bench/run_pxt_other_networks.py bench/analyze_pxt.py
+git add tiling_benchmark/run_pxt_other_networks.py tiling_benchmark/analyze_pxt.py
 git commit -m "bench: add other-networks pxt comparison (subset of matrix)
 
 run_pxt_other_networks.py drives yolov8m / visdrone-ssd / yolov6n over a

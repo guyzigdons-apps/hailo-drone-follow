@@ -35,3 +35,6 @@ txrx.key
 
 # GStreamer Shark profiling output
 gstshark_*/
+
+# Tiling benchmark run outputs + preview cache
+tiling_benchmark/pxt_runs/

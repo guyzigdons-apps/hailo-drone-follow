@@ -19,7 +19,7 @@ Vendored from upstream `hailotilecropper` plus extensions. Source at
 
 ## Working around the missing grid props
 
-`bench/tiling_record.py` was patched (commit `7d9a8d9`) to **restore the Python-side `_grid_to_static_tiles()` helper** that was previously deleted. `DYNAMIC_TILE_CROPPER_PIPELINE` now enumerates the requested grid into normalized rectangles and concatenates them with any user-supplied `tiles_static` extras, all passed via the single `tiles-static` property. Math used: `T = 1 / (N - (N-1) * o)`, `step = T * (1 - o)`. Diverges slightly from upstream `prepare_tiles()` clamping but is internally consistent — fine for comparing GT vs candidate runs that all use this helper.
+`tiling_benchmark/tiling_record.py` was patched (commit `7d9a8d9`) to **restore the Python-side `_grid_to_static_tiles()` helper** that was previously deleted. `DYNAMIC_TILE_CROPPER_PIPELINE` now enumerates the requested grid into normalized rectangles and concatenates them with any user-supplied `tiles_static` extras, all passed via the single `tiles-static` property. Math used: `T = 1 / (N - (N-1) * o)`, `step = T * (1 - o)`. Diverges slightly from upstream `prepare_tiles()` clamping but is internally consistent — fine for comparing GT vs candidate runs that all use this helper.
 
 ## Properties on the installed plugin (gst-inspect)
 | Property | Type | Default |

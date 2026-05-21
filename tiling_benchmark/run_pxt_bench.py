@@ -1,13 +1,14 @@
 """Driver for the pixels-per-target tiling sweep.
 
 Runs a hardcoded experiment matrix of (source resolution) × (tile grid)
-through bench/tiling_bench.py, then invokes bench/analyze_pxt.py with the
-highest-recall config as pseudo-ground-truth.
+through tiling_benchmark/tiling_bench.py, then invokes
+tiling_benchmark/analyze_pxt.py with the highest-recall config as
+pseudo-ground-truth.
 
 Usage:
-  python bench/run_pxt_bench.py
-  python bench/run_pxt_bench.py --skip-existing
-  python bench/run_pxt_bench.py --only GT-12x9-25 1x1-native
+  python tiling_benchmark/run_pxt_bench.py
+  python tiling_benchmark/run_pxt_bench.py --skip-existing
+  python tiling_benchmark/run_pxt_bench.py --only GT-12x9-25 1x1-native
 """
 
 import argparse
@@ -25,7 +26,7 @@ ANALYZE_SCRIPT = HERE / "analyze_pxt.py"
 # decodebin does NOT apply the original file's rotate=90 side-data — feeding the
 # untouched source results in horizontally-stretched portrait frames.
 DEFAULT_VIDEO = "/home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D_rotated.MP4"
-DEFAULT_OUT_DIR = Path("/home/giladn/Videos/Drone/Training/pxt_runs")
+DEFAULT_OUT_DIR = Path(__file__).resolve().parent / "pxt_runs"
 
 # The tiling app's default HEF (hailo_yolov8n_4_classes_vga, 640x480 input,
 # 4 classes: person/vehicle/face/license_plate). Pass HEF_PATH=None to let
