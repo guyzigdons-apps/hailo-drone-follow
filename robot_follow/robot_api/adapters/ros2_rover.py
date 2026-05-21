@@ -181,7 +181,16 @@ class Ros2RoverAdapter:
             return
         twist = self._Twist()
         twist.linear.x = cmd.forward_m_s
-        twist.angular.z = cmd.yaw_rate
+        # YAW SIGN FLIP: the controller emits yaw_rate using the drone's NED /
+        # MAVSDK convention where +z body axis points DOWN and clockwise-from-
+        # above is positive yawspeed. ROS REP-103 uses ENU with +z body axis
+        # pointing UP, so counter-clockwise-from-above is positive angular.z
+        # (right-hand rule). Same numeric sign → OPPOSITE rotation direction:
+        # without the flip the rover steers AWAY from the person.
+        # This is a frame-of-reference adaptation, NOT a unit conversion —
+        # the Q5 lock about deg/s vs rad/s magnitudes is preserved (the
+        # controller emits in caps.yaw_unit; the adapter only flips sign).
+        twist.angular.z = -cmd.yaw_rate
         # RINT-02 / Q1 lock: when the person's bbox bottom enters the lowest
         # 15% of the frame, override forward to 0.0 (stop driving). Yaw is
         # PRESERVED — the rover can still rotate to recenter. cmd is not

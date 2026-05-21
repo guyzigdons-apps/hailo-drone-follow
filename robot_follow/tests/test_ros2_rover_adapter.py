@@ -159,14 +159,20 @@ class TestTwistPublish:
         assert adapter._publisher.publish.called
         twist = adapter._publisher.publish.call_args.args[0]
         assert twist.linear.x == pytest.approx(1.5)
-        assert twist.angular.z == pytest.approx(0.3)
+        # Sign flip per ENU/NED frame adaptation in send_command (see
+        # ros2_rover.py): controller emits clockwise-from-above +ve
+        # (drone NED); rover publishes counter-clockwise-from-above +ve
+        # (ROS REP-103 ENU). Magnitude preserved; sign inverted.
+        assert twist.angular.z == pytest.approx(-0.3)
         assert twist.linear.y == pytest.approx(0.0)
         assert twist.linear.z == pytest.approx(0.0)
         assert twist.angular.x == pytest.approx(0.0)
         assert twist.angular.y == pytest.approx(0.0)
 
     def test_send_command_no_conversion_yaw_rate(self, rclpy_mock):
-        # yaw_rate=0.5 rad/s must hit angular.z verbatim, not 0.5 * π/180.
+        # yaw_rate=0.5 rad/s must hit angular.z verbatim (magnitude-wise) —
+        # no rad↔deg conversion. The sign flip is a separate frame-of-
+        # reference adaptation (NED→ENU), not a unit conversion.
         from robot_follow.follow_api.types import RobotCommand, SafetyContext
 
         adapter = _build_adapter(rclpy_mock)
@@ -176,7 +182,12 @@ class TestTwistPublish:
         ctx = SafetyContext.from_detection(_det())
         asyncio.run(adapter.send_command(cmd, ctx))
         twist = adapter._publisher.publish.call_args.args[0]
-        assert twist.angular.z == pytest.approx(0.5)
+        assert abs(twist.angular.z) == pytest.approx(0.5), (
+            "magnitude must be preserved (no rad↔deg conversion)"
+        )
+        assert twist.angular.z == pytest.approx(-0.5), (
+            "sign flipped per NED→ENU frame adaptation"
+        )
 
     def test_send_command_short_circuits_on_target_lost(self, rclpy_mock):
         from robot_follow.follow_api.types import RobotCommand, SafetyContext
@@ -399,7 +410,8 @@ class TestBottomEdgeNaturalStop:
             f"below threshold: forward must pass through "
             f"(got linear.x={twist.linear.x})"
         )
-        assert twist.angular.z == 0.1
+        # Sign flip per NED→ENU frame adaptation in send_command.
+        assert twist.angular.z == -0.1
 
     def test_at_threshold_forward_zeroed(self, rclpy_mock):
         """bbox_bottom_norm=0.85 == 0.85 -> override fires; forward zeroed.
@@ -451,9 +463,13 @@ class TestBottomEdgeNaturalStop:
         adapter._publisher.publish.assert_called_once()
         twist = adapter._publisher.publish.call_args[0][0]
         assert twist.linear.x == 0.0, "forward must be zeroed"
-        assert twist.angular.z == 0.3, (
-            f"yaw must be preserved (got angular.z={twist.angular.z}; "
-            f"expected 0.3 — RINT-02 rover-still-rotates-to-recenter contract)"
+        # Sign flip per NED→ENU frame adaptation: cmd.yaw_rate=+0.3 emerges
+        # as twist.angular.z=-0.3. Magnitude preserved (yaw NOT zeroed —
+        # the rover still rotates to recenter, just in ROS-convention sign).
+        assert twist.angular.z == -0.3, (
+            f"yaw magnitude must be preserved with NED→ENU sign flip "
+            f"(got angular.z={twist.angular.z}; expected -0.3 — "
+            f"RINT-02 rover-still-rotates-to-recenter contract)"
         )
 
     def test_none_bbox_bottom_norm_forward_passes_through(self, rclpy_mock):
@@ -476,6 +492,80 @@ class TestBottomEdgeNaturalStop:
         assert twist.linear.x == 0.4, (
             f"None bbox_bottom_norm must not trigger override "
             f"(got linear.x={twist.linear.x}; expected 0.4)"
+        )
+
+
+class TestYawSignSteersTowardPerson:
+    """Frame-of-reference adaptation: the controller's yaw_rate is in the
+    drone's NED clockwise-from-above convention; ROS REP-103 (ENU) is
+    counter-clockwise-from-above positive. The adapter negates yaw_rate
+    so the rover steers TOWARD a person on the right (not away).
+
+    Verified end-to-end with the controller's actual _compute_yaw output,
+    not just a synthetic cmd.yaw_rate, so a future controller refactor
+    that changes the emitted sign convention is caught here.
+    """
+
+    def test_person_on_right_makes_rover_turn_right(self, rclpy_mock):
+        """Person at center_x=0.7 (right side of frame) → rover must turn
+        right (clockwise from above) → ROS angular.z < 0.
+        """
+        from robot_follow.follow_api import controller as ctrl
+        from robot_follow.follow_api.config import ControllerConfig
+        from robot_follow.follow_api.types import Detection, SafetyContext
+        from robot_follow.robot_api.adapters.ros2_rover import ROVER_CAPS
+
+        det = Detection(label="person", confidence=0.9,
+                        center_x=0.7, center_y=0.5, bbox_height=0.20,
+                        timestamp=0.0)
+        cfg = ControllerConfig()  # default kp_yaw / hfov / dead_zone_deg
+        cmd = ctrl.compute(det, ROVER_CAPS, cfg)
+        assert cmd.yaw_rate > 0, (
+            "controller emits clockwise-from-above +ve when person is on "
+            f"the right (got cmd.yaw_rate={cmd.yaw_rate})"
+        )
+
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        ctx = SafetyContext.from_detection(det)
+        asyncio.run(adapter.send_command(cmd, ctx))
+        twist = adapter._publisher.publish.call_args[0][0]
+        # ROS REP-103: angular.z < 0 = clockwise-from-above = turn RIGHT.
+        # Person was on the right; rover must turn right to recenter.
+        assert twist.angular.z < 0, (
+            f"rover must turn RIGHT (angular.z < 0 in ROS ENU) toward a "
+            f"person on the right; got angular.z={twist.angular.z}"
+        )
+
+    def test_person_on_left_makes_rover_turn_left(self, rclpy_mock):
+        """Person at center_x=0.3 (left side) → rover must turn left
+        (counter-clockwise from above) → ROS angular.z > 0.
+        """
+        from robot_follow.follow_api import controller as ctrl
+        from robot_follow.follow_api.config import ControllerConfig
+        from robot_follow.follow_api.types import Detection, SafetyContext
+        from robot_follow.robot_api.adapters.ros2_rover import ROVER_CAPS
+
+        det = Detection(label="person", confidence=0.9,
+                        center_x=0.3, center_y=0.5, bbox_height=0.20,
+                        timestamp=0.0)
+        cfg = ControllerConfig()
+        cmd = ctrl.compute(det, ROVER_CAPS, cfg)
+        assert cmd.yaw_rate < 0, (
+            "controller emits counter-clockwise-from-above -ve when "
+            f"person is on the left (got cmd.yaw_rate={cmd.yaw_rate})"
+        )
+
+        adapter = _build_adapter(rclpy_mock)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        ctx = SafetyContext.from_detection(det)
+        asyncio.run(adapter.send_command(cmd, ctx))
+        twist = adapter._publisher.publish.call_args[0][0]
+        assert twist.angular.z > 0, (
+            f"rover must turn LEFT (angular.z > 0 in ROS ENU) toward a "
+            f"person on the left; got angular.z={twist.angular.z}"
         )
 
 
