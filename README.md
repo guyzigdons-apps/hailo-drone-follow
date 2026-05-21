@@ -311,7 +311,8 @@ robot-follow --robot rover --input udp://0.0.0.0:5600 \
 Rover-specific behaviours (rover adapter only — drone path untouched):
 
 - **Bottom-edge stop** — when the person's bbox bottom enters the lowest 15% of the frame (`bbox_bottom_norm >= 0.85`), forward is overridden to 0.0; yaw stays active so the rover can still rotate to recenter. Prevents close-range collisions where the person is below the camera's depression angle.
-- **Yaw-aware forward attenuation** — positive forward is scaled by `max(0, 1 - |yaw|/max_yawspeed)`. Skid-steer can't curve, so driving forward at full speed while turning hard slides the person off the side of the frame; the rover effectively pivots first when the target is far off-center, then accelerates as it re-centers. Retreat (negative forward) is unattenuated so the rover can back up and turn simultaneously to recover a near-edge target.
+- **EMA smoothing on yaw + forward** — the rover lives in a different latency / dynamics regime than the drone, so smoothing is per-adapter (`yaw_alpha`, `forward_alpha` from `ControllerConfig`; both honoured by `Ros2RoverAdapter.send_command`). The drone has its own `_apply_smoothing` path.
+- **NED→ENU yaw sign flip** — the controller emits `yaw_rate` in the drone's NED / MAVSDK convention (clockwise-from-above positive). The rover adapter negates it before publishing `angular.z` so ROS REP-103 ENU (counter-clockwise positive) ends up turning the rover the right way.
 
 See [`sim/rover/README.md`](sim/rover/README.md) for the full sim story.
 
