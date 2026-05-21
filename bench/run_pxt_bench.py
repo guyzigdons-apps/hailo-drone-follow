@@ -1,13 +1,13 @@
-"""Driver for the MAFAT pixels-per-target sweep.
+"""Driver for the pixels-per-target tiling sweep.
 
 Runs a hardcoded experiment matrix of (source resolution) × (tile grid)
-through mafat/tiling_bench.py, then invokes mafat/analyze_pxt.py with the
+through bench/tiling_bench.py, then invokes bench/analyze_pxt.py with the
 highest-recall config as pseudo-ground-truth.
 
 Usage:
-  python mafat/run_pxt_bench.py
-  python mafat/run_pxt_bench.py --skip-existing
-  python mafat/run_pxt_bench.py --only GT-12x9-25 1x1-native
+  python bench/run_pxt_bench.py
+  python bench/run_pxt_bench.py --skip-existing
+  python bench/run_pxt_bench.py --only GT-12x9-25 1x1-native
 """
 
 import argparse
@@ -21,7 +21,10 @@ HERE = Path(__file__).resolve().parent
 BENCH_SCRIPT = HERE / "tiling_bench.py"
 ANALYZE_SCRIPT = HERE / "analyze_pxt.py"
 
-DEFAULT_VIDEO = "/home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D.MP4"
+# Use the pre-rotated MP4 (transpose=1, no rotate metadata) because GStreamer's
+# decodebin does NOT apply the original file's rotate=90 side-data — feeding the
+# untouched source results in horizontally-stretched portrait frames.
+DEFAULT_VIDEO = "/home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D_rotated.MP4"
 DEFAULT_OUT_DIR = Path("/home/giladn/Videos/Drone/Training/pxt_runs")
 
 # The tiling app's default HEF (hailo_yolov8n_4_classes_vga, 640x480 input,

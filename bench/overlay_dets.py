@@ -6,7 +6,7 @@ draws them with a per-file colour. Press SPACE to pause, Q to quit, [/] to
 step backward/forward when paused, +/- to change playback speed.
 
 Usage:
-  python mafat/overlay_dets.py \\
+  python bench/overlay_dets.py \\
       --video /home/giladn/Videos/Drone/Training/DJI_20260430103421_0010_D.MP4 \\
       --frames /home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.frames.json:GT \\
       --frames /home/giladn/Videos/Drone/Training/pxt_runs/pxt_3x2-native.frames.json:3x2

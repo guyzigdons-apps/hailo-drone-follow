@@ -1,4 +1,4 @@
-"""Pixels-per-target analyzer for MAFAT tiling sweep.
+"""Pixels-per-target analyzer for the tiling sweep.
 
 Like analyze_bench.py (greedy IoU per-frame, all-points AP) but adds a
 *size-binned recall* table: bin each GT object by its height in source
@@ -11,7 +11,7 @@ person, do I need a 3x2 grid or a 6x4 grid?". Headline classes are
 HEF emits that the user cares about — 'car' is folded into 'vehicle').
 
 Usage:
-  python mafat/analyze_pxt.py \\
+  python bench/analyze_pxt.py \\
       --gt /home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.frames.json \\
       --pred /home/giladn/Videos/Drone/Training/pxt_runs/pxt_1x1-native.frames.json \\
       --pred /home/giladn/Videos/Drone/Training/pxt_runs/pxt_3x2-native.frames.json \\

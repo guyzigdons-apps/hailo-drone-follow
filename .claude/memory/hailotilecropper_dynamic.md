@@ -9,23 +9,27 @@ type: reference
 Vendored from upstream `hailotilecropper` plus extensions. Source at
 `hailo_apps/postprocess/cpp/hailotilecropper_dynamic/` (this repo).
 
-## Tile sources (stack in this order every frame)
-1. **Dynamic** — `HailoTileROI` objects pre-attached upstream (use `identity signal-handoffs=true` + `handoff` callback; pad probes don't work because Python sees a non-writable buffer).
-2. **Grid** — `tiles-along-x-axis` × `tiles-along-y-axis` with `overlap-x-axis`/`overlap-y-axis`. Math matches upstream `prepare_tiles()` exactly. Default `0` on both axes ⇒ grid disabled.
-3. **Static** — `tiles-static="x,y,w,h;..."` semicolon list, normalized 0..1.
+## Tile sources (currently installed plugin)
 
-## Properties (gst-inspect)
+⚠️ **As of 2026-05-21 the installed `hailotilecropper_dynamic` only supports `tiles-static`.** The grid/dynamic-ROI extensions described below were never landed in the C++ source in this repo (`hailo-apps/hailo_apps/postprocess/cpp/hailotilecropper_dynamic/gsthailotilecropper_dynamic.cpp`). Verified via `gst-inspect-1.0 hailotilecropper_dynamic` → only `tiles-static` and `allow-empty`.
+
+1. **Static (only working source today)** — `tiles-static="x,y,w,h;..."` semicolon list, normalized 0..1.
+2. **Dynamic** *(intended, NOT in current build)* — `HailoTileROI` objects pre-attached upstream.
+3. **Grid** *(intended, NOT in current build)* — `tiles-along-x-axis` × `tiles-along-y-axis` with `overlap-x-axis`/`overlap-y-axis`.
+
+## Working around the missing grid props
+
+`bench/tiling_record.py` was patched (commit `7d9a8d9`) to **restore the Python-side `_grid_to_static_tiles()` helper** that was previously deleted. `DYNAMIC_TILE_CROPPER_PIPELINE` now enumerates the requested grid into normalized rectangles and concatenates them with any user-supplied `tiles_static` extras, all passed via the single `tiles-static` property. Math used: `T = 1 / (N - (N-1) * o)`, `step = T * (1 - o)`. Diverges slightly from upstream `prepare_tiles()` clamping but is internally consistent — fine for comparing GT vs candidate runs that all use this helper.
+
+## Properties on the installed plugin (gst-inspect)
 | Property | Type | Default |
 |---|---|---|
-| `tiles-along-x-axis` / `tiles-along-y-axis` | uint | 0 (disabled) |
-| `overlap-x-axis` / `overlap-y-axis` | float 0..1 | 0.0 |
 | `tiles-static` | string | `""` |
 | `allow-empty` | bool | true |
+| (inherited from base) `internal-offset`, `cropping-period`, `drop-uncropped-buffers`, `filter-streams` | | |
 
-Inherited from base: `internal-offset`, `cropping-period`, `drop-uncropped-buffers`, `filter-streams`.
-
-## Why apps don't hand-build the grid string anymore
-Earlier versions of `mafat/tiling_record.py` / `tiling_bench.py` had a Python `_grid_to_static_tiles()` helper. **Its math differed from upstream** (mine: `t = 1/(N - (N-1)*o)`; upstream: `col_step = 1/N` with overlap added on each side and clamped). Helper was deleted; pass grid params to the plugin instead via the `DYNAMIC_TILE_CROPPER_PIPELINE` helper's `tiles_x`/`tiles_y`/`overlap_x`/`overlap_y` kwargs.
+## If you ever want the native grid props back
+Extending the C++ to add `tiles-along-x-axis` / `tiles-along-y-axis` / `overlap-x-axis` / `overlap-y-axis` is "drop in the property declarations + call upstream `prepare_tiles()` in `chain`". Likely 50 lines. Don't forget to rebuild via `hailo-compile-postprocess install` and clear `~/.cache/gstreamer-1.0/registry.x86_64.bin`. Be aware: loading two versions of the plugin side-by-side segfaults — uninstall the system .so first.
 
 ## Build & install (after editing the .cpp/.hpp)
 ```bash
