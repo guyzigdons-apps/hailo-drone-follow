@@ -3,34 +3,37 @@
   Rover-scale "small actor" world for v1.1.
 
   Why this world exists:
-    The default Walking actor mesh is ~1.7 m tall. At the rover's camera height
-    (~0.25 m) and standard target_bbox_height=0.25, a 1.7 m person needs to be
-    ~6-8 m away to fit the desired bbox — which means most of the actor is
-    above the rover's vertical FOV at close range, and the rover can never
-    physically "follow" the actor (it would have to drive at running pace to
-    catch up + a runaway).
+    The default Walking actor mesh is ~1.8 m tall. At the rover's camera
+    height (~0.25 m), a person at any reasonable bbox size fills the rover's
+    vertical FOV, and the rover can't get close enough to "follow" — RINT-02
+    bottom-edge slow-down fires before the rover has done any useful motion.
 
-    This world scales the actor down to roughly rover-height (~0.5 m, matching
-    the rover's 0.40 × 0.30 × 0.15 m chassis + wheels) and brings the
-    trajectory in close. The rover can now see a creature its own size and
-    follow it within sensible distances (1-3 m).
+    This world shrinks the actor to ~0.36 m (scale 0.2) and places the
+    trajectory further away so the rover has room to drive forward + center
+    + close in before RINT-02 stops it at the bottom-edge threshold.
 
-  Differences from walk_across_then_approach.sdf:
-    - <skin>/<animation>/<scale> set to 0.3 → actor mesh shrinks ~3x
-    - Actor Z pose dropped from 1.0 → 0.3 (feet roughly on ground at new scale)
-    - X coordinates halved (4 → 2, -2 → -1) so the actor stays within the
-      rover's effective close-range follow window
-    - Y coordinates halved (-6/+6 → -3/+3, -12 → -6) to match the compressed
-      world scale
-    - Trajectory times unchanged — motion still happens at a walkable pace,
-      just over a smaller box.
+  Differences from walk_across_then_approach.sdf (the drone-shaped rover world):
+    - <skin>/<animation>/<scale> set to 0.2 → actor mesh shrinks ~5x.
+    - Actor Z pose set to 0.18 (proportional to the canonical scale=1.0 / Z=0.9
+      that the random_walk and circle_around worlds use to stand a full-size
+      Walking actor with feet on the ground; 0.18 = 0.2 × 0.9).
+    - X start pushed out to 5 (was 4 in the drone-shaped world, 2 in the
+      previous small_actor revision); the rover has ~5 m of approach room
+      before getting close.
+    - Close-approach phase brings actor in to X=1.5 (rover-frame coordinates;
+      rover at origin), keeping the actor at least 1.5 m away.  Combined with
+      the smaller actor, this lands the actor at a sensible bbox height when
+      RINT-02 fires.
+    - Y sweep widened to ±4 (was ±3) to keep the sideways pass within the
+      camera's horizontal FOV given the increased distance.
 
   Trajectory phases (small-actor scaled; times unchanged):
-    Phase 0 (0..5):    hold at (2, -3), rover boots / drone-follow connects
-    Phase 1 (5..17):   walk across frame at X=2 from Y=-3 to Y=+3
-    Phase 2 (18..24):  return to centerline at (2, 0)
-    Phase 3 (25..38):  turn and walk straight toward rover, X=2 -> X=-1
-                       (rover physically meets the small actor at close range)
+    Phase 0 (0..5):    hold at (5, -4), rover boots / drone-follow connects
+    Phase 1 (5..17):   walk across frame at X=5 from Y=-4 to Y=+4
+    Phase 2 (18..24):  return to centerline at (5, 0)
+    Phase 3 (25..38):  turn and walk toward rover, X=5 → X=1.5
+                       (stops 1.5 m from rover so RINT-02 fires at the
+                       bbox-bottom threshold without contact)
     Phase 4 (39..72):  U-turn south of rover before returning to start
 -->
 <sdf version="1.9">
@@ -43,11 +46,11 @@
     <actor name="person">
       <skin>
         <filename>model://Walking actor/meshes/walk.dae</filename>
-        <scale>0.3</scale>
+        <scale>0.2</scale>
       </skin>
       <animation name="walking">
         <filename>model://Walking actor/meshes/walk.dae</filename>
-        <scale>0.3</scale>
+        <scale>0.2</scale>
         <interpolate_x>true</interpolate_x>
       </animation>
       <script>
@@ -55,70 +58,70 @@
         <delay_start>0</delay_start>
         <auto_start>true</auto_start>
         <trajectory id="0" type="walking">
-          <!-- Phase 0: hold at (2,-3) for 5 s (rover boots, controller wakes) -->
+          <!-- Phase 0: hold at (5,-4) for 5 s (rover boots, controller wakes) -->
           <waypoint>
             <time>0</time>
-            <pose>2 -3 0.3 0 0 1.5708</pose>
+            <pose>5 -4 0.18 0 0 1.5708</pose>
           </waypoint>
           <waypoint>
             <time>5</time>
-            <pose>2 -3 0.3 0 0 1.5708</pose>
+            <pose>5 -4 0.18 0 0 1.5708</pose>
           </waypoint>
 
-          <!-- Phase 1: walk across frame, -Y to +Y at X=2 (~0.5 m/s for the
+          <!-- Phase 1: walk across frame, -Y to +Y at X=5 (~0.67 m/s for the
                small actor, scaled to feel natural at its body size) -->
           <waypoint>
             <time>17</time>
-            <pose>2 3 0.3 0 0 1.5708</pose>
+            <pose>5 4 0.18 0 0 1.5708</pose>
           </waypoint>
 
           <!-- Phase 2: turn around and walk back to centerline -->
           <waypoint>
             <time>18</time>
-            <pose>2 3 0.3 0 0 -1.5708</pose>
+            <pose>5 4 0.18 0 0 -1.5708</pose>
           </waypoint>
           <waypoint>
             <time>24</time>
-            <pose>2 0 0.3 0 0 -1.5708</pose>
+            <pose>5 0 0.18 0 0 -1.5708</pose>
           </waypoint>
 
           <!-- Phase 3: turn to face rover, walk straight toward it.
-               3 m over 13 s (~0.23 m/s — slow approach scaled to actor size);
-               passes through rover origin to exercise the close-approach +
-               bottom-edge slow-down (RINT-02) response. -->
+               3.5 m over 13 s (~0.27 m/s — slow approach scaled to actor
+               size). Stops at X=1.5 — minimum follow distance, exercises
+               RINT-02 bottom-edge slow-down WITHOUT colliding. -->
           <waypoint>
             <time>25</time>
-            <pose>2 0 0.3 0 0 3.14159</pose>
+            <pose>5 0 0.18 0 0 3.14159</pose>
           </waypoint>
           <waypoint>
             <time>38</time>
-            <pose>-1 0 0.3 0 0 3.14159</pose>
+            <pose>1.5 0 0.18 0 0 3.14159</pose>
           </waypoint>
 
           <!-- Phase 4: U-turn south of rover before returning to start. -->
           <waypoint>
             <time>39</time>
-            <pose>-1 0 0.3 0 0 -1.5708</pose>
+            <pose>1.5 0 0.18 0 0 -1.5708</pose>
           </waypoint>
           <waypoint>
             <time>51</time>
-            <pose>-1 -6 0.3 0 0 -1.5708</pose>
+            <pose>1.5 -8 0.18 0 0 -1.5708</pose>
           </waypoint>
           <waypoint>
             <time>52</time>
-            <pose>-1 -6 0.3 0 0 0</pose>
+            <pose>1.5 -8 0.18 0 0 0</pose>
           </waypoint>
           <waypoint>
             <time>65</time>
-            <pose>2 -6 0.3 0 0 0</pose>
+            <pose>5 -8 0.18 0 0 0</pose>
           </waypoint>
           <waypoint>
             <time>66</time>
-            <pose>2 -6 0.3 0 0 1.5708</pose>
+            <pose>5 -8 0.18 0 0 1.5708</pose>
           </waypoint>
           <waypoint>
             <time>72</time>
-            <pose>2 -3 0.3 0 0 1.5708</pose>
+            <pose>5 -4 0.18 0 0 1.5708</pose>
           </waypoint>
         </trajectory>
       </script>
