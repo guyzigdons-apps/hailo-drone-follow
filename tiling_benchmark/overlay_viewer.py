@@ -34,11 +34,19 @@ from __future__ import annotations
 import argparse
 import json
 import tkinter as tk
+from collections import OrderedDict
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+
+try:
+    # Allow `python tiling_benchmark/overlay_viewer.py` (script mode) AND
+    # `python -m tiling_benchmark.overlay_viewer` (module mode).
+    from .preview_cache import PreviewCache
+except ImportError:  # pragma: no cover - script-mode fallback
+    from preview_cache import PreviewCache  # type: ignore
 
 # Distinct BGR colours — matches bench/overlay_dets.py palette order.
 PALETTE = [
@@ -148,9 +156,15 @@ class Run:
         self.visible_var: tk.BooleanVar | None = None  # set after Tk root exists
 
 
+FULL_RES_LRU_CAP = 8  # Phase 3: small full-res frame cache for zoomed-in views.
+
+
 class OverlayViewer:
     def __init__(self, root: tk.Tk, video_path: Path, runs: list[Run],
-                 start_frame: int = 0, conf_min: float = 0.25):
+                 start_frame: int = 0, conf_min: float = 0.25,
+                 use_cache: bool = True,
+                 cache_target_w: int = 1920,
+                 cache_target_h: int = 1080):
         self.root = root
         self.video_path = video_path
         self.runs = runs
@@ -179,10 +193,31 @@ class OverlayViewer:
         self._drag_last: tuple[int, int] | None = None
         self._cursor_canvas: tuple[int, int] | None = None  # last (x,y) of <Motion>
 
-        # Current decoded BGR frame (numpy)
-        self._current_frame_bgr: np.ndarray | None = None
+        # Current decoded RGB frame (numpy) + source tag for HUD.
+        self._current_frame_rgb: np.ndarray | None = None
+        self._current_frame_source: str = "full"
+        # Full-res RGB frame LRU (used when zoomed past cache resolution OR
+        # when the cache hasn't reached this frame yet). Keys are frame_no.
+        self._full_res_lru: OrderedDict[int, np.ndarray] = OrderedDict()
         # Keep a reference to the last ImageTk to prevent GC
         self._photo_ref: ImageTk.PhotoImage | None = None
+
+        # ---- Phase 3: preview cache ----
+        self.cache: PreviewCache | None = None
+        self._cache_target = (cache_target_w, cache_target_h)
+        if use_cache:
+            try:
+                cache_dir = (Path(__file__).resolve().parent
+                             / "pxt_runs" / ".cache")
+                self.cache = PreviewCache(
+                    str(video_path), cache_dir,
+                    target_w=cache_target_w, target_h=cache_target_h,
+                    on_progress=self._on_cache_progress,
+                )
+            except Exception as e:
+                # Cache is best-effort — log and continue with the slow path.
+                print(f"[overlay_viewer] preview cache disabled: {e}")
+                self.cache = None
 
         # Create per-run Tk visibility BooleanVars now that root exists.
         # Trace each so the tile-source radio can react when its currently
@@ -487,14 +522,73 @@ class OverlayViewer:
 
     # -------------------------------------------------- frame I/O
 
-    def _seek_to(self, n: int) -> None:
-        n = max(0, min(n, self.total_frames - 1))
-        # Always seek; cheap correctness wins over speed in Phase 1.
+    def _viewport_src_width(self) -> float:
+        """Source-pixel width currently visible in the viewport."""
+        cw, _ch = self._canvas_size()
+        scale = self._effective_scale()
+        if scale <= 0:
+            return float(self.src_w)
+        return cw / scale
+
+    def _should_use_cache(self) -> bool:
+        """True when zoom is moderate enough that cached preview pixels are
+        at least as dense (per source-pixel) as what we'd render to canvas.
+
+        Per spec: prefer cache when
+            canvas_w / effective_src_w_visible <= cache_w / source_w
+        i.e. the per-canvas-pixel density of source-pixels we'd be sampling
+        does not exceed what the cache stores per source-pixel.
+        """
+        if self.cache is None:
+            return False
+        cw, _ch = self._canvas_size()
+        viewport_src_w = self._viewport_src_width()
+        if viewport_src_w <= 0:
+            return True
+        canvas_density = cw / viewport_src_w           # canvas-px / src-px
+        cache_density = self.cache.frame_shape[1] / self.src_w
+        return canvas_density <= cache_density
+
+    def _full_res_get(self, n: int) -> np.ndarray:
+        """Return a full-resolution RGB frame for frame n, using a small LRU
+        backed by direct cv2 reads. Always returns a frame (raises on read
+        failure)."""
+        if n in self._full_res_lru:
+            # Promote to most-recently-used.
+            self._full_res_lru.move_to_end(n)
+            return self._full_res_lru[n]
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, n)
         ok, frame = self.cap.read()
-        if ok:
-            self._current_frame_bgr = frame
-            self.frame_no = n
+        if not ok or frame is None:
+            raise RuntimeError(f"failed to read frame {n} from {self.video_path}")
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self._full_res_lru[n] = rgb
+        # Evict oldest.
+        while len(self._full_res_lru) > FULL_RES_LRU_CAP:
+            self._full_res_lru.popitem(last=False)
+        return rgb
+
+    def _read_frame(self, n: int) -> tuple[np.ndarray, str]:
+        """Return (rgb_frame, source_tag) for frame n.
+
+        source_tag is "cache" if served from the preview cache, "full" if
+        served from the full-resolution cv2.VideoCapture path.
+        """
+        if self._should_use_cache() and self.cache is not None:
+            cached = self.cache.get(n)
+            if cached is not None:
+                return cached, "cache"
+        return self._full_res_get(n), "full"
+
+    def _seek_to(self, n: int) -> None:
+        n = max(0, min(n, self.total_frames - 1))
+        try:
+            frame_rgb, source = self._read_frame(n)
+        except RuntimeError:
+            return
+        self._current_frame_rgb = frame_rgb
+        self._current_frame_source = source
+        self.frame_no = n
         # Update scrubber without retriggering the callback loop.
         self._suppress_scrubber_cb = True
         self._scrubber.set(self.frame_no)
@@ -503,13 +597,29 @@ class OverlayViewer:
     # -------------------------------------------------- rendering
 
     def _render(self, *_args) -> None:
-        if self._current_frame_bgr is None:
+        # Re-evaluate which source we should use given current zoom. A change
+        # in canvas size or zoom may force us from cache->full or back.
+        if self._current_frame_rgb is None:
             return
         cw, ch = self._canvas_size()
         if cw <= 1 or ch <= 1:
             return
 
-        src = self._current_frame_bgr
+        # If zoom now demands the full-res path but we currently hold a
+        # cached frame (or vice-versa), re-read.
+        wants_cache = self._should_use_cache()
+        have_cache = (self._current_frame_source == "cache")
+        if wants_cache != have_cache:
+            try:
+                frame_rgb, source = self._read_frame(self.frame_no)
+                self._current_frame_rgb = frame_rgb
+                self._current_frame_source = source
+            except RuntimeError:
+                pass
+
+        src_rgb = self._current_frame_rgb
+        source_tag = self._current_frame_source
+
         # Compute viewport, crop, resize.
         vx, vy, vw, vh = self._viewport_src_rect()
         x0 = int(np.floor(max(0.0, vx)))
@@ -518,7 +628,12 @@ class OverlayViewer:
         y1 = int(np.ceil(min(float(self.src_h), vy + vh)))
         x1 = max(x1, x0 + 1)
         y1 = max(y1, y0 + 1)
-        crop = src[y0:y1, x0:x1]
+
+        # Map source-px viewport to whatever array we actually hold.
+        if source_tag == "cache" and self.cache is not None:
+            crop = self._crop_from_cache(src_rgb, x0, y0, x1, y1)
+        else:
+            crop = src_rgb[y0:y1, x0:x1]
 
         # Interpolation: zoom-in (resize factor >= 1) => NEAREST so the
         # user sees real pixels. Zoom-out (factor < 1) => INTER_AREA.
@@ -533,6 +648,13 @@ class OverlayViewer:
         scale_x = cw / float(x1 - x0)
         scale_y = ch / float(y1 - y0)
 
+        # The disp image is RGB (cache is RGB; full-res path converts at
+        # read time). cv2 draw fns are channel-agnostic — they just write
+        # the colour tuple verbatim — but our palette is BGR by convention,
+        # so swap each colour to RGB at draw time.
+        def _rgb(bgr: tuple[int, int, int]) -> tuple[int, int, int]:
+            return (bgr[2], bgr[1], bgr[0])
+
         # Draw bboxes for visible runs.
         conf_min = float(self._conf_min_var.get())
         visible_runs: list[Run] = []
@@ -540,7 +662,7 @@ class OverlayViewer:
             if not r.visible_var.get():
                 continue
             visible_runs.append(r)
-            colour = r.colour_bgr
+            colour = _rgb(r.colour_bgr)
             for det in r.idx.get(self.frame_no, []):
                 conf = float(det.get("confidence", 0.0))
                 if conf < conf_min:
@@ -573,14 +695,48 @@ class OverlayViewer:
         )
 
         # HUD on the rescaled canvas (NOT on source — that's the key fix).
-        self._draw_hud(disp, visible_runs, tile_source_run, tile_rects_drawn)
+        self._draw_hud(disp, visible_runs, tile_source_run, tile_rects_drawn,
+                       source_tag=source_tag)
 
-        # Push to canvas.
-        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(rgb)
+        # disp is already RGB — push straight to PIL.
+        img = Image.fromarray(disp)
         self._photo_ref = ImageTk.PhotoImage(img)
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self._photo_ref)
+
+    # -------------------------------------------------- cache helpers
+
+    def _crop_from_cache(self, cache_rgb: np.ndarray,
+                         x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
+        """Crop the source-px viewport (x0,y0)-(x1,y1) out of a cached frame.
+
+        Maps source coords -> cache coords using the cache's letterbox
+        layout (cache_x = left + src_x * scale; cache_y = top + src_y * scale).
+        Returns an array view; no copy is performed.
+        """
+        assert self.cache is not None
+        top, left, rh, rw = self.cache.image_area
+        s = self.cache.scale
+        cx0 = int(np.floor(left + x0 * s))
+        cy0 = int(np.floor(top + y0 * s))
+        cx1 = int(np.ceil(left + x1 * s))
+        cy1 = int(np.ceil(top + y1 * s))
+        # Clamp to the actual image area (don't crop into letterbox border).
+        cx0 = max(left, min(cx0, left + rw))
+        cy0 = max(top, min(cy0, top + rh))
+        cx1 = max(cx0 + 1, min(cx1, left + rw))
+        cy1 = max(cy0 + 1, min(cy1, top + rh))
+        return cache_rgb[cy0:cy1, cx0:cx1]
+
+    def _on_cache_progress(self, _done: int, _total: int) -> None:
+        # Called from the populator thread. Don't touch Tk directly — the
+        # HUD reads PreviewCache.progress on the next render. We do, however,
+        # poke the UI thread to re-render via after_idle so the HUD progress
+        # line updates without waiting for user input.
+        try:
+            self.root.after_idle(self._render)
+        except Exception:
+            pass
 
     def _draw_tiles(self, disp: np.ndarray,
                     x0: int, y0: int, x1: int, y1: int,
@@ -621,9 +777,12 @@ class OverlayViewer:
 
     def _draw_hud(self, disp: np.ndarray, visible_runs: list[Run],
                   tile_source_run: "Run | None" = None,
-                  tile_rects_drawn: int = 0) -> None:
+                  tile_rects_drawn: int = 0,
+                  source_tag: str = "full") -> None:
         lines: list[str] = []
-        lines.append(f"frame {self.frame_no} / {self.total_frames - 1}")
+        lines.append(
+            f"frame {self.frame_no} / {self.total_frames - 1}  [{source_tag}]"
+        )
         lines.append(f"zoom {self.zoom_factor:.2f}x")
         if self._cursor_canvas is not None:
             cx, cy = self._cursor_canvas
@@ -631,6 +790,15 @@ class OverlayViewer:
             lines.append(f"src px: ({int(sx)}, {int(sy)})")
         else:
             lines.append("src px: -")
+
+        # Preview-cache progress (suppressed once complete or disabled).
+        cache_line: str | None = None
+        if self.cache is not None and not self.cache.is_complete:
+            done, total = self.cache.progress
+            pct = (100.0 * done / total) if total else 0.0
+            cache_line = f"preview cache: {done}/{total} ({pct:.1f}%)"
+        if cache_line is not None:
+            lines.append(cache_line)
 
         tile_line: str | None = None
         if tile_source_run is not None:
@@ -655,9 +823,11 @@ class OverlayViewer:
                         (255, 255, 255), 1, cv2.LINE_AA)
             y += line_h
         for r in visible_runs:
+            # disp is RGB; palette is BGR — swap channels for legend swatches.
+            rgb_colour = (r.colour_bgr[2], r.colour_bgr[1], r.colour_bgr[0])
             cv2.putText(disp, r.label, (pad, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                        r.colour_bgr, 2, cv2.LINE_AA)
+                        rgb_colour, 2, cv2.LINE_AA)
             y += line_h
         if tile_line is not None:
             cv2.putText(disp, tile_line, (pad, y),
@@ -843,6 +1013,11 @@ class OverlayViewer:
             self.cap.release()
         except Exception:
             pass
+        if self.cache is not None:
+            try:
+                self.cache.close()
+            except Exception:
+                pass
         try:
             self.root.destroy()
         except tk.TclError:
@@ -863,6 +1038,14 @@ def main(argv=None) -> int:
                     help="Frame number to seek to initially (default 0).")
     ap.add_argument("--conf-min", type=float, default=0.25,
                     help="Hide boxes below this confidence (default 0.25).")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="Disable the in-RAM / on-disk preview cache; always "
+                         "decode from the full-res source. Useful when disk "
+                         "is tight or for performance debugging.")
+    ap.add_argument("--cache-width", type=int, default=1920,
+                    help="Preview cache target width (default 1920).")
+    ap.add_argument("--cache-height", type=int, default=1080,
+                    help="Preview cache target height (default 1080).")
     args = ap.parse_args(argv)
 
     if not args.video.is_file():
@@ -885,7 +1068,10 @@ def main(argv=None) -> int:
     try:
         OverlayViewer(root, args.video, runs,
                       start_frame=args.start_frame,
-                      conf_min=args.conf_min)
+                      conf_min=args.conf_min,
+                      use_cache=not args.no_cache,
+                      cache_target_w=args.cache_width,
+                      cache_target_h=args.cache_height)
     except RuntimeError as e:
         print(f"ERROR: {e}")
         return 1
