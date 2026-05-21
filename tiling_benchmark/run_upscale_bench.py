@@ -46,11 +46,11 @@ LABELS_JSON = "/usr/local/hailo/resources/json/hailo_4_classes.json"
 # Five grids, all at native source dims, fixed 0.25 overlap. Approximate
 # per-tile source-px footprint at 6016x3384 noted in the comments.
 CONFIGS = [
-    {"label": "baseline-12x9",  "tiles_x": 12, "tiles_y": 9},   # ~501x376  px (1.00x)
-    {"label": "dense-18x13",    "tiles_x": 18, "tiles_y": 13},  # ~334x260  px (1.46x)
-    {"label": "dense-24x17",    "tiles_x": 24, "tiles_y": 17},  # ~251x199  px (1.91x)
-    {"label": "dense-30x22",    "tiles_x": 30, "tiles_y": 22},  # ~200x154  px (2.39x)
-    {"label": "dense-36x26",    "tiles_x": 36, "tiles_y": 26},  # ~167x130  px (2.83x)
+    {"label": "baseline-12x9",  "tiles_x": 12, "tiles_y": 9},   # 1.00x baseline
+    {"label": "upscale-14x10",  "tiles_x": 14, "tiles_y": 10},  # ~1.16x
+    {"label": "upscale-16x12",  "tiles_x": 16, "tiles_y": 12},  # ~1.33x
+    {"label": "upscale-18x13",  "tiles_x": 18, "tiles_y": 13},  # ~1.46x
+    {"label": "upscale-20x15",  "tiles_x": 20, "tiles_y": 15},  # ~1.83x (max within cap)
 ]
 OVERLAP_X = 0.25
 OVERLAP_Y = 0.25

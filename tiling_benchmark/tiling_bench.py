@@ -367,9 +367,10 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
             )
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
+        # show_tiles dropped: the locally-rebuilt hailooverlay_community plugin
+        # no longer exposes this property (see hailo-apps overlay.cpp local mods).
         overlay_pipeline = OVERLAY_PIPELINE(
             name="hailo_overlay", community=True,
-            show_tiles=bool(self.options_menu.show_tiles),
         )
 
         # Pure throughput sink: never sync to clock, never wait on preroll.
