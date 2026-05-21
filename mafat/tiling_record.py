@@ -102,6 +102,27 @@ def _center_tile_static(size: float) -> str:
     return f"{x:.6f},{x:.6f},{size:.6f},{size:.6f}"
 
 
+def _grid_to_static_tiles(tiles_x: int, tiles_y: int,
+                          overlap_x: float, overlap_y: float) -> list[str]:
+    """Convert a regular tiles_x*tiles_y grid into a list of normalized
+    'x,y,w,h' rectangles. Math: T = 1/(N - (N-1)*o); step = T*(1-o).
+    For N==1 returns a single full-axis tile.
+    """
+    if tiles_x < 1 or tiles_y < 1:
+        return []
+    def axis(n: int, o: float):
+        if n == 1:
+            return [(0.0, 1.0)]
+        T = 1.0 / (n - (n - 1) * o)
+        S = T * (1.0 - o)
+        return [(i * S, T) for i in range(n)]
+    rects = []
+    for (y, h) in axis(tiles_y, overlap_y):
+        for (x, w) in axis(tiles_x, overlap_x):
+            rects.append(f"{x:.6f},{y:.6f},{w:.6f},{h:.6f}")
+    return rects
+
+
 def DYNAMIC_TILE_CROPPER_PIPELINE(inner_pipeline: str, name: str,
                                   internal_offset: bool,
                                   iou_threshold: float,
@@ -119,26 +140,26 @@ def DYNAMIC_TILE_CROPPER_PIPELINE(inner_pipeline: str, name: str,
     pins format=RGB so the cropper's src_1 caps don't fixate on a YUV format
     mismatching the bypass/sink format (per the dynamic cropper demo).
 
-    Tile sources stack in a fixed order — dynamic ROIs (attached upstream) +
-    grid (driven by `tiles_x`/`tiles_y`/`overlap_*`, matches upstream
-    `hailotilecropper` semantics) + static rectangles from `tiles_static`.
-    Pass `tiles_x=tiles_y=0` to disable the grid.
+    The installed `hailotilecropper_dynamic` only exposes `tiles-static`
+    (the grid props were never landed in the C++ source), so we enumerate
+    the requested grid as static rectangles in Python and concatenate them
+    onto any extra `tiles_static` rectangles passed in. Pass
+    `tiles_x=tiles_y=0` to disable the grid.
     """
     border = (
         f"border-threshold={str(border_threshold).lower()} "
         if border_threshold else ""
     )
-    static_prop = f'tiles-static="{tiles_static}" ' if tiles_static else ""
-    grid_prop = ""
-    if tiles_x > 0 and tiles_y > 0:
-        grid_prop = (
-            f"tiles-along-x-axis={tiles_x} tiles-along-y-axis={tiles_y} "
-            f"overlap-x-axis={overlap_x} overlap-y-axis={overlap_y} "
-        )
+    grid_rects = _grid_to_static_tiles(tiles_x, tiles_y, overlap_x, overlap_y) \
+        if (tiles_x > 0 and tiles_y > 0) else []
+    extra_rects = [r for r in tiles_static.split(";") if r.strip()] if tiles_static else []
+    all_rects = grid_rects + extra_rects
+    static_str = ";".join(all_rects)
+    static_prop = f'tiles-static="{static_str}" ' if static_str else ""
     return (
         f"{QUEUE(name=f'{name}_input_q')} ! "
         f"hailotilecropper_dynamic name={name}_cropper "
-        f"internal-offset={str(internal_offset).lower()} {grid_prop}{static_prop}"
+        f"internal-offset={str(internal_offset).lower()} {static_prop}"
         f"hailotileaggregator name={name}_agg "
         f"flatten-detections=true iou-threshold={iou_threshold} {border}"
         f"{name}_cropper. ! {QUEUE(name=f'{name}_bypass_q')} ! {name}_agg.sink_0 "
