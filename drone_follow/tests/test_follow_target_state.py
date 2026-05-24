@@ -162,3 +162,59 @@ class TestFollowTargetState:
         assert state.get_target() is None
         assert state.is_paused() is False
         assert state.is_explicit_lock() is False
+
+
+class TestFollowTargetChangeMarker:
+    """get_last_change_ts pins when the followee transitioned. Consumers:
+    cairooverlay flash + INFO log line on the operator's console.
+    """
+
+    def test_initial_change_ts_is_none(self):
+        state = FollowTargetState()
+        assert state.get_last_change_ts() is None
+
+    def test_set_target_sets_change_ts(self):
+        state = FollowTargetState()
+        state.set_target(7)
+        assert state.get_last_change_ts() is not None
+
+    def test_setting_same_target_does_not_advance_change_ts(self):
+        """Repeated set_target(N) with N == current must NOT re-trigger the
+        flash. Otherwise the per-frame callback that calls set_target on
+        every successful track keeps re-arming the badge every tick.
+        """
+        state = FollowTargetState()
+        state.set_target(7)
+        first = state.get_last_change_ts()
+        # Advance time at least a tick.
+        import time as _t
+        _t.sleep(0.001)
+        state.set_target(7)
+        assert state.get_last_change_ts() == first
+
+    def test_switching_to_different_target_advances_change_ts(self):
+        state = FollowTargetState()
+        state.set_target(7)
+        first = state.get_last_change_ts()
+        import time as _t
+        _t.sleep(0.001)
+        state.set_target(11)
+        second = state.get_last_change_ts()
+        assert second is not None and second > first
+
+    def test_enter_auto_mode_advances_change_ts_when_target_was_set(self):
+        state = FollowTargetState()
+        state.set_target(7)
+        first = state.get_last_change_ts()
+        import time as _t
+        _t.sleep(0.001)
+        state.enter_auto_mode()
+        second = state.get_last_change_ts()
+        assert second is not None and second > first
+
+    def test_enter_auto_mode_from_no_target_does_not_advance_change_ts(self):
+        state = FollowTargetState()
+        assert state.get_last_change_ts() is None
+        state.enter_auto_mode()
+        # No prior target → no transition → no flash.
+        assert state.get_last_change_ts() is None

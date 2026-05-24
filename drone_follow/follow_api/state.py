@@ -1,10 +1,13 @@
 """Thread-safe shared state — no third-party dependencies."""
 
+import logging
 import threading
 import time
 from typing import Optional
 
 from .types import Detection
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SharedDetectionState:
@@ -42,6 +45,10 @@ class FollowTargetState:
         self._last_seen: Optional[float] = None
         self._paused: bool = False
         self._explicit_lock: bool = False
+        # Followee-change marker. Updated whenever set_target() or
+        # enter_auto_mode() change the followee (None ↔ id ↔ different id).
+        # Consumers: cairooverlay badge flash, UI toast, info log on switch.
+        self._last_change_ts: Optional[float] = None
 
     def set_paused(self, paused: bool):
         """Pause or resume drone follow. When paused the control loop holds position."""
@@ -66,16 +73,45 @@ class FollowTargetState:
     def enter_auto_mode(self):
         """Atomically reset to AUTO mode: no target, not paused, not locked."""
         with self._lock:
+            previous = self._target_id
+            changed = previous is not None
+            if changed:
+                self._last_change_ts = time.monotonic()
             self._target_id = None
             self._paused = False
             self._explicit_lock = False
+        if changed:
+            LOGGER.info("[FOLLOW] cleared target (was ID %s) — back to AUTO", previous)
 
     def set_target(self, detection_id: Optional[int]):
         """Set the target detection ID to follow."""
         with self._lock:
+            previous = self._target_id
+            changed = detection_id != previous
+            if changed:
+                self._last_change_ts = time.monotonic()
             self._target_id = detection_id
             if detection_id is not None:
                 self._last_seen = time.monotonic()
+        if changed:
+            if detection_id is None:
+                LOGGER.info("[FOLLOW] cleared target (was ID %s)", previous)
+            else:
+                LOGGER.info(
+                    "[FOLLOW] now following ID %s%s",
+                    detection_id,
+                    f" (was ID {previous})" if previous is not None else "",
+                )
+
+    def get_last_change_ts(self) -> Optional[float]:
+        """Monotonic timestamp of the most recent followee transition.
+
+        Used by the cairooverlay badge to flash a short notification when
+        someone changes the followee (operator click, REID-DRIFT switch,
+        AUTO re-acquire, Clear Target). ``None`` until the first switch.
+        """
+        with self._lock:
+            return self._last_change_ts
 
     def get_target(self) -> Optional[int]:
         """Get the current target detection ID."""

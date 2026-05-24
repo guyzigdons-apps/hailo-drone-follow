@@ -451,8 +451,16 @@ def highlight_target(pad, info, target_state, cross_state=None):
             roi.remove_object(target_det)
             roi.add_object(new_det)
     elif cross_state is not None:
-        # No target visible this frame ⇒ stop drawing a stale cross.
-        cross_state.clear()
+        if target_id is not None and target_id > 0:
+            # Followee is set but not visible this frame → the operator
+            # should see *something* on screen telling them the drone is
+            # searching, even though there's no center to draw the cross
+            # at. The downstream cairo callback renders just the badge
+            # ("SEARCH") when cx/cy are None.
+            cross_state.set(None, None, "SEARCH")
+        else:
+            # No target at all (cleared / boot-up before AUTO acquires).
+            cross_state.clear()
 
     return Gst.PadProbeReturn.OK
 
@@ -493,7 +501,10 @@ def wire_local_meta_probe(pipeline, target_state, cross_state=None) -> bool:
     if cross_state is not None:
         overlay = pipeline.get_by_name("target_cross_overlay")
         if overlay is not None:
-            overlay.connect("draw", draw_target_cross, cross_state)
+            # target_state is forwarded so the draw callback can read
+            # get_last_change_ts() and briefly flash the badge whenever
+            # someone changes the followee.
+            overlay.connect("draw", draw_target_cross, cross_state, target_state)
         else:
             LOGGER.warning(
                 "[overlay] target_cross_overlay element not found in pipeline "
@@ -515,20 +526,30 @@ _CROSS_LINE_WIDTH_PX = 3
 # Brand colours — match the SVG cross in the React UI (App.jsx).
 _CROSS_GREEN = (0x80 / 255, 0xF0 / 255, 0x60 / 255, 1.0)  # locked / auto
 _CROSS_HALO = (0.0, 0.0, 0.0, 0.75)                      # behind every stroke
-_BADGE_BG = (0.0, 0.0, 0.0, 0.55)                        # state badge bg
+_BADGE_BG = (0.0, 0.0, 0.0, 0.55)                        # default badge bg
+_BADGE_FLASH_BG = (0xE2 / 255, 0x8B / 255, 0x4A / 255, 0.85)  # followee-changed accent
+_BADGE_SEARCH_TEXT = (0xFF / 255, 0xC4 / 255, 0x6B / 255, 1.0)  # warm amber
+_FOLLOWEE_FLASH_SECS = 2.0   # badge tints + "TARGET CHANGED" text for this long
 
 
-def draw_target_cross(overlay, context, timestamp, duration, cross_state):
+def draw_target_cross(overlay, context, timestamp, duration,
+                      cross_state, target_state=None):
     """``cairooverlay::draw`` handler — renders the target cross + a small
     state badge.
 
-    Reads ``cross_state`` (populated upstream by :func:`highlight_target`).
-    No draw when the state is empty (no target visible) — the underlying
-    video frame passes through untouched.
+    Reads ``cross_state`` (populated upstream by :func:`highlight_target`)
+    and (when supplied) reads ``target_state.get_last_change_ts()`` so the
+    badge briefly flashes whenever someone changes the followee.
+
+    Three render modes from one path:
+
+      * ``cx`` / ``cy`` set — full draw: cross at target center + badge.
+      * ``cx`` / ``cy`` ``None`` but ``mode`` set — badge-only (SEARCH).
+      * everything ``None`` — early-return; frame passes through clean.
     """
     cx_norm, cy_norm, mode = cross_state.get()
-    if cx_norm is None or cy_norm is None:
-        return
+    if cx_norm is None and cy_norm is None and not mode:
+        return  # nothing to draw
 
     # cairooverlay::draw doesn't supply width/height directly; read them
     # off the element's sink pad caps. Cached on the element on first draw.
@@ -536,41 +557,60 @@ def draw_target_cross(overlay, context, timestamp, duration, cross_state):
     if width is None or height is None:
         return
 
-    cx = cx_norm * width
-    cy = cy_norm * height
-    arm = max(
-        _CROSS_ARM_MIN_PX,
-        min(_CROSS_ARM_MAX_PX,
-            int(_CROSS_ARM_FRACTION * min(width, height))),
-    )
+    # Optional followee-changed flash. Only when target_state is wired.
+    flash_active = False
+    if target_state is not None:
+        try:
+            change_ts = target_state.get_last_change_ts()
+        except Exception:  # noqa: BLE001 — older FollowTargetState shapes
+            change_ts = None
+        if change_ts is not None:
+            import time as _time
+            flash_active = (_time.monotonic() - change_ts) < _FOLLOWEE_FLASH_SECS
 
-    context.set_line_cap(2)  # cairo.LINE_CAP_ROUND
-    # Black halo so the cross stays readable on any background.
-    context.set_source_rgba(*_CROSS_HALO)
-    context.set_line_width(_CROSS_HALO_WIDTH_PX)
-    context.move_to(cx - arm, cy)
-    context.line_to(cx + arm, cy)
-    context.stroke()
-    context.move_to(cx, cy - arm)
-    context.line_to(cx, cy + arm)
-    context.stroke()
-    # Green cross on top.
-    context.set_source_rgba(*_CROSS_GREEN)
-    context.set_line_width(_CROSS_LINE_WIDTH_PX)
-    context.move_to(cx - arm, cy)
-    context.line_to(cx + arm, cy)
-    context.stroke()
-    context.move_to(cx, cy - arm)
-    context.line_to(cx, cy + arm)
-    context.stroke()
+    if cx_norm is not None and cy_norm is not None:
+        cx = cx_norm * width
+        cy = cy_norm * height
+        arm = max(
+            _CROSS_ARM_MIN_PX,
+            min(_CROSS_ARM_MAX_PX,
+                int(_CROSS_ARM_FRACTION * min(width, height))),
+        )
 
-    # State badge — small dark rectangle with the current mode label.
+        context.set_line_cap(2)  # cairo.LINE_CAP_ROUND
+        # Black halo so the cross stays readable on any background.
+        context.set_source_rgba(*_CROSS_HALO)
+        context.set_line_width(_CROSS_HALO_WIDTH_PX)
+        context.move_to(cx - arm, cy)
+        context.line_to(cx + arm, cy)
+        context.stroke()
+        context.move_to(cx, cy - arm)
+        context.line_to(cx, cy + arm)
+        context.stroke()
+        # Green cross on top.
+        context.set_source_rgba(*_CROSS_GREEN)
+        context.set_line_width(_CROSS_LINE_WIDTH_PX)
+        context.move_to(cx - arm, cy)
+        context.line_to(cx + arm, cy)
+        context.stroke()
+        context.move_to(cx, cy - arm)
+        context.line_to(cx, cy + arm)
+        context.stroke()
+
+    # Badge — always drawn when there's any mode to report, including the
+    # SEARCH state where we have no center to draw a cross at.
     if mode:
-        _draw_state_badge(context, mode, width, height)
+        _draw_state_badge(context, mode, width, height, flash_active)
+
+    # When the followee just changed, also draw a centered toast so the
+    # operator sees the transition even if they weren't watching the badge.
+    if flash_active:
+        _draw_followee_changed_toast(context, mode, width, height)
 
 
-def _draw_state_badge(context, mode, width, height) -> None:
-    """Top-left badge: dark pill with mode text."""
+def _draw_state_badge(context, mode, width, height, flash_active=False) -> None:
+    """Top-left badge: dark pill with mode text. Flashes accent-coloured
+    background for a couple of seconds after a followee change."""
     text = mode.upper()
     pad_x = 8
     pad_y = 4
@@ -582,12 +622,42 @@ def _draw_state_badge(context, mode, width, height) -> None:
     box_h = int(text_h + 2 * pad_y)
     box_x = 16
     box_y = 16
-    # Background pill.
-    context.set_source_rgba(*_BADGE_BG)
+    # Background pill — accent during the followee-change flash, dark otherwise.
+    context.set_source_rgba(*(_BADGE_FLASH_BG if flash_active else _BADGE_BG))
     context.rectangle(box_x, box_y, box_w, box_h)
     context.fill()
-    # Text — green to match the cross.
-    context.set_source_rgba(*_CROSS_GREEN)
+    # Text colour: white on accent, green on dark for cross/AUTO/LOCKED,
+    # warm amber on dark for SEARCH so the state stands out from tracking.
+    if flash_active:
+        text_color = (1.0, 1.0, 1.0, 1.0)
+    elif mode.upper() == "SEARCH":
+        text_color = _BADGE_SEARCH_TEXT
+    else:
+        text_color = _CROSS_GREEN
+    context.set_source_rgba(*text_color)
+    context.move_to(box_x + pad_x, box_y + pad_y + text_h)
+    context.show_text(text)
+
+
+def _draw_followee_changed_toast(context, mode, width, height) -> None:
+    """Centred banner shown for _FOLLOWEE_FLASH_SECS after the followee
+    changes. Visible whether the operator was watching the corner or not.
+    """
+    text = "TARGET CHANGED"
+    pad_x = 14
+    pad_y = 8
+    font_size = max(16, int(height * 0.034))
+    context.select_font_face("sans-serif", 0, 1)
+    context.set_font_size(font_size)
+    _, _, text_w, text_h, _, _ = context.text_extents(text)
+    box_w = int(text_w + 2 * pad_x)
+    box_h = int(text_h + 2 * pad_y)
+    box_x = int((width - box_w) / 2)
+    box_y = int(height * 0.08)
+    context.set_source_rgba(*_BADGE_FLASH_BG)
+    context.rectangle(box_x, box_y, box_w, box_h)
+    context.fill()
+    context.set_source_rgba(1.0, 1.0, 1.0, 1.0)
     context.move_to(box_x + pad_x, box_y + pad_y + text_h)
     context.show_text(text)
 
