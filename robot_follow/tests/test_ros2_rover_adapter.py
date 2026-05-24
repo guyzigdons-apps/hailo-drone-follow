@@ -216,8 +216,14 @@ class TestTwistPublish:
         assert twist.angular.y == pytest.approx(0.0)
         assert twist.angular.z == pytest.approx(0.0)
 
-    def test_on_target_lost_publishes_zero_twist(self, rclpy_mock):
-        adapter = _build_adapter(rclpy_mock)
+    def test_on_target_lost_yaw_spins_toward_last_seen_side(self, rclpy_mock):
+        """Last seen on right (cx>0.5) → controller-frame yaw positive →
+        published angular.z is -speed after NED→ENU flip. Linear stays 0."""
+        from robot_follow.follow_api.config import ControllerConfig
+        from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
+        config = ControllerConfig()
+        config.search_yawspeed_slow = 0.3  # rad/s for rover
+        adapter = Ros2RoverAdapter(_default_args(), config)
         asyncio.run(adapter.connect())
         asyncio.run(adapter.start_session())
         adapter._publisher.publish.reset_mock()
@@ -225,7 +231,36 @@ class TestTwistPublish:
         assert adapter._publisher.publish.called
         twist = adapter._publisher.publish.call_args.args[0]
         assert twist.linear.x == pytest.approx(0.0)
-        assert twist.angular.z == pytest.approx(0.0)
+        assert twist.angular.z == pytest.approx(-0.3)  # sign flip
+
+    def test_on_target_lost_yaw_spins_toward_left_when_last_on_left(self, rclpy_mock):
+        from robot_follow.follow_api.config import ControllerConfig
+        from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
+        config = ControllerConfig()
+        config.search_yawspeed_slow = 0.3
+        adapter = Ros2RoverAdapter(_default_args(), config)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        adapter._publisher.publish.reset_mock()
+        asyncio.run(adapter.on_target_lost(_det(cx=0.2)))
+        twist = adapter._publisher.publish.call_args.args[0]
+        # cx<0.5 → controller-frame yaw negative → angular.z positive (CCW = left)
+        assert twist.angular.z == pytest.approx(+0.3)
+
+    def test_on_target_lost_with_no_last_detection_defaults_right(self, rclpy_mock):
+        """Parity with drone _compute_search_yawspeed: no last_detection
+        defaults sign=+1 (controller-frame right)."""
+        from robot_follow.follow_api.config import ControllerConfig
+        from robot_follow.robot_api.adapters.ros2_rover import Ros2RoverAdapter
+        config = ControllerConfig()
+        config.search_yawspeed_slow = 0.3
+        adapter = Ros2RoverAdapter(_default_args(), config)
+        asyncio.run(adapter.connect())
+        asyncio.run(adapter.start_session())
+        adapter._publisher.publish.reset_mock()
+        asyncio.run(adapter.on_target_lost(None))
+        twist = adapter._publisher.publish.call_args.args[0]
+        assert twist.angular.z == pytest.approx(-0.3)  # +0.3 in controller, -0.3 after flip
 
 
 class TestLifecycle:

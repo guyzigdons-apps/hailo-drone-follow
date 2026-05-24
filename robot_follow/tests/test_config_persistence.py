@@ -245,6 +245,12 @@ def test_rover_simulation_json_loads_with_rover_safe_defaults():
     assert cfg.smooth_forward is False
     assert cfg.forward_alpha == 0.15
     assert cfg.search_timeout_s == 60.0
+    # search_yawspeed_slow MUST be overridden for the rover: the dataclass
+    # default 10.0 was sized for the drone's deg/s (10 °/s ≈ 0.175 rad/s
+    # slow scan). Interpreted as rad/s on the rover that would be ~573 °/s
+    # — a dangerously fast spin. 0.3 rad/s ≈ 17 °/s is a slow methodical
+    # scan in the direction the actor was last seen.
+    assert cfg.search_yawspeed_slow == 0.3
     assert cfg.log_verbosity == "normal"
 
     # ByteTracker (RINT-03 overrides)

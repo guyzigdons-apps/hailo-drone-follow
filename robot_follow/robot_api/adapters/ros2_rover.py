@@ -308,9 +308,40 @@ class Ros2RoverAdapter:
         self._publisher.publish(self._Twist())
 
     async def on_target_lost(self, last_detection: Optional[Detection]) -> None:
+        """Rover search behaviour: yaw-spin toward the last side the target
+        was seen on, looking for them to re-enter the FoV.
+
+        The camera is body-fixed and forward-facing — once the actor leaves
+        the FoV the rover can only find them again by physically rotating.
+        Without this, the rover stops on every detection blink and never
+        re-acquires (Finding 2 of the 2026-05-24 follow-loss investigation).
+
+        Magnitude: ``config.search_yawspeed_slow`` interpreted in
+        ``caps.yaw_unit`` (rad/s for rover; deg/s for drone). The rover
+        config MUST set this to a small rad/s value (e.g. 0.3) — the
+        dataclass default 10.0 was sized for the drone's deg/s and would
+        give a 573 °/s spin on the rover.
+
+        Direction: follow last seen side (``center_x > 0.5`` → right). With
+        no last_detection (cold-start lost), default to positive (right)
+        per ``_compute_search_yawspeed`` parity with the drone.
+
+        Sign-flip + linear=0 same as the live ``send_command`` path: emit
+        controller-frame yaw → adapter publishes ``angular.z = -yaw``
+        (REP-103 ENU).
+        """
         if self._publisher is None:
             return
-        self._publisher.publish(self._Twist())
+        speed = self._config.search_yawspeed_slow
+        if last_detection is None:
+            sign = 1.0
+        else:
+            sign = 1.0 if last_detection.center_x > 0.5 else -1.0
+        controller_yaw = sign * speed
+        twist = self._Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = -controller_yaw  # NED→ENU per send_command
+        self._publisher.publish(twist)
 
     async def shutdown(self) -> None:
         """Idempotent; safe after a partially-failed connect/start_session."""

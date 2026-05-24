@@ -13,6 +13,7 @@
   "smooth_forward": false,
   "forward_alpha": 0.15,
   "search_timeout_s": 60.0,
+  "search_yawspeed_slow": 0.3,
   "log_verbosity": "normal",
   "bytetracker_track_thresh": 0.4,
   "bytetracker_track_buffer": 60,
