@@ -143,11 +143,13 @@ def sim_run(tmp_path, request):
         sim_log = open(sim_log_path, "wb")
         app_log = open(app_log_path, "wb")
 
-        # Snapshot existing recordings so we can identify the new mp4 created
-        # by --record after the run.
+        # Snapshot existing recordings so we can identify the new file created
+        # by --record after the run. The pipeline writes .mkv (matroskamux +
+        # splitmuxsink in vision_branches._record_subbranch); globbing for
+        # .mp4 silently treated every run as "no new file produced".
         state["world"] = world
         state["recordings_before"] = (
-            set(RECORDINGS_DIR.glob("*.mp4")) if RECORDINGS_DIR.exists() else set()
+            set(RECORDINGS_DIR.glob("*.mkv")) if RECORDINGS_DIR.exists() else set()
         )
 
         _log(f"artifacts  {tmp_path}")
@@ -227,19 +229,19 @@ def sim_run(tmp_path, request):
 
     # Tag any newly-produced recording with the world name so the user can
     # find it after the run. SIGTERM to the app's process group should have
-    # let ffmpeg finalize the mp4 cleanly.
+    # let matroskamux finalize the .mkv cleanly.
     if state.get("world") and RECORDINGS_DIR.exists():
         before = state.get("recordings_before", set())
-        new_files = sorted(set(RECORDINGS_DIR.glob("*.mp4")) - before)
+        new_files = sorted(set(RECORDINGS_DIR.glob("*.mkv")) - before)
         for src in new_files:
-            dst = src.with_name(f"{src.stem}_{state['world']}.mp4")
+            dst = src.with_name(f"{src.stem}_{state['world']}.mkv")
             try:
                 src.rename(dst)
                 _log(f"recording  {dst}   ({_fmt_size(dst).strip()})")
             except OSError as e:
                 _log(f"recording  rename failed: {e} (file at {src})")
         if not new_files:
-            _log("recording  (no new mp4 produced — recording may not have started)")
+            _log("recording  (no new .mkv produced — recording may not have started)")
 
 
 # ---------------------------------------------------------------------------

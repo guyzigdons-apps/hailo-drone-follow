@@ -405,7 +405,9 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
         if lat is not None:
             parts.append(f"pos=({lat:.6f},{lon:.6f})")
         msg = "[TELEM] " + " | ".join(parts)
-        telem_logger.info(msg)
+        # DEBUG-level — per-tick telemetry was spamming default INFO. Operators
+        # opt in via `--log-verbosity debug` when they actually want it.
+        telem_logger.debug(msg)
         if ui_state is not None:
             ui_state.push_log(msg)
 
@@ -536,15 +538,18 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                     ve = telemetry_cache.get("vel_east", 0)
                     hspd = math.sqrt(vn**2 + ve**2)
                     alt_str += f" actual_Vd={actual_vd:+.2f} hSpd={hspd:.2f}"
+                # DEBUG-level per-tick control snapshot. Operators opt in via
+                # `--log-verbosity debug` — the default-INFO firehose was making
+                # real log lines impossible to spot.
                 if detection is not None:
                     _log(f"[TRACK] Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+5.2f} Down:{cmd.down_m_s:+5.2f}"
                          f" pos=({detection.center_x:.2f},{detection.center_y:.2f}) bbox_h={detection.bbox_height:.2f}"
-                         f" target={config.target_bbox_height:.2f}{alt_str}", level=logging.INFO)
+                         f" target={config.target_bbox_height:.2f}{alt_str}", level=logging.DEBUG)
                 elif time_since_detection < config.search_enter_delay_s:
-                    _log(f"[SEARCH-WAIT] entering search in {config.search_enter_delay_s - time_since_detection:.1f}s{alt_str}", level=logging.INFO)
+                    _log(f"[SEARCH-WAIT] entering search in {config.search_enter_delay_s - time_since_detection:.1f}s{alt_str}", level=logging.DEBUG)
                 else:
                     search_dir = "right" if cmd.yawspeed_deg_s > 0 else "left"
-                    _log(f"[SEARCH] Spinning {search_dir} at {abs(cmd.yawspeed_deg_s):.1f} deg/s{alt_str}", level=logging.INFO)
+                    _log(f"[SEARCH] Spinning {search_dir} at {abs(cmd.yawspeed_deg_s):.1f} deg/s{alt_str}", level=logging.DEBUG)
 
             await asyncio.sleep(period)
     except asyncio.CancelledError:
