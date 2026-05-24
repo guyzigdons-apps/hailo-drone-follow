@@ -243,7 +243,89 @@ add_text(
 )
 
 
-# Slide 4 — Decoupled vs coupled
+# Slide 4 — Module imports / who knows whom
+s = prs.slides.add_slide(blank)
+set_bg(s, BG_LIGHT)
+add_title(s, "Module Imports  —  Who Knows Whom",
+          "Lower bands know less. Each module imports only from the bands beneath it.")
+
+# Four horizontal bands, narrowest at the top.
+band_h = Inches(1.05)
+band_w = Inches(12.3)
+band_x = Inches(0.5)
+
+# Tier 1 — pure domain
+add_box(s, band_x, Inches(1.4), band_w, band_h, CONTROLLER,
+        text="follow_api/  ·  pure domain (stdlib only)", text_size=13)
+add_text(
+    s, Inches(0.7), Inches(2.05), band_w, Inches(0.45),
+    [
+        "types.py  ·  config.py  ·  state.py  ·  controller.py"
+        "        ◀  no MAVSDK, no rclpy, no Hailo, no \"drone\" or \"rover\" string",
+    ],
+    size=11, mono=True, color=BG_WHITE,
+)
+
+# Tier 2 — robot abstraction
+add_box(s, band_x, Inches(2.55), band_w, band_h, ACCENT,
+        text="robot_api/  ·  robot-agnostic abstraction", text_size=13)
+add_text(
+    s, Inches(0.7), Inches(3.2), band_w, Inches(0.45),
+    [
+        "robot.py  (imports types)        orchestrator.py  (imports controller + types + robot)"
+        "        ◀  knows the Protocol, not its implementations",
+    ],
+    size=11, mono=True, color=BG_WHITE,
+)
+
+# Tier 3 — adapters
+add_box(s, band_x, Inches(3.7), band_w / 2 - Inches(0.1), band_h, DRONE,
+        text="MavsdkDroneAdapter", text_size=13)
+add_box(s, band_x + band_w / 2 + Inches(0.1), Inches(3.7),
+        band_w / 2 - Inches(0.1), band_h, ROVER,
+        text="Ros2RoverAdapter", text_size=13)
+add_text(
+    s, Inches(0.7), Inches(4.35), Inches(5.95), Inches(0.45),
+    ["imports mavsdk · follow_api · robot_api.robot"],
+    size=11, mono=True, color=BG_WHITE,
+)
+add_text(
+    s, Inches(6.95), Inches(4.35), Inches(5.95), Inches(0.45),
+    ["imports rclpy* · follow_api · robot_api.robot"],
+    size=11, mono=True, color=BG_WHITE,
+)
+
+# Tier 4 — composition + glue
+add_box(s, band_x, Inches(4.85), band_w, band_h, PIPELINE,
+        text="composition · pipeline · servers  ·  the wiring layer", text_size=13)
+add_text(
+    s, Inches(0.7), Inches(5.5), band_w, Inches(0.45),
+    [
+        "robot_follow_app.py  ·  pipeline_adapter/  ·  servers/  ·  reid_analysis/"
+        "        ◀  the only place that imports adapters by name (composition root)",
+    ],
+    size=11, mono=True, color=BG_WHITE,
+)
+
+# Footer line / critical assertion.
+add_text(
+    s, Inches(0.5), Inches(6.15), Inches(12.3), Inches(0.4),
+    [
+        "Critical: the controller does NOT import mavsdk_drone, ros2_rover, the orchestrator, "
+        "the pipeline, or any server. Adding a new robot means adding a new tier-3 box — "
+        "no edits below it.",
+    ],
+    size=11, color=MUTED, italic=True, align=PP_ALIGN.CENTER,
+)
+add_text(
+    s, Inches(0.5), Inches(6.55), Inches(12.3), Inches(0.4),
+    ["* rclpy + geometry_msgs are lazy-imported in __init__ so the module loads on no-ROS boxes."],
+    size=10, color=SOFT, italic=True, align=PP_ALIGN.CENTER,
+)
+add_footer(s)
+
+
+# Slide 5 — Decoupled vs coupled
 s = prs.slides.add_slide(blank)
 set_bg(s, BG_LIGHT)
 add_title(s, "Decoupled / Coupled",
@@ -291,7 +373,7 @@ add_text(
 add_footer(s)
 
 
-# Slide 5 — The orchestrator
+# Slide 6 — The orchestrator
 s = prs.slides.add_slide(blank)
 set_bg(s, BG_LIGHT)
 add_title(s, "The Orchestrator  —  one loop for any robot",
@@ -354,7 +436,7 @@ add_text(
 )
 
 
-# Slide 6 — Drone vs Rover side by side
+# Slide 7 — Drone vs Rover side by side
 s = prs.slides.add_slide(blank)
 set_bg(s, BG_LIGHT)
 add_title(s, "Two adapters · one interface",
@@ -414,7 +496,7 @@ add_text(
 )
 
 
-# Slide 7 — Notable fixes this branch shipped
+# Slide 8 — Notable fixes this branch shipped
 s = prs.slides.add_slide(blank)
 set_bg(s, BG_LIGHT)
 add_title(s, "Notable bugs found · fixed in this branch",
@@ -455,7 +537,7 @@ add_text(
 )
 
 
-# Slide 8 — Recap
+# Slide 9 — Recap
 s = prs.slides.add_slide(blank)
 set_bg(s, BG_WHITE)
 add_text(
