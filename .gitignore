@@ -48,3 +48,4 @@ gstshark_*/
 *.pptx
 # planning artifacts — generated locally, not for git
 .planning/
+docs/superpowers/
