@@ -732,6 +732,12 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self.reid_manager = reid_manager
             self.reid_search_timeout = reid_search_timeout
             self.controller_config = controller_config
+            # Target cross state — populated by the local-branch metadata
+            # pad probe each frame, read by the cairooverlay draw callback
+            # to render a green cross + state badge on display/record video.
+            # See vision_branches.TargetCrossState.
+            from .vision_branches import TargetCrossState
+            self.target_cross_state = TargetCrossState()
             self.perf = PerfTracker(
                 log_perf=log_perf,
                 tracker_metrics=tracker.metrics if tracker is not None else None,
@@ -1011,9 +1017,12 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             """Attach the highlight_target metadata pad probe to the
             local_meta_id identity element. The element only exists when
             --display or --record is active, so this is a no-op otherwise.
+            Also wires the cairooverlay draw callback that renders the
+            target cross + state badge on display/record video.
             """
             target_state = getattr(self.user_data, "target_state", None)
-            wire_local_meta_probe(self.pipeline, target_state)
+            cross_state = getattr(self.user_data, "target_cross_state", None)
+            wire_local_meta_probe(self.pipeline, target_state, cross_state)
 
         # ---- Recording control ----
 

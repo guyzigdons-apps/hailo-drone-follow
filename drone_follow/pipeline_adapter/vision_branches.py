@@ -36,11 +36,47 @@ import logging
 import os
 import shutil
 import subprocess
-from typing import Optional
+import threading
+from typing import Optional, Tuple
 
 import hailo
 
 LOGGER = logging.getLogger(__name__)
+
+
+class TargetCrossState:
+    """Thread-safe holder for the target's bbox center + mode.
+
+    Populated by the ``highlight_target`` pad probe on each buffer (running
+    on the GStreamer streaming thread). Read by the ``cairooverlay`` draw
+    callback (running on the same thread, but the lock keeps it correct
+    if rendering ever moves off-thread).
+
+    ``cx``/``cy`` are normalized [0..1] image coords (matching the UI's
+    convention). ``mode`` is one of ``"LOCKED"`` / ``"AUTO"`` / ``None``
+    so the cairo overlay can draw a small state badge alongside the cross.
+    ``None`` everywhere ⇒ no target visible this frame ⇒ no cross drawn.
+    """
+
+    __slots__ = ("_lock", "_cx", "_cy", "_mode")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cx: Optional[float] = None
+        self._cy: Optional[float] = None
+        self._mode: Optional[str] = None
+
+    def set(self, cx: Optional[float], cy: Optional[float],
+            mode: Optional[str]) -> None:
+        with self._lock:
+            self._cx, self._cy, self._mode = cx, cy, mode
+
+    def clear(self) -> None:
+        self.set(None, None, None)
+
+    def get(self) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+        with self._lock:
+            return self._cx, self._cy, self._mode
 
 # Sentinel class_id used to retag the locked/auto target detection on
 # the local branch. The YAML style-config maps this to a thicker green
@@ -247,11 +283,16 @@ def local_branch(*, display: bool, record: bool, record_output: Optional[str],
     )
     if DEFAULT_OVERLAY_STYLE_CONFIG:
         overlay_props += f' style-config="{DEFAULT_OVERLAY_STYLE_CONFIG}"'
+    # cairooverlay draws the target cross + state badge on top of the bbox
+    # overlay. videoconvert wrappers around it because cairooverlay needs
+    # BGRA/ARGB (it can't write into Hailo's NV12 native format).
     head = (
         "queue name=local_branch_q leaky=downstream max-size-buffers=3 ! "
         "identity name=local_meta_id ! "
         "queue name=hailo_overlay_q ! "
-        f"hailooverlay_community name=hailo_overlay {overlay_props}"
+        f"hailooverlay_community name=hailo_overlay {overlay_props} ! "
+        "videoconvert n-threads=2 ! video/x-raw,format=BGRA ! "
+        "cairooverlay name=target_cross_overlay"
     )
 
     subs = []
@@ -323,22 +364,23 @@ def _tag_white(det):
     ))
 
 
-def highlight_target(pad, info, target_state):
+def highlight_target(pad, info, target_state, cross_state=None):
     """Style the local-branch detections so the operator can tell the
     locked/auto target apart from everyone else at a glance:
 
-    * **Target**: retagged with ``class_id = TARGET_OVERLAY_CLASS_ID`` so
-      the YAML style-config rule applies — thicker, green bbox.
+    * **Target**: bbox center captured into ``cross_state`` for the
+      downstream cairo overlay to draw a target cross at, and the target's
+      HailoDetection is REMOVED from the ROI so ``hailooverlay_community``
+      doesn't draw a bbox over the cross.
     * **Non-target detections**: an ``overlay_color`` classification of
       :data:`NON_TARGET_BBOX_COLOR_RGB` (white) is attached so they render
       in white at the element-level (thin) line thickness.
 
     Pure metadata work — no pixel buffers are mapped.
 
-    HailoDetection has no ``set_class_id`` setter in the Python binding,
-    so the target detection is replaced with a copy carrying the new
-    class_id; sub-objects (HailoUniqueID, classifications, …) are
-    re-attached so downstream metadata survives.
+    Backwards compat: ``cross_state`` is optional. With ``cross_state=None``
+    the probe falls back to the previous behaviour (retag target with
+    :data:`TARGET_OVERLAY_CLASS_ID` so the YAML green-bbox rule fires).
     """
     import gi  # noqa: F401 — local import keeps gi out of module-load time
     gi.require_version("Gst", "1.0")
@@ -350,7 +392,7 @@ def highlight_target(pad, info, target_state):
 
     target_id = target_state.get_target() if target_state is not None else None
     roi = hailo.get_roi_from_buffer(buffer)
-    target_orig = None
+    target_det = None
     others = []
 
     for det in roi.get_objects_typed(hailo.HAILO_DETECTION):
@@ -361,34 +403,56 @@ def highlight_target(pad, info, target_state):
                     is_target = True
                     break
         if is_target and det.get_class_id() != TARGET_OVERLAY_CLASS_ID:
-            target_orig = det
-        elif not is_target:
+            target_det = det
+        elif is_target:  # already retagged on a previous pass
+            target_det = det
+        else:
             others.append(det)
 
     # Tag every non-target detection white so it stands apart from the
-    # target's green bbox. Idempotent across probe re-runs.
+    # target's marker. Idempotent across probe re-runs.
     for det in others:
         _tag_white(det)
 
-    # Retag the target detection so the YAML rule for class_id 99 fires.
-    if target_orig is not None:
-        bbox = target_orig.get_bbox()
-        new_det = hailo.HailoDetection(
-            bbox, TARGET_OVERLAY_CLASS_ID, target_orig.get_label(),
-            target_orig.get_confidence(),
-        )
-        for child in list(target_orig.get_objects()):
-            # Skip any pre-existing overlay_color classification —
-            # otherwise the metadata would override the YAML green.
-            if (isinstance(child, hailo.HailoClassification)
-                    and child.get_classification_type() == "overlay_color"):
-                continue
+    if target_det is not None:
+        bbox = target_det.get_bbox()
+        cx = bbox.xmin() + bbox.width() / 2.0
+        cy = bbox.ymin() + bbox.height() / 2.0
+
+        if cross_state is not None:
+            # Capture target center for the downstream cairooverlay draw
+            # callback. Mode hint follows whether this is an explicit lock
+            # vs the auto-acquired largest person.
             try:
-                new_det.add_object(child)
-            except Exception:  # noqa: BLE001 — child re-attach is best-effort
-                pass
-        roi.remove_object(target_orig)
-        roi.add_object(new_det)
+                is_locked = bool(target_state.is_explicit_lock())
+            except Exception:  # noqa: BLE001 — older FollowTargetState shapes
+                is_locked = False
+            cross_state.set(cx, cy, "LOCKED" if is_locked else "AUTO")
+            # Drop the target detection so hailooverlay doesn't draw a bbox
+            # over the cross. The other branches' shared metadata is fine —
+            # the orchestrator's view of state was populated upstream in
+            # user_callback, before the output_tee.
+            roi.remove_object(target_det)
+        else:
+            # Legacy path: retag with class_id 99 so the YAML thick-green
+            # rule applies (preserves callers that don't pass cross_state).
+            new_det = hailo.HailoDetection(
+                bbox, TARGET_OVERLAY_CLASS_ID, target_det.get_label(),
+                target_det.get_confidence(),
+            )
+            for child in list(target_det.get_objects()):
+                if (isinstance(child, hailo.HailoClassification)
+                        and child.get_classification_type() == "overlay_color"):
+                    continue
+                try:
+                    new_det.add_object(child)
+                except Exception:  # noqa: BLE001 — best-effort re-attach
+                    pass
+            roi.remove_object(target_det)
+            roi.add_object(new_det)
+    elif cross_state is not None:
+        # No target visible this frame ⇒ stop drawing a stale cross.
+        cross_state.clear()
 
     return Gst.PadProbeReturn.OK
 
@@ -397,9 +461,14 @@ def highlight_target(pad, info, target_state):
 strip_tiles_and_highlight_target = highlight_target
 
 
-def wire_local_meta_probe(pipeline, target_state) -> bool:
+def wire_local_meta_probe(pipeline, target_state, cross_state=None) -> bool:
     """Attach :func:`highlight_target` to the ``local_meta_id`` identity
     element if it exists in the pipeline.
+
+    With ``cross_state`` provided, also connects the ``target_cross_overlay``
+    ``cairooverlay``'s ``draw`` signal to :func:`draw_target_cross` so the
+    captured target center renders as a cross + small state badge on the
+    display/record video.
 
     Returns True if a probe was attached; False if the element is absent
     (no display/record branch was built). Safe to call after every
@@ -418,5 +487,128 @@ def wire_local_meta_probe(pipeline, target_state) -> bool:
         Gst.PadProbeType.BUFFER,
         highlight_target,
         target_state,
+        cross_state,
     )
+
+    if cross_state is not None:
+        overlay = pipeline.get_by_name("target_cross_overlay")
+        if overlay is not None:
+            overlay.connect("draw", draw_target_cross, cross_state)
+        else:
+            LOGGER.warning(
+                "[overlay] target_cross_overlay element not found in pipeline "
+                "— cross will not be drawn on display/record video."
+            )
     return True
+
+
+# Cross geometry — matched to the UI's SVG cross in App.jsx for visual
+# parity. Arm length scales loosely with video size so it stays readable
+# at any resolution; floor + ceiling keep it visible at 480p and
+# unobtrusive at 4K.
+_CROSS_ARM_FRACTION = 0.025      # 2.5 % of min(width, height) per arm half
+_CROSS_ARM_MIN_PX = 12
+_CROSS_ARM_MAX_PX = 32
+_CROSS_HALO_WIDTH_PX = 6
+_CROSS_LINE_WIDTH_PX = 3
+
+# Brand colours — match the SVG cross in the React UI (App.jsx).
+_CROSS_GREEN = (0x80 / 255, 0xF0 / 255, 0x60 / 255, 1.0)  # locked / auto
+_CROSS_HALO = (0.0, 0.0, 0.0, 0.75)                      # behind every stroke
+_BADGE_BG = (0.0, 0.0, 0.0, 0.55)                        # state badge bg
+
+
+def draw_target_cross(overlay, context, timestamp, duration, cross_state):
+    """``cairooverlay::draw`` handler — renders the target cross + a small
+    state badge.
+
+    Reads ``cross_state`` (populated upstream by :func:`highlight_target`).
+    No draw when the state is empty (no target visible) — the underlying
+    video frame passes through untouched.
+    """
+    cx_norm, cy_norm, mode = cross_state.get()
+    if cx_norm is None or cy_norm is None:
+        return
+
+    # cairooverlay::draw doesn't supply width/height directly; read them
+    # off the element's sink pad caps. Cached on the element on first draw.
+    width, height = _cached_overlay_dims(overlay)
+    if width is None or height is None:
+        return
+
+    cx = cx_norm * width
+    cy = cy_norm * height
+    arm = max(
+        _CROSS_ARM_MIN_PX,
+        min(_CROSS_ARM_MAX_PX,
+            int(_CROSS_ARM_FRACTION * min(width, height))),
+    )
+
+    context.set_line_cap(2)  # cairo.LINE_CAP_ROUND
+    # Black halo so the cross stays readable on any background.
+    context.set_source_rgba(*_CROSS_HALO)
+    context.set_line_width(_CROSS_HALO_WIDTH_PX)
+    context.move_to(cx - arm, cy)
+    context.line_to(cx + arm, cy)
+    context.stroke()
+    context.move_to(cx, cy - arm)
+    context.line_to(cx, cy + arm)
+    context.stroke()
+    # Green cross on top.
+    context.set_source_rgba(*_CROSS_GREEN)
+    context.set_line_width(_CROSS_LINE_WIDTH_PX)
+    context.move_to(cx - arm, cy)
+    context.line_to(cx + arm, cy)
+    context.stroke()
+    context.move_to(cx, cy - arm)
+    context.line_to(cx, cy + arm)
+    context.stroke()
+
+    # State badge — small dark rectangle with the current mode label.
+    if mode:
+        _draw_state_badge(context, mode, width, height)
+
+
+def _draw_state_badge(context, mode, width, height) -> None:
+    """Top-left badge: dark pill with mode text."""
+    text = mode.upper()
+    pad_x = 8
+    pad_y = 4
+    font_size = max(12, int(height * 0.022))
+    context.select_font_face("sans-serif", 0, 1)  # NORMAL, BOLD
+    context.set_font_size(font_size)
+    _, _, text_w, text_h, _, _ = context.text_extents(text)
+    box_w = int(text_w + 2 * pad_x)
+    box_h = int(text_h + 2 * pad_y)
+    box_x = 16
+    box_y = 16
+    # Background pill.
+    context.set_source_rgba(*_BADGE_BG)
+    context.rectangle(box_x, box_y, box_w, box_h)
+    context.fill()
+    # Text — green to match the cross.
+    context.set_source_rgba(*_CROSS_GREEN)
+    context.move_to(box_x + pad_x, box_y + pad_y + text_h)
+    context.show_text(text)
+
+
+def _cached_overlay_dims(overlay):
+    """Read width/height off the cairooverlay's negotiated sink caps once
+    and cache on the element. Returns ``(None, None)`` until caps are set.
+    """
+    cached = getattr(overlay, "_cached_dims", None)
+    if cached is not None:
+        return cached
+    pad = overlay.get_static_pad("sink")
+    if pad is None:
+        return None, None
+    caps = pad.get_current_caps()
+    if caps is None:
+        return None, None
+    s = caps.get_structure(0)
+    ok_w, w = s.get_int("width")
+    ok_h, h = s.get_int("height")
+    if not (ok_w and ok_h):
+        return None, None
+    overlay._cached_dims = (w, h)
+    return overlay._cached_dims
