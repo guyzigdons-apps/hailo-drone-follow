@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from typing import TYPE_CHECKING, Optional
 
 from robot_follow.follow_api.types import (
@@ -98,6 +99,18 @@ class Ros2RoverAdapter:
         self._filtered_yaw: Optional[float] = None
         self._filtered_forward: Optional[float] = None
 
+        # Diagnostic logging state. Enabled when --log-verbosity debug; emits
+        # one compact line per send_command tick with inputs (center_x,
+        # bbox_height, bbox_bottom_norm), controller raw output, post-EMA
+        # output, and published Twist values. Tick counter + monotonic start
+        # let you reconstruct the time series. Also tracks edge-triggered
+        # state changes (bottom-stop fire / clear, target lost / re-acquired)
+        # for separate INFO-level breadcrumbs.
+        self._tick: int = 0
+        self._t0_monotonic: float = time.monotonic()
+        self._prev_bottom_stop: bool = False
+        self._prev_target_lost: bool = False
+
     async def connect(self) -> None:
         """Initialize rclpy without taking the SIGINT handler.
 
@@ -184,6 +197,16 @@ class Ros2RoverAdapter:
         cmd: RobotCommand,
         safety_ctx: SafetyContext,
     ) -> None:
+        # Edge-triggered target-lost breadcrumb (fires at INFO once per
+        # transition; cheap, not gated on DEBUG). Helps correlate "rover
+        # froze" with "detector dropped the target" in operator reports.
+        if safety_ctx.target_lost != self._prev_target_lost:
+            LOGGER.info(
+                "[rover] target_lost=%s tick=%d t=%.3f",
+                safety_ctx.target_lost, self._tick,
+                time.monotonic() - self._t0_monotonic,
+            )
+            self._prev_target_lost = safety_ctx.target_lost
         if safety_ctx.target_lost:
             return
         if self._publisher is None:
@@ -239,10 +262,45 @@ class Ros2RoverAdapter:
         # only the about-to-publish twist is overridden. The drone adapter
         # never reads bbox_bottom_norm — it stays on bbox_bottom_normalized
         # (the legacy field used by _apply_retreat_from_tilt).
-        if (safety_ctx.bbox_bottom_norm is not None
-                and safety_ctx.bbox_bottom_norm >= ROVER_BOTTOM_STOP_THRESHOLD):
+        bottom_stop = (
+            safety_ctx.bbox_bottom_norm is not None
+            and safety_ctx.bbox_bottom_norm >= ROVER_BOTTOM_STOP_THRESHOLD
+        )
+        if bottom_stop:
             twist.linear.x = 0.0
+        # Edge-triggered bottom-stop breadcrumb (INFO; once per transition).
+        if bottom_stop != self._prev_bottom_stop:
+            LOGGER.info(
+                "[rover] bottom_stop=%s bbox_bottom=%.3f tick=%d t=%.3f",
+                bottom_stop,
+                safety_ctx.bbox_bottom_norm
+                    if safety_ctx.bbox_bottom_norm is not None else float("nan"),
+                self._tick,
+                time.monotonic() - self._t0_monotonic,
+            )
+            self._prev_bottom_stop = bottom_stop
         self._publisher.publish(twist)
+
+        # Per-tick DEBUG line. Compact, single-line, key=value so it greps
+        # cleanly. Wrap in isEnabledFor to avoid the formatting cost on
+        # non-debug runs (this fires every control-loop tick).
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug(
+                "[rover-tick] n=%d t=%.3f "
+                "cx=%s bh=%s bb=%s | "
+                "yaw raw=%+.4f smooth=%+.4f ang_z=%+.4f | "
+                "fwd raw=%+.4f smooth=%+.4f stop=%d lin_x=%+.4f",
+                self._tick,
+                time.monotonic() - self._t0_monotonic,
+                f"{safety_ctx.last_target_x:.3f}"
+                    if safety_ctx.last_target_x is not None else "n/a",
+                f"{safety_ctx.bbox_size_normalized:.3f}",
+                f"{safety_ctx.bbox_bottom_norm:.3f}"
+                    if safety_ctx.bbox_bottom_norm is not None else "n/a",
+                cmd.yaw_rate, yaw_out, twist.angular.z,
+                cmd.forward_m_s, forward_out, int(bottom_stop), twist.linear.x,
+            )
+        self._tick += 1
 
     async def send_zero(self) -> None:
         if self._publisher is None:
