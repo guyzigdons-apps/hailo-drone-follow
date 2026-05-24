@@ -46,3 +46,5 @@ gstshark_*/
 # Generated architecture decks (the .pptx.py script is the source; the .pptx
 # is the render).
 *.pptx
+# planning artifacts — generated locally, not for git
+.planning/
