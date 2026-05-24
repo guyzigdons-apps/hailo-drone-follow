@@ -308,9 +308,38 @@ class Ros2RoverAdapter:
         self._publisher.publish(self._Twist())
 
     async def on_target_lost(self, last_detection: Optional[Detection]) -> None:
+        """Rover search: yaw-spin toward the side the target was last seen.
+
+        The camera is body-fixed and forward-facing; once the actor leaves
+        the FoV the rover can only find them by physically rotating. Without
+        this, the stub-publish-zero behaviour froze the rover on every
+        detection blink and the camera ended up pointing wherever inertia
+        left it (typically the wrong way after the 2 s grace period drove
+        ~230° of unintended rotation).
+
+        Magnitude: ``config.search_yawspeed_slow`` in ``caps.yaw_unit``
+        (rad/s for rover; deg/s for drone). The rover JSON MUST set this
+        to a small rad/s value — the dataclass default 10.0 is sized for
+        the drone's deg/s.
+
+        Direction: ``center_x > 0.5 → spin right`` else left. No
+        ``last_detection`` ⇒ default right (parity with the drone's
+        ``_compute_search_yawspeed``).
+
+        Sign flip + linear=0 same as the live ``send_command`` path.
+        """
         if self._publisher is None:
             return
-        self._publisher.publish(self._Twist())
+        speed = self._config.search_yawspeed_slow
+        if last_detection is None:
+            sign = 1.0
+        else:
+            sign = 1.0 if last_detection.center_x > 0.5 else -1.0
+        controller_yaw = sign * speed
+        twist = self._Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = -controller_yaw  # NED→ENU per send_command
+        self._publisher.publish(twist)
 
     async def shutdown(self) -> None:
         """Idempotent; safe after a partially-failed connect/start_session."""
