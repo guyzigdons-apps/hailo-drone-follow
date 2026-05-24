@@ -8,14 +8,14 @@
   "target_bbox_height": 0.15,
   "bottom_margin_safety": 0.25,
   "top_margin_safety": 0.10,
-  "smooth_yaw": true,
+  "smooth_yaw": false,
   "yaw_alpha": 0.3,
-  "smooth_forward": true,
+  "smooth_forward": false,
   "forward_alpha": 0.15,
   "search_timeout_s": 60.0,
   "log_verbosity": "normal",
   "bytetracker_track_thresh": 0.4,
-  "bytetracker_track_buffer": 30,
+  "bytetracker_track_buffer": 60,
   "bytetracker_match_thresh": 0.5,
   "bytetracker_frame_rate": 30
 }
