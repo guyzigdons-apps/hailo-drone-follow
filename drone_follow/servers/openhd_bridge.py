@@ -422,6 +422,32 @@ class OpenHDBridge:
                     "tracked": det_id is not None and det_id == active_id,
                 })
             payload["bboxes"] = bboxes
+            # Follow-state hint so QOpenHD can render the same SEARCH /
+            # LOCKED / AUTO badge + target cross the air-side display
+            # already paints. The local display/record overlay derives
+            # these from the same target_state — this is the wire copy.
+            #
+            # The OpenHD bridge today does NOT forward mode through the
+            # binary v3 payload — QOpenHD ignores unknown JSON fields,
+            # so adding it here is a no-op until HailoFollowBridge +
+            # QOpenHD are patched in the OpenHD repo. Sibling change
+            # lives outside this repo. Until then this is informational
+            # for any other consumer of the JSON report.
+            mode = "AUTO"
+            if active_id is None:
+                mode = "AUTO"
+            else:
+                visible = any(b["id"] == active_id for b in bboxes)
+                if visible:
+                    if self._target_state is not None and \
+                            self._target_state.is_explicit_lock():
+                        mode = "LOCKED"
+                    else:
+                        mode = "AUTO"
+                else:
+                    mode = "SEARCH"
+            payload["mode"] = mode
+            payload["active_id"] = active_id if active_id is not None else 0
 
         msg = json.dumps(payload).encode("utf-8")
         try:
