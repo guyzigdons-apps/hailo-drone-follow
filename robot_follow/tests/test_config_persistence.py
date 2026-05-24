@@ -237,6 +237,11 @@ def test_rover_simulation_json_loads_with_rover_safe_defaults():
     assert cfg.smooth_forward is True
     assert cfg.forward_alpha == 0.15
     assert cfg.search_timeout_s == 60.0
+    # search_yawspeed_slow MUST be overridden for the rover: the dataclass
+    # default 10.0 is sized for the drone's deg/s (slow ~10 °/s scan).
+    # Interpreted as rad/s on the rover that would be ~573 °/s — dangerous.
+    # 0.3 rad/s ≈ 17 °/s is a slow methodical scan toward the last-seen side.
+    assert cfg.search_yawspeed_slow == 0.3
     assert cfg.log_verbosity == "normal"
 
     # ByteTracker (RINT-03 overrides)
@@ -254,6 +259,52 @@ def test_rover_simulation_json_loads_with_rover_safe_defaults():
     assert cfg.target_altitude == 3.0
     assert cfg.min_altitude == 2.0
     assert cfg.max_altitude == 4.0
+
+
+def test_from_args_does_not_override_json_with_cli_defaults():
+    """Regression for the silent-CLI-default override bug.
+
+    Failure pattern: argparse declared defaults equal to the dataclass defaults
+    (e.g. `default=defaults.kp_yaw → 4.0` for drone). With no CLI flags passed,
+    args.kp_yaw is 4.0, the `_arg` helper returns args.kp_yaw, and the JSON's
+    kp_yaw=0.05 is silently discarded. This test loads the rover JSON via
+    `--config` (the real app code path) and asserts the JSON values land
+    in the constructed ControllerConfig.
+
+    If this test fails, every JSON config field with a matching CLI flag is
+    being clobbered by argparse defaults and the rover will behave with drone
+    defaults regardless of configuration.
+    """
+    from pathlib import Path
+    import argparse
+    from robot_follow.follow_api.config import ControllerConfig
+
+    repo_root = Path(__file__).resolve().parents[2]
+    rover_json = repo_root / "configs" / "rover_simulation.json"
+
+    parser = argparse.ArgumentParser()
+    ControllerConfig.add_args(parser)
+    args = parser.parse_args(["--config", str(rover_json)])
+
+    cfg = ControllerConfig.from_args(args)
+
+    # Fields with CLI flags — the bug clobbered all of these with dataclass defaults.
+    assert cfg.kp_yaw == 0.05, "JSON kp_yaw must NOT be replaced by argparse default 4.0"
+    assert cfg.yaw_only is False, "JSON yaw_only=false must override argparse default True"
+    assert cfg.target_bbox_height == 0.25
+    assert cfg.max_forward == 1.0
+    assert cfg.smooth_yaw is True
+    assert cfg.smooth_forward is True
+    assert cfg.forward_alpha == 0.15
+
+    # Fields with NO CLI flag — these were missing from from_args entirely
+    # and silently fell through to dataclass defaults. The rover's
+    # max_yawspeed=0.8 was the highest-impact one (90.0 default interpreted
+    # as rad/s = 5160 °/s commanded yaw).
+    assert cfg.max_yawspeed == 0.8, (
+        "JSON max_yawspeed=0.8 must reach the constructed ControllerConfig — "
+        "dataclass default 90.0 is drone deg/s and unsafe for the rover"
+    )
 
 
 def test_safety_context_from_detection_populates_bbox_bottom_norm():

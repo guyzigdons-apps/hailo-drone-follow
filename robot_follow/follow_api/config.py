@@ -276,7 +276,7 @@ class ControllerConfig:
                            help="Save the effective config to a JSON file and exit.")
 
         # Framing and target geometry
-        group.add_argument("--hfov", type=float, default=defaults.hfov)
+        group.add_argument("--hfov", type=float, default=None)
         group.add_argument("--target-bbox-height", type=float, default=None,
                            help=f"Target bbox height (0-1) for distance control. "
                                 f"Used as the pre-lock default; when a target is locked (manual click or AUTO "
@@ -285,78 +285,78 @@ class ControllerConfig:
                                 f"(default: {defaults.target_bbox_height}).")
 
         # Distance control (bbox_height → forward)
-        group.add_argument("--distance-gain", dest="kp_distance", type=float, default=defaults.kp_distance,
+        group.add_argument("--distance-gain", dest="kp_distance", type=float, default=None,
                            help=f"Approach gain on (target/bbox - 1) when factor > 0 "
                                 f"(person too far). Default: {defaults.kp_distance}.")
         group.add_argument("--distance-gain-back", dest="kp_distance_back", type=float,
-                           default=defaults.kp_distance_back,
+                           default=None,
                            help=f"Retreat gain on (target/bbox - 1) when factor < 0 "
                                 f"(person too close). Higher than --distance-gain so retreat "
                                 f"ramps to max_backward before the bbox-safety panic threshold "
                                 f"(default: {defaults.kp_distance_back}).")
-        group.add_argument("--dead-zone-bbox-percent", type=float, default=defaults.dead_zone_bbox_percent,
+        group.add_argument("--dead-zone-bbox-percent", type=float, default=None,
                            help=f"Distance dead zone as %% of target bbox height (default: {defaults.dead_zone_bbox_percent})")
-        group.add_argument("--max-climb-speed", type=float, default=defaults.max_climb_speed,
+        group.add_argument("--max-climb-speed", type=float, default=None,
                            help=f"Max altitude change rate m/s (default: {defaults.max_climb_speed})")
-        group.add_argument("--kp-alt-hold", type=float, default=defaults.kp_alt_hold,
+        group.add_argument("--kp-alt-hold", type=float, default=None,
                            help=f"Altitude-hold P gain on (current_alt - target_altitude). "
                                 f"Drives the down axis whenever yaw_only=False. "
                                 f"(default: {defaults.kp_alt_hold})")
-        group.add_argument("--min-altitude", type=float, default=defaults.min_altitude,
+        group.add_argument("--min-altitude", type=float, default=None,
                            help=f"Hard altitude floor in metres (default: {defaults.min_altitude})")
-        group.add_argument("--max-altitude", type=float, default=defaults.max_altitude,
+        group.add_argument("--max-altitude", type=float, default=None,
                            help=f"Hard altitude ceiling in metres (default: {defaults.max_altitude})")
 
         # Controller gains and loop behavior
-        group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
-        group.add_argument("--yaw-gain", dest="kp_yaw", type=float, default=defaults.kp_yaw)
+        group.add_argument("--control-loop-hz", type=float, default=None)
+        group.add_argument("--yaw-gain", dest="kp_yaw", type=float, default=None)
 
         # Flight mode
-        group.add_argument("--yaw-only", action=argparse.BooleanOptionalAction, default=defaults.yaw_only,
+        group.add_argument("--yaw-only", action=argparse.BooleanOptionalAction, default=None,
                            help="Yaw only mode: no forward/backward or altitude movement (default: True). Use --no-yaw-only for full follow.")
-        group.add_argument("--auto-select", action=argparse.BooleanOptionalAction, default=defaults.auto_select,
+        group.add_argument("--auto-select", action=argparse.BooleanOptionalAction, default=None,
                            help=f"When on, AUTO mode re-acquires the biggest person whenever the target is cleared or lost. "
                                 f"When off, the drone holds position on loss/clear — pilot-led workflow "
                                 f"(default: {defaults.auto_select}). Use --no-auto-select to disable.")
 
         # Search/follow behavior
-        group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
+        group.add_argument("--search-enter-delay", type=float, default=None,
                            help="Seconds without detection before active search starts (default: 2.0)")
-        group.add_argument("--search-timeout", type=float, default=defaults.search_timeout_s,
+        group.add_argument("--search-timeout", type=float, default=None,
                            help="Seconds before landing if no person is found (default: 60.0)")
 
         # Smoothing
-        group.add_argument("--smooth-forward", action=argparse.BooleanOptionalAction, default=defaults.smooth_forward,
+        group.add_argument("--smooth-forward", action=argparse.BooleanOptionalAction, default=None,
                            help=f"Enable/disable forward velocity smoothing (default: {defaults.smooth_forward})")
-        group.add_argument("--forward-alpha", type=float, default=defaults.forward_alpha,
+        group.add_argument("--forward-alpha", type=float, default=None,
                            help=f"EMA smoothing factor for forward velocity (0=sluggish, 1=no smoothing, default: {defaults.forward_alpha})")
-        group.add_argument("--forward-velocity-deadband", type=float, default=defaults.forward_velocity_deadband,
+        group.add_argument("--forward-velocity-deadband", type=float, default=None,
                            help=f"Deadband on commanded forward velocity. |forward| below this is "
                                 f"snapped to 0 to kill hover twitch (default: {defaults.forward_velocity_deadband})")
-        group.add_argument("--smooth-down", action=argparse.BooleanOptionalAction, default=defaults.smooth_down,
+        group.add_argument("--smooth-down", action=argparse.BooleanOptionalAction, default=None,
                            help=f"Enable/disable vertical velocity smoothing (default: {defaults.smooth_down})")
-        group.add_argument("--down-alpha", type=float, default=defaults.down_alpha,
+        group.add_argument("--down-alpha", type=float, default=None,
                            help=f"EMA smoothing factor for vertical velocity (0=sluggish, 1=no smoothing, default: {defaults.down_alpha})")
 
         # Safety limits
-        group.add_argument("--max-forward", type=float, default=defaults.max_forward,
+        group.add_argument("--max-forward", type=float, default=None,
                            help=f"Max forward speed in m/s (default: {defaults.max_forward})")
-        group.add_argument("--max-backward", type=float, default=defaults.max_backward,
+        group.add_argument("--max-backward", type=float, default=None,
                            help=f"Max backward speed in m/s (default: {defaults.max_backward})")
-        group.add_argument("--max-forward-accel", type=float, default=defaults.max_forward_accel,
+        group.add_argument("--max-forward-accel", type=float, default=None,
                            help=f"Slew-rate cap on forward velocity in m/s² (tilt-transient safety). "
                                 f"Independent of EMA and of --max-forward (default: {defaults.max_forward_accel}).")
-        group.add_argument("--max-bbox-height-safety", type=float, default=defaults.max_bbox_height_safety,
+        group.add_argument("--max-bbox-height-safety", type=float, default=None,
                            help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
-        group.add_argument("--top-margin-safety", type=float, default=defaults.top_margin_safety,
+        group.add_argument("--top-margin-safety", type=float, default=None,
                            help=f"Frame-top safety: bbox top closer than this fraction of frame "
                                 f"(0-1) → force max forward. 0 disables (default: {defaults.top_margin_safety}).")
-        group.add_argument("--bottom-margin-safety", type=float, default=defaults.bottom_margin_safety,
+        group.add_argument("--bottom-margin-safety", type=float, default=None,
                            help=f"Frame-bottom safety: bbox bottom closer than this fraction of frame "
                                 f"(0-1) → force max backward. 0 disables (default: {defaults.bottom_margin_safety}).")
 
         # Logging
-        group.add_argument("--log-verbosity", choices=["quiet", "normal", "debug"], default=defaults.log_verbosity,
+        group.add_argument("--log-verbosity", choices=["quiet", "normal", "debug"], default=None,
                            help="Console log verbosity (default: normal)")
 
     @classmethod
@@ -383,6 +383,18 @@ class ControllerConfig:
         return cls(
             hfov=_arg("hfov", default=defaults.hfov),
             kp_yaw=_arg("kp_yaw", "yaw_gain", default=defaults.kp_yaw),
+            # max_yawspeed has no CLI flag (intentional — drone deg/s vs rover
+            # rad/s makes a single CLI default confusing). It MUST be in from_args
+            # so a JSON override (e.g. rover's 0.8 rad/s) actually reaches the
+            # constructor instead of falling through to the dataclass default
+            # (90.0, sized for the drone's deg/s).
+            max_yawspeed=_arg("max_yawspeed", default=defaults.max_yawspeed),
+            # Same for search_yawspeed_slow — rover sets 0.3 rad/s; dataclass
+            # default 10.0 is drone deg/s. Drop-through would give a 573 °/s
+            # rover spin on lost-target.
+            search_yawspeed_slow=_arg(
+                "search_yawspeed_slow", default=defaults.search_yawspeed_slow
+            ),
             target_bbox_height=_arg("target_bbox_height", default=defaults.target_bbox_height),
             kp_distance=_arg("kp_distance", "distance_gain", default=defaults.kp_distance),
             kp_distance_back=_arg("kp_distance_back", "distance_gain_back", default=defaults.kp_distance_back),
