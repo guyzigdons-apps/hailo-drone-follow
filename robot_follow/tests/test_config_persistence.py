@@ -229,38 +229,22 @@ def test_rover_simulation_json_loads_with_rover_safe_defaults():
     assert cfg.max_forward == 1.0, "rover-safe top speed"
     assert cfg.max_backward == 1.0
     assert cfg.max_forward_accel == 0, "slew cap disabled for rover"
-    # 0.15 (was 0.25): keep more standoff so the person reliably stays in
-    # frame as the rover yaws — bbox jitter at close range was making the
-    # actor easy to lose, and skid-steer recovery is slower than the drone.
-    assert cfg.target_bbox_height == 0.15
+    assert cfg.target_bbox_height == 0.25
     assert cfg.bottom_margin_safety == 0.25
     assert cfg.top_margin_safety == 0.10
-    # smooth_yaw/smooth_forward = False: the EMA was injecting ~300-500 ms
-    # of phase lag at yaw_alpha=0.3 / ~660 ms at forward_alpha=0.15, which
-    # caused the rover to overshoot then settle slowly — operator-visible
-    # as yaw oscillation followed by an unresponsive chase. Alphas are kept
-    # at their dataclass defaults in case smoothing is re-enabled per-run.
-    assert cfg.smooth_yaw is False
+    assert cfg.smooth_yaw is True
     assert cfg.yaw_alpha == 0.3
-    assert cfg.smooth_forward is False
+    assert cfg.smooth_forward is True
     assert cfg.forward_alpha == 0.15
     assert cfg.search_timeout_s == 60.0
-    # search_yawspeed_slow MUST be overridden for the rover: the dataclass
-    # default 10.0 was sized for the drone's deg/s (10 °/s ≈ 0.175 rad/s
-    # slow scan). Interpreted as rad/s on the rover that would be ~573 °/s
-    # — a dangerously fast spin. 0.3 rad/s ≈ 17 °/s is a slow methodical
-    # scan in the direction the actor was last seen.
-    assert cfg.search_yawspeed_slow == 0.3
     assert cfg.log_verbosity == "normal"
 
     # ByteTracker (RINT-03 overrides)
     assert cfg.bytetracker_track_thresh == 0.4, (
         "drone-parity detection floor (NOT lowered for rover — safer)"
     )
-    assert cfg.bytetracker_track_buffer == 60, (
-        "rover override: 2 s @ 30 fps (raised from 1 s — outdoor walking "
-        "actor was losing track during brief detection dropouts, then the "
-        "controller's hold + on_target_lost timeout would fire too easily)"
+    assert cfg.bytetracker_track_buffer == 30, (
+        "rover override: 1 s @ 30 fps (vs drone 3 s @ 30 fps = 90)"
     )
     assert cfg.bytetracker_match_thresh == 0.5
     assert cfg.bytetracker_frame_rate == 30

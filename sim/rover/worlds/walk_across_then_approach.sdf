@@ -54,73 +54,68 @@
         <delay_start>0</delay_start>
         <auto_start>true</auto_start>
         <trajectory id="0" type="walking">
-          <!-- Phase 0: hold at (8,-6) for 5 s (rover boots, controller wakes).
-               X=8 (was X=4): keeps the actor at half the angular subtense so
-               the rover's modest yaw rate has more standoff to work with. -->
+          <!-- Phase 0: hold at (4,-6) for 5 s (rover boots, controller wakes) -->
           <waypoint>
             <time>0</time>
-            <pose>8 -6 1.0 0 0 1.5708</pose>
+            <pose>4 -6 1.0 0 0 1.5708</pose>
           </waypoint>
           <waypoint>
             <time>5</time>
-            <pose>8 -6 1.0 0 0 1.5708</pose>
+            <pose>4 -6 1.0 0 0 1.5708</pose>
           </waypoint>
 
-          <!-- Phase 1: walk across frame, -Y to +Y at X=8 (~1 m/s) -->
+          <!-- Phase 1: walk across frame, -Y to +Y at X=4 (~1 m/s) -->
           <waypoint>
             <time>17</time>
-            <pose>8 6 1.0 0 0 1.5708</pose>
+            <pose>4 6 1.0 0 0 1.5708</pose>
           </waypoint>
 
           <!-- Phase 2: turn around and walk back to centerline -->
           <waypoint>
             <time>18</time>
-            <pose>8 6 1.0 0 0 -1.5708</pose>
+            <pose>4 6 1.0 0 0 -1.5708</pose>
           </waypoint>
           <waypoint>
             <time>24</time>
-            <pose>8 0 1.0 0 0 -1.5708</pose>
+            <pose>4 0 1.0 0 0 -1.5708</pose>
           </waypoint>
 
           <!-- Phase 3: turn to face rover, walk straight toward it.
-               10 m over 22 s (~0.45 m/s, matches the original phase-3
-               walking speed); passes through rover origin to force
-               sustained backward / disengage response. -->
+               6 m over 13 s (~0.46 m/s); passes through rover origin to
+               force sustained backward / disengage response. -->
           <waypoint>
             <time>25</time>
-            <pose>8 0 1.0 0 0 3.14159</pose>
+            <pose>4 0 1.0 0 0 3.14159</pose>
           </waypoint>
           <waypoint>
-            <time>47</time>
+            <time>38</time>
             <pose>-2 0 1.0 0 0 3.14159</pose>
           </waypoint>
 
-          <!-- Phase 4: U-turn south of rover before returning to start.
-               Times shifted by +9 s vs the X=4 world to compensate for
-               the longer Phase 3 walk. -->
+          <!-- Phase 4: U-turn south of rover before returning to start. -->
           <waypoint>
-            <time>48</time>
+            <time>39</time>
             <pose>-2 0 1.0 0 0 -1.5708</pose>
           </waypoint>
           <waypoint>
-            <time>60</time>
+            <time>51</time>
             <pose>-2 -12 1.0 0 0 -1.5708</pose>
           </waypoint>
           <waypoint>
-            <time>61</time>
+            <time>52</time>
             <pose>-2 -12 1.0 0 0 0</pose>
           </waypoint>
           <waypoint>
-            <time>74</time>
-            <pose>8 -12 1.0 0 0 0</pose>
+            <time>65</time>
+            <pose>4 -12 1.0 0 0 0</pose>
           </waypoint>
           <waypoint>
-            <time>75</time>
-            <pose>8 -12 1.0 0 0 1.5708</pose>
+            <time>66</time>
+            <pose>4 -12 1.0 0 0 1.5708</pose>
           </waypoint>
           <waypoint>
-            <time>81</time>
-            <pose>8 -6 1.0 0 0 1.5708</pose>
+            <time>72</time>
+            <pose>4 -6 1.0 0 0 1.5708</pose>
           </waypoint>
         </trajectory>
       </script>
