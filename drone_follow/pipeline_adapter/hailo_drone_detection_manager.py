@@ -797,8 +797,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
             self._record_lock = threading.Lock()
             self._shm_rebuild_pending = False
-            # Output file path of the active recording (set on start_recording).
-            self._current_record_path = None
+            # Active recording session — a bundle directory and the two
+            # ``.mkv`` paths inside it. The clean branch (no overlay) is
+            # the source for ``scripts/render_overlay.py``; the overlay
+            # branch is what the operator saw live. Both are written
+            # for every recording session.
+            self._current_bundle_dir = None
+            self._current_clean_path = None
+            self._current_overlay_path = None
             # Path the FILE_SINK_PIPELINE was instantiated with (chosen at
             # pipeline-build time). Used as the toggle target so the file
             # name shown to operators matches what GStreamer is writing.
@@ -844,18 +850,27 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self._connect_local_meta_probe()
 
         def _connect_mjpeg_sink(self):
-            """Connect MJPEG appsink (web UI) and splitmuxsink
-            ``format-location-full`` (recording) signal handlers. Called
-            after every pipeline construction / rebuild.
+            """Connect MJPEG appsink (web UI) and both recording splitmuxsink
+            ``format-location-full`` signal handlers. Called after every
+            pipeline construction / rebuild.
             """
             self._Gst = _get_gst()
             mjpeg_sink = self.pipeline.get_by_name("mjpeg_sink")
             if mjpeg_sink:
                 mjpeg_sink.connect("new-sample", self._on_mjpeg_sample)
-            file_sink = self.pipeline.get_by_name("file_sink")
-            if file_sink:
-                file_sink.connect("format-location-full",
-                                  self._on_record_format_location)
+            # Two recording sinks live in the pipeline when --record is set:
+            # ``file_sink_clean`` (raw, pre-overlay) and ``file_sink_overlay``
+            # (operator-visible). Each gets its own format-location callback
+            # so it can return the matching path inside the active session
+            # bundle directory.
+            clean_sink = self.pipeline.get_by_name("file_sink_clean")
+            if clean_sink:
+                clean_sink.connect("format-location-full",
+                                   self._on_record_format_location_clean)
+            overlay_sink = self.pipeline.get_by_name("file_sink_overlay")
+            if overlay_sink:
+                overlay_sink.connect("format-location-full",
+                                     self._on_record_format_location_overlay)
 
         def _on_mjpeg_sample(self, appsink):
             """appsink callback: extract pre-encoded JPEG bytes."""
@@ -1030,40 +1045,78 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         def is_recording(self):
             return self._recording
 
-        def _generate_record_path(self):
+        def _generate_bundle_paths(self):
+            """Create a session bundle directory and return its three paths.
+
+            Layout::
+
+                recordings/<YYYY-MM-DD_HH-MM-SS>/
+                ├── clean.mkv     (no overlay — feeds offline renderer)
+                └── overlay.mkv   (operator-visible — bboxes + cross + badge)
+
+            Returns ``(bundle_dir, clean_path, overlay_path)``.
+            """
             os.makedirs(self._record_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            return os.path.join(self._record_dir, f"rec_{ts}.mkv")
+            bundle_dir = os.path.join(self._record_dir, ts)
+            os.makedirs(bundle_dir, exist_ok=True)
+            return (bundle_dir,
+                    os.path.join(bundle_dir, "clean.mkv"),
+                    os.path.join(bundle_dir, "overlay.mkv"))
 
-        def _on_record_format_location(self, splitmux, fragment_id, *_):
-            """``format-location-full`` callback for splitmuxsink. Returns
-            the path for the current recording fragment.
+        @property
+        def current_bundle_dir(self):
+            """The active recording session directory, or None.
 
-            ``start_recording`` pre-generates the path and stashes it on
-            ``self._current_record_path`` so the bridge's caller has a
-            usable return value immediately. We honour that pre-set
-            value here; only fall back to generating a fresh path if it
-            wasn't pre-set (e.g. ``--record`` auto-start, where the
-            valve is opened before any explicit start_recording call).
+            Consumed by frame-log / event-log / manifest writers so they
+            land alongside ``clean.mkv`` + ``overlay.mkv`` for the same
+            session and can be ingested together by the offline renderer.
             """
-            if self._current_record_path:
-                LOGGER.info("[record] New recording fragment -> %s",
-                            self._current_record_path)
-                return self._current_record_path
-            path = self._generate_record_path()
-            self._current_record_path = path
-            LOGGER.info("[record] New recording fragment -> %s", path)
+            return self._current_bundle_dir
+
+        # Property kept for backwards compat — returns the overlay-baked
+        # path because that's what operators expect when watching playback.
+        @property
+        def _current_record_path(self):
+            return self._current_overlay_path
+
+        def _on_record_format_location_clean(self, splitmux, fragment_id, *_):
+            """``format-location-full`` for the clean (no-overlay) sink."""
+            return self._format_location("clean", self._current_clean_path)
+
+        def _on_record_format_location_overlay(self, splitmux, fragment_id, *_):
+            """``format-location-full`` for the overlay-baked sink."""
+            return self._format_location("overlay", self._current_overlay_path)
+
+        def _format_location(self, branch_name, pre_set_path):
+            """Shared body for the two format-location callbacks.
+
+            ``start_recording`` pre-generates both paths and stashes them
+            on the instance so the bridge / web UI caller gets a usable
+            return value immediately. The callbacks honour those pre-set
+            paths; only fall back to a fresh bundle when neither was set
+            (e.g. ``--record`` auto-start, where the valve opens before
+            any explicit ``start_recording`` call).
+            """
+            if pre_set_path:
+                LOGGER.info("[record] %s fragment -> %s", branch_name, pre_set_path)
+                return pre_set_path
+            bundle_dir, clean_path, overlay_path = self._generate_bundle_paths()
+            self._current_bundle_dir = bundle_dir
+            self._current_clean_path = clean_path
+            self._current_overlay_path = overlay_path
+            path = clean_path if branch_name == "clean" else overlay_path
+            LOGGER.info("[record] %s fragment -> %s (lazy bundle)",
+                        branch_name, path)
             return path
 
         def start_recording(self, path=None):
-            """Open record_valve so frames flow through the recording
-            branch. ``splitmuxsink`` lazily creates a fresh ``.mkv`` for
-            this session via the ``format-location-full`` callback.
+            """Open both recording valves so frames flow through the clean
+            and overlay sub-branches. Each ``splitmuxsink`` lazily creates
+            a fresh ``.mkv`` inside a shared session bundle directory.
 
-            ``path`` is ignored (kept for API compatibility with the
-            previous implementation). Returns the file path the recording
-            is being written to (set by the format-location callback when
-            the first buffer arrives).
+            ``path`` is ignored (kept for API compat). Returns the bundle
+            directory the recording is being written into.
             """
             with self._record_lock:
                 if not self._record_enabled:
@@ -1073,83 +1126,101 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     return None
                 if self._recording:
                     LOGGER.info("[record] Already recording: %s",
-                                self._current_record_path)
-                    return self._current_record_path
+                                self._current_bundle_dir)
+                    return self._current_bundle_dir
 
-                valve = self.pipeline.get_by_name("record_valve")
-                if valve is None:
-                    LOGGER.error("[record] record_valve not found in pipeline")
+                # Pre-generate the bundle now so callers (web UI / OpenHD
+                # bridge) see the real paths in the return value. The
+                # format-location callbacks honour these when splitmuxsink
+                # fires shortly after the first buffer arrives.
+                (self._current_bundle_dir,
+                 self._current_clean_path,
+                 self._current_overlay_path) = self._generate_bundle_paths()
+
+                # Open both valves under the lock so the two .mkv files
+                # start as close together as possible. Skew is bounded by
+                # the gap between the two property writes (sub-ms).
+                opened_any = False
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve is None:
+                        LOGGER.warning("[record] %s not found in pipeline",
+                                       valve_name)
+                        continue
+                    valve.set_property("drop", False)
+                    opened_any = True
+                if not opened_any:
+                    LOGGER.error("[record] no record valves found in pipeline")
                     return None
 
-                # Pre-generate the path now so the bridge / web UI
-                # caller gets the real filename in the return value.
-                # ``_on_record_format_location`` honours this pre-set
-                # value when splitmuxsink fires its callback shortly
-                # after the first buffer arrives, so no timestamp drift.
-                self._current_record_path = self._generate_record_path()
-
-                valve.set_property("drop", False)
                 self._recording = True
-                LOGGER.info("[record] Recording started (valve open) -> %s",
-                            self._current_record_path)
-                return self._current_record_path
+                LOGGER.info("[record] Recording started -> %s",
+                            self._current_bundle_dir)
+                return self._current_bundle_dir
 
         def stop_recording(self):
-            """Close record_valve and emit ``split-now`` on splitmuxsink
-            so the current ``.mkv`` is finalised. The next call to
-            :meth:`start_recording` will produce a brand-new file rather
-            than appending to the previous one.
+            """Close both record valves and emit ``split-now`` on both
+            splitmuxsinks so each ``.mkv`` is finalised. The next call to
+            :meth:`start_recording` produces a brand-new bundle directory.
             """
             with self._record_lock:
                 if not self._recording:
                     return None
 
-                valve = self.pipeline.get_by_name("record_valve")
-                if valve:
-                    valve.set_property("drop", True)
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve:
+                        valve.set_property("drop", True)
 
-                file_sink = self.pipeline.get_by_name("file_sink")
-                path = self._current_record_path
-                if file_sink is not None:
-                    try:
-                        file_sink.emit("split-now")
-                    except Exception:  # noqa: BLE001
-                        LOGGER.exception("[record] split-now emission failed")
+                for sink_name in ("file_sink_clean", "file_sink_overlay"):
+                    file_sink = self.pipeline.get_by_name(sink_name)
+                    if file_sink is not None:
+                        try:
+                            file_sink.emit("split-now")
+                        except Exception:  # noqa: BLE001
+                            LOGGER.exception(
+                                "[record] split-now emission failed on %s",
+                                sink_name)
 
+                bundle = self._current_bundle_dir
                 self._recording = False
-                self._current_record_path = None
-                LOGGER.info("[record] Recording stopped, file finalised: %s", path)
-                return path
+                self._current_bundle_dir = None
+                self._current_clean_path = None
+                self._current_overlay_path = None
+                LOGGER.info("[record] Recording stopped, bundle finalised: %s", bundle)
+                return bundle
 
         def cleanup_recording_branch(self):
-            """Send EOS to the recording branch and walk it down to NULL
-            so the current ``splitmuxsink`` fragment finalises and the
-            file closes cleanly on pipeline shutdown.
+            """Send EOS to both recording sub-branches and walk them to
+            NULL so each ``splitmuxsink`` fragment finalises and the files
+            close cleanly on pipeline shutdown.
             """
             if not self._record_enabled:
                 return
             Gst = _get_gst()
             with self._record_lock:
-                # Send EOS into the valve so the encoder + muxer flush.
-                valve = self.pipeline.get_by_name("record_valve")
-                if valve is not None:
-                    valve.set_property("drop", False)
-                    sink_pad = valve.get_static_pad("sink")
-                    if sink_pad is not None:
-                        sink_pad.send_event(Gst.Event.new_eos())
-                # Walk the record sub-branch down to NULL so the current
-                # splitmuxsink fragment (if any) finalises cleanly.
+                # Send EOS into each valve so the encoder + muxer flush.
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve is not None:
+                        valve.set_property("drop", False)
+                        sink_pad = valve.get_static_pad("sink")
+                        if sink_pad is not None:
+                            sink_pad.send_event(Gst.Event.new_eos())
+                # Walk both record sub-branches down to NULL so the current
+                # splitmuxsink fragments (if any) finalise cleanly.
                 torn_down = False
-                for el_name in ("record_valve", "file_sink"):
+                for el_name in ("record_valve_clean", "record_valve_overlay",
+                                "file_sink_clean", "file_sink_overlay"):
                     el = self.pipeline.get_by_name(el_name)
                     if el is not None:
                         el.set_state(Gst.State.NULL)
                         torn_down = True
                 if torn_down:
-                    last_file = self._current_record_path
-                    if last_file:
+                    last_bundle = self._current_bundle_dir
+                    if last_bundle:
                         LOGGER.info("[record] Recording branch torn down "
-                                    "(last file: %s)", last_file)
+                                    "(last bundle: %s)", last_bundle)
                     else:
                         LOGGER.info("[record] Recording branch torn down "
                                     "(no recording was active)")
@@ -1241,9 +1312,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # ---- Output stage (built in vision_branches.py) ----
             record_output = None
             if record:
+                # ``record_output`` here is only a splitmuxsink ``location``
+                # placeholder — the per-fragment paths are returned at
+                # runtime by ``_on_record_format_location_{clean,overlay}``,
+                # which route writes into a per-session bundle directory
+                # under ``self._record_dir``. The placeholder is never
+                # actually written to disk.
                 record_output = (
                     getattr(self.options_menu, 'record_output', None)
-                    or self._generate_record_path()
+                    or os.path.join(self._record_dir, "placeholder.mkv")
                 )
                 self._initial_record_path = record_output
 
@@ -1265,7 +1342,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             if record:
                 LOGGER.info("[record] Recording branch ready "
                             "(bitrate %d kbps; click Record on the web UI / "
-                            "OpenHD to start writing a fresh .mkv into %s)",
+                            "OpenHD to start a session bundle under %s — "
+                            "each session writes clean.mkv + overlay.mkv)",
                             getattr(self.options_menu, 'record_bitrate', 5000),
                             self._record_dir)
 

@@ -153,7 +153,7 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 | `--display` | auto-on when no UI flag | Local X11 window with overlay (tile rectangles stripped, target person's bbox highlighted via class-id remap). |
 | `--webui` | off | Web UI with live MJPEG video and click-to-follow (port 5001). Mutually exclusive with `--openhd`. |
 | `--openhd` | off | Send overlay video to OpenHD via UDP RTP. Mutually exclusive with `--webui`. |
-| `--record` | off | Record post-overlay video to `recordings/rec_<ts>.mkv` (pure-GStreamer x264enc + matroskamux + filesink). |
+| `--record` | off | Record a session bundle to `recordings/<ts>/` containing `clean.mkv` (no overlay — for the offline renderer) and `overlay.mkv` (operator-visible). |
 | `--target-bbox-height` | `0.25` | Desired person size in frame (0-0.25). Drives forward/backward distance. Adjustable mid-flight via UI. |
 | `--target-altitude` | `3.0` | Target altitude in metres. Also used as takeoff height. |
 | `--yaw-only` / `--no-yaw-only` | on | Yaw only: no forward/backward movement. Use `--no-yaw-only` for full follow. |

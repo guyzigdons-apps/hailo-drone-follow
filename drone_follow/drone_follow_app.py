@@ -93,14 +93,18 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                             "stripped, target person's bbox emphasised). Default: enabled "
                             "when neither --openhd nor --webui is set; disabled otherwise.")
     group.add_argument("--record", action="store_true",
-                       help="Build pure-GStreamer recording branch (videoconvert + H.264 "
-                            "encode + matroskamux + filesink). Auto-starts on launch; "
+                       help="Build the pure-GStreamer recording branch. Each session "
+                            "writes a bundle dir containing clean.mkv (no overlay — "
+                            "feeds the offline renderer in scripts/render_overlay.py) "
+                            "and overlay.mkv (operator-visible). Auto-starts on launch; "
                             "can be toggled mid-run from the web UI / OpenHD.")
     group.add_argument("--record-output", type=str, default=None,
-                       help="Path for the recorded .mkv file. Default: "
-                            "drone_follow/recordings/rec_<timestamp>.mkv")
+                       help="splitmuxsink ``location`` placeholder. The actual paths "
+                            "are recordings/<YYYY-MM-DD_HH-MM-SS>/{clean,overlay}.mkv "
+                            "under drone_follow/recordings/.")
     group.add_argument("--record-bitrate", type=int, default=5000,
-                       help="x264enc bitrate in kbps for the recording branch (default: 5000)")
+                       help="x264enc bitrate in kbps for both recording branches "
+                            "(clean + overlay) (default: 5000)")
 
     group.add_argument("--log-perf", action="store_true",
                        help="Log pipeline and tracker performance metrics periodically")
