@@ -1111,7 +1111,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
                 recordings/<YYYY-MM-DD_HH-MM-SS>/
                 ├── clean.mkv     (no overlay — feeds offline renderer)
-                └── overlay.mkv   (operator-visible — bboxes + cross + badge)
+                ├── overlay.mkv   (operator-visible — bboxes + cross + badge)
+                ├── frames.jsonl  (per-frame metadata; PTS-aligned to clean.mkv)
+                └── manifest.json (version, args, video shape, initial config)
 
             Returns ``(bundle_dir, clean_path, overlay_path)``.
             """
@@ -1122,6 +1124,59 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             return (bundle_dir,
                     os.path.join(bundle_dir, "clean.mkv"),
                     os.path.join(bundle_dir, "overlay.mkv"))
+
+        def _write_manifest(self, bundle_dir):
+            """Capture everything an offline renderer needs to reconstruct
+            the recording context into ``<bundle_dir>/manifest.json``.
+
+            Best-effort — never raises. The manifest is informational; the
+            renderer can still run from clean.mkv + frames.jsonl alone
+            (manifest just lets it pick the right ControllerConfig and
+            video dimensions without re-deriving them).
+            """
+            import subprocess
+            import sys
+
+            try:
+                from importlib.metadata import version as _pkg_version
+                df_version = _pkg_version("drone-follow")
+            except Exception:
+                df_version = "unknown"
+
+            git_sha = "unknown"
+            try:
+                here = os.path.dirname(os.path.abspath(__file__))
+                git_sha = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=here, stderr=subprocess.DEVNULL,
+                    timeout=2.0).decode().strip()
+            except (subprocess.SubprocessError, FileNotFoundError, OSError):
+                pass
+
+            cfg = getattr(self.user_data, "controller_config", None)
+            cfg_snapshot = cfg.to_dict() if cfg is not None else None
+
+            manifest = {
+                "drone_follow_version": df_version,
+                "git_sha": git_sha,
+                "argv": list(sys.argv),
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "video": {
+                    "width":  getattr(self, "video_width", None),
+                    "height": getattr(self, "video_height", None),
+                    "fps":    getattr(self, "frame_rate", None),
+                    "encoder_bitrate_kbps": getattr(
+                        self.options_menu, "record_bitrate", None),
+                },
+                "controller_config": cfg_snapshot,
+            }
+            path = os.path.join(bundle_dir, "manifest.json")
+            try:
+                with open(path, "w") as f:
+                    json.dump(manifest, f, indent=2, default=str)
+                LOGGER.info("[record] manifest -> %s", path)
+            except OSError:
+                LOGGER.exception("[record] failed to write manifest")
 
         @property
         def current_bundle_dir(self):
@@ -1195,6 +1250,11 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 (self._current_bundle_dir,
                  self._current_clean_path,
                  self._current_overlay_path) = self._generate_bundle_paths()
+
+                # Write the session manifest first — it captures the
+                # context (version, argv, video shape, initial config)
+                # the offline renderer needs to reconstruct overlays.
+                self._write_manifest(self._current_bundle_dir)
 
                 # Open the per-frame JSONL sink inside the bundle BEFORE
                 # the valves open. The app_callback writes to this sink
