@@ -19,6 +19,12 @@ import numpy as np
 from drone_follow.follow_api.types import Detection
 from drone_follow.perf_tracker import PerfTracker
 
+# Sentinel value GStreamer stamps on buffers that don't carry a valid PTS.
+# Mirrors Gst.CLOCK_TIME_NONE (uint64 max). Defined as a plain int so the
+# module-load path doesn't need to import gi (which costs ~50ms and would
+# fail in test envs without GStreamer system libs).
+_GST_CLOCK_TIME_NONE = 0xFFFFFFFFFFFFFFFF
+
 from .tracker import MetricsTracker
 from .tracker_factory import create_tracker
 from .reid_manager import ACTION_SKIPPED_DRIFT, get_frame_bgr
@@ -223,15 +229,40 @@ def app_callback(element, buffer, user_data):
     1. Convert detections to Nx5 array, run tracker.update() synchronously
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
+
+    If any frame-log sink is open (``test_log_file`` for --test-log, or
+    ``record_frame_log_file`` for the current recording bundle), a JSONL
+    row is written per frame containing everything needed by the offline
+    overlay renderer: ``pts_ns`` (matches clean.mkv's video timeline),
+    ``followed_id`` / ``explicit_lock`` / ``last_change_ts`` (drive the
+    cross + badge), plus ``detections`` (drive the bbox overlay).
     """
     _perf_t0 = user_data.perf.frame_start()
-    if user_data.test_log_file is not None:
+    sinks = [s for s in (user_data.test_log_file,
+                         user_data.record_frame_log_file)
+             if s is not None]
+    if sinks:
         user_data.frame_index += 1
+        # buffer.pts is the load-bearing alignment key for the offline
+        # renderer — it matches the PTS stamped onto the corresponding
+        # frame in clean.mkv (the recording branch is tapped at output_tee
+        # so both share the same upstream PTS). Fall back to ``None`` when
+        # the buffer carries no PTS (some test sources don't stamp them);
+        # the renderer treats that case as "best effort sequential".
+        pts = buffer.pts if buffer is not None else None
+        pts_ns = int(pts) if pts is not None and pts != _GST_CLOCK_TIME_NONE else None
+        # Followee state needed by the overlay (badge + cross + flash).
+        ts = user_data.target_state
+        explicit_lock = ts.is_explicit_lock() if ts is not None else False
+        last_change_ts = ts.get_last_change_ts() if ts is not None else None
         user_data._frame_log_data = {
             "t": time.time(),
+            "pts_ns": pts_ns,
             "frame": user_data.frame_index,
             "mode": "",
             "followed_id": None,
+            "explicit_lock": explicit_lock,
+            "last_change_ts": last_change_ts,
             "detections": [],
         }
     else:
@@ -240,17 +271,20 @@ def app_callback(element, buffer, user_data):
         _app_callback_inner(element, buffer, user_data)
     finally:
         user_data.perf.frame_end(_perf_t0, user_data.ui_state)
-        # Snapshot the handle: another thread may None-out test_log_file
-        # between the is-not-None check and the .write() call (e.g., shutdown
-        # racing with an in-flight frame). AttributeError joins the catch list
-        # for the same reason — None.write would raise it.
-        log_file = user_data.test_log_file
-        if log_file is not None and user_data._frame_log_data is not None:
-            try:
-                log_file.write(
-                    json.dumps(user_data._frame_log_data) + "\n")
-            except (ValueError, OSError, AttributeError):
-                pass
+        # Snapshot the handles: another thread may None-out a sink
+        # between the is-not-None check and the .write() call (e.g.,
+        # shutdown racing with an in-flight frame). AttributeError joins
+        # the catch list for the same reason — None.write would raise it.
+        if user_data._frame_log_data is not None:
+            line = json.dumps(user_data._frame_log_data) + "\n"
+            for sink in (user_data.test_log_file,
+                         user_data.record_frame_log_file):
+                if sink is None:
+                    continue
+                try:
+                    sink.write(line)
+                except (ValueError, OSError, AttributeError):
+                    pass
 
 
 def _app_callback_inner(element, buffer, user_data):
@@ -745,8 +779,16 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # Set after app creation so callback can extract frames for ReID
             self.video_width = 0
             self.video_height = 0
-            # Per-frame JSONL test log (opened lazily via open_test_log())
+            # Per-frame JSONL sinks. Both default to None; either or both
+            # may be set at any time:
+            #   * ``test_log_file``        — opened by ``--test-log`` for sim tests.
+            #   * ``record_frame_log_file`` — opened by ``start_recording``,
+            #     points at ``<bundle>/frames.jsonl`` and is the
+            #     production source for the offline overlay renderer.
+            # ``app_callback`` writes the same JSON line to whichever
+            # sinks are non-None, so the two paths can coexist.
             self.test_log_file = None
+            self.record_frame_log_file = None
             self.frame_index = 0
             self._frame_log_data = None
 
@@ -762,6 +804,23 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 except OSError:
                     pass
                 self.test_log_file = None
+
+        def open_record_frame_log(self, path):
+            """Open the per-frame JSONL sink for the current recording
+            bundle. Called by ``start_recording``; the sink lives next to
+            ``clean.mkv`` and is consumed by ``scripts/render_overlay.py``.
+            """
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            self.record_frame_log_file = open(path, "w", buffering=1)
+            LOGGER.info("[record] per-frame log -> %s", path)
+
+        def close_record_frame_log(self):
+            if self.record_frame_log_file is not None:
+                try:
+                    self.record_frame_log_file.close()
+                except OSError:
+                    pass
+                self.record_frame_log_file = None
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -1137,6 +1196,19 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                  self._current_clean_path,
                  self._current_overlay_path) = self._generate_bundle_paths()
 
+                # Open the per-frame JSONL sink inside the bundle BEFORE
+                # the valves open. The app_callback writes to this sink
+                # on every frame from now until stop_recording, so the
+                # renderer's frames.jsonl lines up 1:1 with clean.mkv.
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "open_record_frame_log"):
+                    try:
+                        user_data.open_record_frame_log(
+                            os.path.join(self._current_bundle_dir,
+                                         "frames.jsonl"))
+                    except OSError:
+                        LOGGER.exception("[record] failed to open frames.jsonl")
+
                 # Open both valves under the lock so the two .mkv files
                 # start as close together as possible. Skew is bounded by
                 # the gap between the two property writes (sub-ms).
@@ -1151,6 +1223,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     opened_any = True
                 if not opened_any:
                     LOGGER.error("[record] no record valves found in pipeline")
+                    if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                        user_data.close_record_frame_log()
                     return None
 
                 self._recording = True
@@ -1160,7 +1234,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
         def stop_recording(self):
             """Close both record valves and emit ``split-now`` on both
-            splitmuxsinks so each ``.mkv`` is finalised. The next call to
+            splitmuxsinks so each ``.mkv`` is finalised. Also closes the
+            per-frame JSONL sink for the session. The next call to
             :meth:`start_recording` produces a brand-new bundle directory.
             """
             with self._record_lock:
@@ -1181,6 +1256,10 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                             LOGGER.exception(
                                 "[record] split-now emission failed on %s",
                                 sink_name)
+
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                    user_data.close_record_frame_log()
 
                 bundle = self._current_bundle_dir
                 self._recording = False
@@ -1216,6 +1295,13 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     if el is not None:
                         el.set_state(Gst.State.NULL)
                         torn_down = True
+                # Drop the per-frame JSONL sink alongside the GStreamer
+                # branch teardown so the file is flushed/closed even when
+                # an EOS-driven shutdown bypassed ``stop_recording``.
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                    user_data.close_record_frame_log()
+
                 if torn_down:
                     last_bundle = self._current_bundle_dir
                     if last_bundle:
