@@ -320,6 +320,18 @@ The status bar displays real-time metrics: FPS, callback latency, host CPU%, RSS
 
 NN core utilization is read from HailoRT's monitor data (`/tmp/hmon_files/`), enabled automatically by the app. To also view per-model utilization in a separate terminal:
 
+## Flight Logs (`.ulg`)
+
+PX4 writes a fresh `.ulg` log for every armed run — useful for post-flight debugging and rendering 3D flight paths.
+
+- **Sim:** `sim/PX4-Autopilot/build/px4_sitl_default/rootfs/log/<YYYY-MM-DD>/<HH_MM_SS>.ulg`
+- **Real drone (Cube Orange+):** stored on the FC's microSD at `/fs/microsd/log/<YYYY-MM-DD>/<HH_MM_SS>.ulg`. Three ways to pull them off:
+  - Pop the microSD out — fastest, requires disarmed access.
+  - QGroundControl → *Analyze Tools → Log Download* (uses MAVLink FTP over the existing `/dev/ttyACM0` link — slow at 57600 baud).
+  - MAVSDK's `LogFiles.download_log_file` over the same connection (programmatic equivalent of the QGC option).
+
+**Viewing:** drag the `.ulg` onto https://logs.px4.io (PX4 Flight Review) — free 3D flight path, altitude, modes, GPS quality, etc. For local inspection, use `pyulog` (`pip install pyulog` → `ulog_info`, `ulog2csv`).
+
 ## Yaw-Only Mode
 
 Yaw-only mode is **on by default** (`--yaw-only`). The drone only rotates to keep the person centered in the frame — no forward/backward or altitude movement. Use `--no-yaw-only` for full follow. This is also available as a toggle in the web UI.
