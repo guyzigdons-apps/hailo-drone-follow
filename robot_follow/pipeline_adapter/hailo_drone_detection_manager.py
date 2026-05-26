@@ -1507,15 +1507,18 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # ---- Output stage (built in vision_branches.py) ----
             record_output = None
             if record:
-                # ``record_output`` here is only a splitmuxsink ``location``
-                # placeholder — the per-fragment paths are returned at
-                # runtime by ``_on_record_format_location_{clean,overlay}``,
-                # which route writes into a per-session bundle directory
-                # under ``self._record_dir``. The placeholder is never
-                # actually written to disk.
+                # ``record_output`` here is the ``location`` GStreamer needs at
+                # pipeline-build time, but we don't yet know the path it should
+                # be stored in — that's chosen at recording-start (which can
+                # happen long after pipeline build, and again with a fresh
+                # timestamp on every start/stop cycle). The real path follows
+                # the pattern ``recordings/<YYYY-MM-DD_HH-MM-SS>/{clean,overlay}.mkv``
+                # and is returned per-fragment by ``_on_record_format_location_clean``
+                # / ``_on_record_format_location_overlay``. The temp string
+                # here is never actually written to disk.
                 record_output = (
                     getattr(self.options_menu, 'record_output', None)
-                    or os.path.join(self._record_dir, "placeholder.mkv")
+                    or os.path.join(self._record_dir, "video_output_temp.mkv")
                 )
                 self._initial_record_path = record_output
 
