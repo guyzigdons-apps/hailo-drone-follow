@@ -83,10 +83,13 @@ class FollowServerHandler(BaseHTTPRequestHandler):
         return None
 
     def do_POST(self):
+        from drone_follow.follow_api.event_log import log_click, log_follow_change
         if self.path in ("/follow/clear", "/follow/"):
+            prev = self.target_state.get_target()
             self.target_state.enter_auto_mode()
             if self.reid_manager is not None:
                 self.reid_manager.clear()
+            log_follow_change(prev, None, cause="CLEAR")
             self._send_json({
                 "status": "success",
                 "following_id": None,
@@ -130,9 +133,12 @@ class FollowServerHandler(BaseHTTPRequestHandler):
                     LOGGER.info("Detection ID %d not found. Available: %s", detection_id, available_ids)
                     return
 
+            prev = self.target_state.get_target()
             self.target_state.set_paused(False)
             self.target_state.set_target(detection_id)
             self.target_state.set_explicit_lock(True)
+            log_click(source="webui", det_id=detection_id)
+            log_follow_change(prev, detection_id, cause="USER")
             # Capture the clicked person's current bbox as the distance setpoint so
             # the drone holds its current distance instead of converging on a fixed value.
             captured_h = self._capture_bbox_for_id(detection_id)

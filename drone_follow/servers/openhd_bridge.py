@@ -188,19 +188,29 @@ class OpenHDBridge:
         if self._target_state is None:
             LOGGER.warning("[openhd_bridge] follow_id received but no target_state")
             return
+        from drone_follow.follow_api.event_log import log_click, log_follow_change
+
+        prev = self._target_state.get_target()
         self._explicit_follow_id = value
         if value < 0:
             self._target_state.set_paused(True)
             self._target_state.set_target(None)
             self._target_state.set_explicit_lock(False)
+            log_follow_change(prev, None, cause="USER")
             LOGGER.info("[openhd_bridge] IDLE mode (drone holding position)")
         elif value == 0:
             self._target_state.enter_auto_mode()
+            log_follow_change(prev, None, cause="CLEAR")
             LOGGER.info("[openhd_bridge] AUTO mode (follow largest person)")
         else:
             self._target_state.set_paused(False)
             self._target_state.set_target(value)
             self._target_state.set_explicit_lock(True)
+            # Operator picked this id explicitly — log both the click
+            # source and the resulting transition so the offline renderer
+            # can show "USER LOCKED ID N" attribution.
+            log_click(source="openhd", det_id=value)
+            log_follow_change(prev, value, cause="USER")
             LOGGER.info("[openhd_bridge] LOCKED to ID %d", value)
         # Immediately push state back so QOpenHD badge updates without waiting
         # for the next periodic report cycle.

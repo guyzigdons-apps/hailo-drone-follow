@@ -1269,6 +1269,20 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     except OSError:
                         LOGGER.exception("[record] failed to open frames.jsonl")
 
+                # Open the sparse event log alongside frames.jsonl. The
+                # offline renderer reads this to attribute followee
+                # transitions ("USER LOCKED ID 5" vs "REID re-acquire");
+                # all the wire-in sites (follow_server, openhd_bridge,
+                # reid_manager) call log_click / log_follow_change /
+                # log_reacquire as silent no-ops until this opens.
+                from drone_follow.follow_api.event_log import EventLog, log_record
+                try:
+                    EventLog.get().open(
+                        os.path.join(self._current_bundle_dir, "events.jsonl"))
+                    log_record("start", bundle=self._current_bundle_dir)
+                except OSError:
+                    LOGGER.exception("[record] failed to open events.jsonl")
+
                 # Open both valves under the lock so the two .mkv files
                 # start as close together as possible. Skew is bounded by
                 # the gap between the two property writes (sub-ms).
@@ -1321,6 +1335,11 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 if user_data is not None and hasattr(user_data, "close_record_frame_log"):
                     user_data.close_record_frame_log()
 
+                # Bookend the event log and close it.
+                from drone_follow.follow_api.event_log import EventLog, log_record
+                log_record("stop", bundle=self._current_bundle_dir)
+                EventLog.get().close()
+
                 bundle = self._current_bundle_dir
                 self._recording = False
                 self._current_bundle_dir = None
@@ -1361,6 +1380,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 user_data = getattr(self, "user_data", None)
                 if user_data is not None and hasattr(user_data, "close_record_frame_log"):
                     user_data.close_record_frame_log()
+                # Same for events.jsonl — flushing on shutdown.
+                from drone_follow.follow_api.event_log import EventLog
+                EventLog.get().close()
 
                 if torn_down:
                     last_bundle = self._current_bundle_dir
