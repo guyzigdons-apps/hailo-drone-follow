@@ -308,6 +308,31 @@ def _draw_bboxes(ctx: cairo.Context, detections: list[dict],
 # would have written, from the JSONL row.
 # ---------------------------------------------------------------------------
 
+def _resolve_target_detection(row: dict, target_id: int) -> Optional[dict]:
+    """Find the detection that the cross should land on.
+
+    Primary path: detection.id == followed_id. This always works for
+    recordings made with the followed_id-is-target_id fix (anything
+    >= commit fb05… on the bundle-layout branch).
+
+    Legacy fallback: bundles recorded before the fix stored the stable
+    ReID original_id in followed_id while detection.id was the live
+    tracker id — so a direct match is impossible after a ReID swap.
+    When that happens AND the frame contains exactly one detection,
+    use it (single-person scenes, by far the most common case for
+    locked follow). Multi-detection legacy rows still fall back to
+    SEARCH; we'd rather show no cross than the wrong one.
+    """
+    dets = row.get("detections") or ()
+    for det in dets:
+        if det.get("id") == target_id:
+            return det
+    # Single-detection fallback for legacy bundles
+    if len(dets) == 1:
+        return dets[0]
+    return None
+
+
 def _cross_state_from_row(row: dict, target_state: ReplayTargetState,
                           cross_state: TargetCrossState) -> None:
     target_id = target_state.get_target()
@@ -315,14 +340,13 @@ def _cross_state_from_row(row: dict, target_state: ReplayTargetState,
     if target_id is None or target_id <= 0:
         cross_state.clear()
         return
-    # Find the target's bbox in this frame's detections
-    bbox = None
-    for det in row.get("detections") or ():
-        if det.get("id") == target_id:
-            bbox = det.get("bbox")
-            break
-    if bbox is None:
+    target_det = _resolve_target_detection(row, target_id)
+    if target_det is None:
         # Target known but not visible — SEARCH badge (no cross)
+        cross_state.set(None, None, "SEARCH")
+        return
+    bbox = target_det.get("bbox")
+    if bbox is None:
         cross_state.set(None, None, "SEARCH")
         return
     x, y, w, h = (float(v) for v in bbox[:4])
@@ -359,6 +383,36 @@ def _ffprobe(path: Path) -> dict:
         "fps":      fps,
         "duration": float(stream.get("duration", 0.0) or 0.0),
     }
+
+
+def _ffprobe_first_pts_ns(clean: Path) -> int:
+    """Read clean.mkv's first frame's PTS, in nanoseconds.
+
+    The live pipeline tees a buffer at ``output_tee`` and the recording
+    branch's ``splitmuxsink``+``matroskamux`` preserves the original
+    ``buffer.pts`` on the way into the file. ``frames.jsonl`` was
+    written from the same upstream callback, so its ``pts_ns`` values
+    use the same epoch. Anchoring our lookup on clean.mkv's first
+    frame is what lines the two timelines up; computing PTS from
+    ``frame_index / fps`` alone produces a multi-second lag because
+    JSONL starts at the live-pipeline clock value, not at zero.
+    """
+    out = subprocess.check_output([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_frames", "-read_intervals", "%+#1",
+        "-of", "json", str(clean),
+    ], timeout=10.0)
+    data = json.loads(out)
+    frames_arr = data.get("frames") or []
+    if not frames_arr:
+        return 0
+    f = frames_arr[0]
+    # ``best_effort_timestamp_time`` is the most reliable across muxers;
+    # falls back to pts_time when the muxer didn't stamp one.
+    t = f.get("best_effort_timestamp_time") or f.get("pts_time")
+    if t is None:
+        return 0
+    return int(float(t) * 1e9)
 
 
 def _video_info_from_manifest(manifest: dict, clean: Path) -> dict:
@@ -457,6 +511,19 @@ def render(bundle_dir: str | os.PathLike,
     LOG.info("clean.mkv: %dx%d @ %.3f fps (from %s)",
              width, height, fps, info["source"])
 
+    # Anchor the JSONL lookup on clean.mkv's actual first-frame PTS so
+    # the two timelines line up. Without this, the renderer's
+    # frame_index/fps queries start at 0 while JSONL pts_ns starts at
+    # the live pipeline's buffer.pts (typically several seconds in),
+    # producing a multi-second overlay lag in the rendered video.
+    clean_first_pts_ns = _ffprobe_first_pts_ns(clean)
+    if frame_log._keys:
+        jsonl_first_pts_ns = frame_log._keys[0]
+        offset_ms = (jsonl_first_pts_ns - clean_first_pts_ns) / 1e6
+        LOG.info("PTS anchor: clean.mkv first=%dns, frames.jsonl first=%dns "
+                 "(skew %.2fms)",
+                 clean_first_pts_ns, jsonl_first_pts_ns, offset_ms)
+
     target_state = ReplayTargetState()
     cross_state = TargetCrossState()
 
@@ -492,11 +559,14 @@ def render(bundle_dir: str | os.PathLike,
             try:
                 ctx = cairo.Context(surface)
 
-                # Approximate PTS from the frame index. clean.mkv was
-                # encoded with the same fps as the live recording, so
-                # this matches frames.jsonl's pts_ns within a frame.
+                # PTS for this clean.mkv frame in the *live pipeline's*
+                # timeline. ``clean_first_pts_ns`` anchors us; the per-
+                # frame increment is constant at the recording's fps.
+                # JSONL's pts_ns lives in the same timeline so the
+                # lookup matches the row that was logged at this
+                # exact buffer in the live pipeline.
                 pts_seconds = frame_index / fps
-                pts_ns = int(pts_seconds * 1e9)
+                pts_ns = clean_first_pts_ns + int(pts_seconds * 1e9)
                 row = frame_log.lookup(pts_ns)
 
                 if row is not None:
@@ -524,9 +594,22 @@ def render(bundle_dir: str | os.PathLike,
                     target_state.set_explicit_lock(explicit_lock)
                     target_state.refresh_flash_window()
 
+                    # Resolve which detection (if any) the cross should
+                    # cover; pass its id to _draw_bboxes so we skip
+                    # painting its bbox over the cross. Falls back to
+                    # single-detection heuristic for legacy bundles
+                    # whose followed_id was the stable ReID label
+                    # rather than the live tracker id.
+                    tid_for_render = target_state.get_target()
+                    skip_id = None
+                    if tid_for_render is not None:
+                        td = _resolve_target_detection(row, tid_for_render)
+                        if td is not None:
+                            skip_id = td.get("id")
+
                     # Paint non-target bboxes first so the cross sits on top.
                     _draw_bboxes(ctx, row.get("detections") or (),
-                                 width, height, target_state.get_target())
+                                 width, height, skip_id)
 
                     # Compute cross state and call the production draw fn.
                     _cross_state_from_row(row, target_state, cross_state)

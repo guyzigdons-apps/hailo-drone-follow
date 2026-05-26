@@ -603,11 +603,13 @@ def _app_callback_inner(element, buffer, user_data):
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
     LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
                 follow_status, best.get_confidence(), cx, cy, bbox_h, available_str)
-    # Log the UI follow id, not the raw tracker id: when ReID re-identifies
-    # the target onto a new tracker id, the UI keeps showing the original id
-    # so the operator sees a stable lock. Tests use this same field to verify
-    # we kept following the same person through occlusions / track swaps.
-    _log_mode(user_data, follow_status, ui_following_id)
+    # Log the raw tracker id (not the stable UI label) so frames.jsonl
+    # ``followed_id`` matches the ``id`` field on detections in the same
+    # row. The offline renderer needs them to match — it can't paint the
+    # cross on the right bbox otherwise. UI's stable-label semantics
+    # apply to ui_state only; frames.jsonl is for the renderer.
+    log_followed_id = target_state.get_target() if target_state else None
+    _log_mode(user_data, follow_status, log_followed_id)
 
 
 # ---------------------------------------------------------------------------
