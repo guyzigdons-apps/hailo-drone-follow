@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Rover variant of sim/worlds/walk_across_then_approach.sdf for Phase 5 v1.1.
+
+  Differences from the drone source world:
+    - Spawns the rover model directly via <include> below.  The drone variant
+      relied on PX4_GZ_WORLD to spawn the drone; the rover has no PX4 in the
+      loop, so the world owns the spawn.  The rover model is at
+      sim/rover/rover.sdf — Plan 05-05's start_rover_sim.sh exports
+      GZ_SIM_RESOURCE_PATH=sim/rover:sim/worlds:... so this <include>
+      resolves at launch.
+    - Actor X coordinates scaled to 0.4x the drone-world values (rover sees
+      from a 0.20 m camera at the same FOV the drone uses at ~3 m altitude;
+      to keep the actor entering frame within a few seconds, distances along
+      the rover's forward axis are compressed).  Y, Z, yaw, and time values
+      are unchanged.
+    - Drone-only world plugins (Imu, AirPressure) dropped — the rover has no
+      IMU / barometer subsystem, so loading them is wasted CPU.
+    - <magnetic_field> and <atmosphere> dropped — they only feed the dropped
+      plugins.
+    - <plugin name='gz::sim::systems::Sensors'> kept — required for the
+      rover's onboard camera sensor (rover.sdf) to render with ogre2.
+
+  Trajectory phases (rover-scaled; times unchanged):
+    Phase 0 (0..5):    hold at (4, -6), rover boots / drone-follow connects
+    Phase 1 (5..17):   walk across frame at X=4 from Y=-6 to Y=+6
+    Phase 2 (18..24):  return to centerline at (4, 0)
+    Phase 3 (25..38):  turn and walk straight toward rover, X=4 -> X=-2
+                       (compressed forward approach window)
+    Phase 4 (39..72):  U-turn well south of rover before returning to start
+
+  This world is the primary Phase 6 RINT-04 E2E test target; do not rename
+  without updating the RINT-04 plan.
+-->
+<sdf version="1.9">
+  <world name="walk_across_then_approach">
+    <include>
+      <uri>model://rover</uri>
+      <pose>0 0 0.15 0 0 0</pose>
+    </include>
+
+    <actor name="person">
+      <skin>
+        <filename>model://Walking actor/meshes/walk.dae</filename>
+        <scale>1.0</scale>
+      </skin>
+      <animation name="walking">
+        <filename>model://Walking actor/meshes/walk.dae</filename>
+        <scale>1.0</scale>
+        <interpolate_x>true</interpolate_x>
+      </animation>
+      <script>
+        <loop>true</loop>
+        <delay_start>0</delay_start>
+        <auto_start>true</auto_start>
+        <trajectory id="0" type="walking">
+          <!-- Phase 0: hold at (4,-6) for 5 s (rover boots, controller wakes) -->
+          <waypoint>
+            <time>0</time>
+            <pose>4 -6 1.0 0 0 1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>5</time>
+            <pose>4 -6 1.0 0 0 1.5708</pose>
+          </waypoint>
+
+          <!-- Phase 1: walk across frame, -Y to +Y at X=4 (~1 m/s) -->
+          <waypoint>
+            <time>17</time>
+            <pose>4 6 1.0 0 0 1.5708</pose>
+          </waypoint>
+
+          <!-- Phase 2: turn around and walk back to centerline -->
+          <waypoint>
+            <time>18</time>
+            <pose>4 6 1.0 0 0 -1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>24</time>
+            <pose>4 0 1.0 0 0 -1.5708</pose>
+          </waypoint>
+
+          <!-- Phase 3: turn to face rover, walk straight toward it.
+               6 m over 13 s (~0.46 m/s); passes through rover origin to
+               force sustained backward / disengage response. -->
+          <waypoint>
+            <time>25</time>
+            <pose>4 0 1.0 0 0 3.14159</pose>
+          </waypoint>
+          <waypoint>
+            <time>38</time>
+            <pose>-2 0 1.0 0 0 3.14159</pose>
+          </waypoint>
+
+          <!-- Phase 4: U-turn south of rover before returning to start. -->
+          <waypoint>
+            <time>39</time>
+            <pose>-2 0 1.0 0 0 -1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>51</time>
+            <pose>-2 -12 1.0 0 0 -1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>52</time>
+            <pose>-2 -12 1.0 0 0 0</pose>
+          </waypoint>
+          <waypoint>
+            <time>65</time>
+            <pose>4 -12 1.0 0 0 0</pose>
+          </waypoint>
+          <waypoint>
+            <time>66</time>
+            <pose>4 -12 1.0 0 0 1.5708</pose>
+          </waypoint>
+          <waypoint>
+            <time>72</time>
+            <pose>4 -6 1.0 0 0 1.5708</pose>
+          </waypoint>
+        </trajectory>
+      </script>
+    </actor>
+
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <plugin name='gz::sim::systems::Physics' filename='gz-sim-physics-system'/>
+    <plugin name='gz::sim::systems::UserCommands' filename='gz-sim-user-commands-system'/>
+    <plugin name='gz::sim::systems::SceneBroadcaster' filename='gz-sim-scene-broadcaster-system'/>
+    <plugin name='gz::sim::systems::Contact' filename='gz-sim-contact-system'/>
+    <plugin name='gz::sim::systems::Sensors' filename='gz-sim-sensors-system'>
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <gravity>0 0 -9.8</gravity>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>1 1</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction><ode/></friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>500 500</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.8 0.8 0.8 1</specular>
+          </material>
+        </visual>
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>1</mass>
+          <inertia><ixx>1</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1</iyy><iyz>0</iyz><izz>1</izz></inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
+      </link>
+      <pose>0 0 0 0 0 0</pose>
+      <self_collide>false</self_collide>
+    </model>
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1</intensity>
+      <direction>0.001 0.625 -0.78</direction>
+      <diffuse>0.904 0.904 0.904 1</diffuse>
+      <specular>0.271 0.271 0.271 1</specular>
+      <attenuation>
+        <range>2000</range>
+        <linear>0</linear>
+        <constant>1</constant>
+        <quadratic>0</quadratic>
+      </attenuation>
+      <spot>
+        <inner_angle>0</inner_angle>
+        <outer_angle>0</outer_angle>
+        <falloff>0</falloff>
+      </spot>
+    </light>
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+  </world>
+</sdf>

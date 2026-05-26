@@ -1,4 +1,4 @@
-# Test Plan — drone-follow
+# Test Plan — robot-follow
 
 ## Current State
 
@@ -32,7 +32,7 @@ The entire hardware-adapter layer and the integration between components have ze
 | `servers/web_server.py` | ~300 | 0 |
 | `servers/openhd_bridge.py` | ~200 | 0 |
 | `drone_api/mavsdk_drone.py` (flight loop) | ~200 | 0 |
-| `drone_follow_app.py` (composition root) | ~270 | 0 |
+| `robot_follow_app.py` (composition root) | ~270 | 0 |
 | `follow_api/perf_tracker.py` | ~150 | 0 |
 
 ---

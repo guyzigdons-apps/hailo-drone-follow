@@ -69,10 +69,10 @@ import cairo
 
 # Hush the [FOLLOW] info lines that fire on every replayed transition —
 # the live state log makes sense in flight, but it's noise here.
-logging.getLogger("drone_follow.follow_api.state").setLevel(logging.WARNING)
+logging.getLogger("robot_follow.follow_api.state").setLevel(logging.WARNING)
 
-from drone_follow.follow_api.state import FollowTargetState  # noqa: E402
-from drone_follow.pipeline_adapter.vision_branches import (  # noqa: E402
+from robot_follow.follow_api.state import FollowTargetState  # noqa: E402
+from robot_follow.pipeline_adapter.vision_branches import (  # noqa: E402
     NON_TARGET_BBOX_COLOR_RGB,
     TargetCrossState,
     draw_target_cross,

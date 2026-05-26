@@ -1,7 +1,7 @@
-# hailooverlay_community per-class style overrides for drone-follow.
+# hailooverlay_community per-class style overrides for robot-follow.
 #
 # Used by the local (display / record) branch — see
-# `drone_follow/pipeline_adapter/vision_branches.py:local_branch`.
+# `robot_follow/pipeline_adapter/vision_branches.py:local_branch`.
 #
 # Class 99 is reserved for the locked / auto-tracked target. The
 # `highlight_target` pad probe replaces the target's HailoDetection with

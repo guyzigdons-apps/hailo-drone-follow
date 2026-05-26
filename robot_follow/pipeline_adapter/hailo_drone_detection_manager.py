@@ -1,0 +1,1590 @@
+"""Hailo tiling pipeline adapter — all Hailo/GStreamer imports are confined here.
+
+Translates Hailo detection objects into the pure Detection domain type.
+No other module needs to import hailo or gi.repository.
+"""
+
+import argparse
+import json
+import logging
+import os
+import threading
+import time
+from datetime import datetime
+from typing import Optional
+
+import hailo
+import numpy as np
+
+from robot_follow.follow_api.event_log import log_follow_change
+from robot_follow.follow_api.types import Detection
+from robot_follow.perf_tracker import PerfTracker
+
+# Sentinel value GStreamer stamps on buffers that don't carry a valid PTS.
+# Mirrors Gst.CLOCK_TIME_NONE (uint64 max). Defined as a plain int so the
+# module-load path doesn't need to import gi (which costs ~50ms and would
+# fail in test envs without GStreamer system libs).
+_GST_CLOCK_TIME_NONE = 0xFFFFFFFFFFFFFFFF
+
+from .tracker import MetricsTracker
+from .tracker_factory import create_tracker
+from .reid_manager import ACTION_SKIPPED_DRIFT, get_frame_bgr
+
+LOGGER = logging.getLogger(__name__)
+
+_EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
+
+
+_gst_module = None
+
+
+def _get_gst():
+    """Import and cache GStreamer bindings (deferred to avoid import at module level)."""
+    global _gst_module
+    if _gst_module is None:
+        import gi
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+        _gst_module = Gst
+    return _gst_module
+
+
+# ---------------------------------------------------------------------------
+# Callback helpers
+# ---------------------------------------------------------------------------
+
+def _build_det_info(person, track_id=None):
+    """Build a UI detection dict from a Hailo detection object."""
+    pbbox = person.get_bbox()
+    det_info = {
+        "label": "person",
+        "confidence": round(person.get_confidence(), 3),
+        "bbox": {
+            "x": round(pbbox.xmin(), 4),
+            "y": round(pbbox.ymin(), 4),
+            "w": round(pbbox.width(), 4),
+            "h": round(pbbox.height(), 4),
+        },
+    }
+    if track_id is not None:
+        det_info["id"] = track_id
+    return det_info
+
+
+def _update_ui(ui_state, persons, person_to_id, following_id, paused=False):
+    """Push detection metadata to the web UI if enabled.
+
+    A track id may end up attached to more than one detection in a single
+    frame (multi-scale tile duplicates that the tracker associates to the
+    same track, or transient cross-actor matches around a swap). Emit only
+    the highest-confidence detection per track id so the UI doesn't render
+    overlapping ghost bboxes that block clicks on the real one. Untracked
+    persons (no track id) are passed through unchanged.
+    """
+    if ui_state is None:
+        return
+    best_by_tid: dict = {}
+    untracked = []
+    for p in persons:
+        tid = person_to_id.get(id(p))
+        if tid is None:
+            untracked.append(p)
+            continue
+        prev = best_by_tid.get(tid)
+        if prev is None or p.get_confidence() > prev.get_confidence():
+            best_by_tid[tid] = p
+    all_dets = [_build_det_info(p, tid) for tid, p in best_by_tid.items()]
+    all_dets.extend(_build_det_info(p) for p in untracked)
+    ui_state.update_detections(all_dets, following_id, paused=paused)
+
+
+def _run_tracker(tracker, persons):
+    """Run tracker and return (available_ids, person_by_id, person_to_id, filtered_tlwh_by_id).
+
+    person_by_id:        {track_id -> person detection}
+    person_to_id:        {id(person) -> track_id}  (reverse lookup)
+    filtered_tlwh_by_id: {track_id -> (x, y, w, h)} in normalized [0..1] coords —
+        the Kalman-filtered bbox state. Empty for tracks where the tracker
+        didn't surface a filtered tlwh (test stubs, FastTracker fallbacks).
+    """
+    available_ids = set()
+    person_by_id = {}
+    filtered_tlwh_by_id = {}
+
+    SCALE = 1000.0
+    det_array = np.empty((len(persons), 5), dtype=np.float32)
+    for i, person in enumerate(persons):
+        bbox = person.get_bbox()
+        det_array[i, 0] = bbox.xmin() * SCALE
+        det_array[i, 1] = bbox.ymin() * SCALE
+        det_array[i, 2] = (bbox.xmin() + bbox.width()) * SCALE
+        det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
+        det_array[i, 4] = person.get_confidence()
+
+    all_tracks = tracker.update(det_array)
+
+    for t in all_tracks:
+        if not t.is_activated:
+            continue
+        available_ids.add(t.track_id)
+        if t.filtered_tlwh:
+            filtered_tlwh_by_id[t.track_id] = t.filtered_tlwh
+        if 0 <= t.input_index < len(persons):
+            person_by_id[t.track_id] = persons[t.input_index]
+
+    person_to_id = {id(p): tid for tid, p in person_by_id.items()}
+    return available_ids, person_by_id, person_to_id, filtered_tlwh_by_id
+
+
+def _find_biggest_person(person_by_id):
+    """Return (track_id, person) for the person with the largest bbox area, or (None, None)."""
+    best_id, best_person, best_area = None, None, -1.0
+    for tid, person in person_by_id.items():
+        bbox = person.get_bbox()
+        area = bbox.width() * bbox.height()
+        if area > best_area:
+            best_id, best_person, best_area = tid, person, area
+    return best_id, best_person
+
+
+# Clamp matches the UI Target Size slider min/max
+_TGT_BH_MIN = 0.10
+_TGT_BH_MAX = 0.25
+
+
+def capture_bbox_setpoint_from_height(config, height: float, source: str = "lock") -> Optional[float]:
+    """At lock time, snap controller_config.target_bbox_height to the target's current bbox.
+
+    Centralised so both the AUTO acquisition path (detection manager) and the
+    operator-click path (follow_server) capture distance the same way.
+
+    Returns the clamped value actually written, or None if the config is missing.
+    """
+    if config is None:
+        return None
+    h = max(_TGT_BH_MIN, min(_TGT_BH_MAX, float(height)))
+    config.target_bbox_height = h
+    LOGGER.info("[LOCK %s] target_bbox_height set to %.3f from current bbox", source, h)
+    return h
+
+
+def _capture_bbox_setpoint(config, person):
+    """Convenience wrapper for the hailo-bound caller: pulls height off the bbox."""
+    if person is None:
+        return
+    capture_bbox_setpoint_from_height(config, person.get_bbox().height(), source="AUTO")
+
+
+# ---------------------------------------------------------------------------
+# Test log helpers
+# ---------------------------------------------------------------------------
+
+def _log_detections(user_data, persons, person_to_id):
+    if user_data._frame_log_data is None:
+        return
+    user_data._frame_log_data["detections"] = [
+        {
+            "id": person_to_id.get(id(p)),
+            "bbox": [
+                round(p.get_bbox().xmin(), 4),
+                round(p.get_bbox().ymin(), 4),
+                round(p.get_bbox().width(), 4),
+                round(p.get_bbox().height(), 4),
+            ],
+            "score": round(p.get_confidence(), 3),
+        }
+        for p in persons
+    ]
+
+
+class FollowEvent:
+    """String constants for the per-frame `mode` JSONL field.
+
+    Free-form strings drift between code and test expectations as they pass
+    through the test_log writer. Keep them in one place.
+    """
+    NO_PERSONS = "no-persons"
+    IDLE = "idle"
+    IDLE_NO_AUTO = "idle-no-auto"
+    AUTO_NO_TRACKED = "auto-no-tracked"
+    FALLBACK = "fallback"
+    REID_SEARCH = "reid-search"
+    REID_DRIFT = "reid-drift"
+
+
+def _log_mode(user_data, mode, followed_id):
+    if user_data._frame_log_data is None:
+        return
+    user_data._frame_log_data["mode"] = mode
+    user_data._frame_log_data["followed_id"] = followed_id
+
+
+# ---------------------------------------------------------------------------
+# Main app callback
+# ---------------------------------------------------------------------------
+
+def app_callback(element, buffer, user_data):
+    """Tiling pipeline callback: follow operator-selected person, update shared state.
+
+    Tracker runs synchronously in the callback:
+    1. Convert detections to Nx5 array, run tracker.update() synchronously
+    2. Each returned track has input_index pointing to the matched detection
+    3. Build person_by_id directly -- no cross-frame IoU re-matching needed
+
+    If any frame-log sink is open (``test_log_file`` for --test-log, or
+    ``record_frame_log_file`` for the current recording bundle), a JSONL
+    row is written per frame containing everything needed by the offline
+    overlay renderer: ``pts_ns`` (matches clean.mkv's video timeline),
+    ``followed_id`` / ``explicit_lock`` / ``last_change_ts`` (drive the
+    cross + badge), plus ``detections`` (drive the bbox overlay).
+    """
+    _perf_t0 = user_data.perf.frame_start()
+    sinks = [s for s in (user_data.test_log_file,
+                         user_data.record_frame_log_file)
+             if s is not None]
+    if sinks:
+        user_data.frame_index += 1
+        # buffer.pts is the load-bearing alignment key for the offline
+        # renderer — it matches the PTS stamped onto the corresponding
+        # frame in clean.mkv (the recording branch is tapped at output_tee
+        # so both share the same upstream PTS). Fall back to ``None`` when
+        # the buffer carries no PTS (some test sources don't stamp them);
+        # the renderer treats that case as "best effort sequential".
+        pts = buffer.pts if buffer is not None else None
+        pts_ns = int(pts) if pts is not None and pts != _GST_CLOCK_TIME_NONE else None
+        # Followee state needed by the overlay (badge + cross + flash).
+        ts = user_data.target_state
+        explicit_lock = ts.is_explicit_lock() if ts is not None else False
+        last_change_ts = ts.get_last_change_ts() if ts is not None else None
+        user_data._frame_log_data = {
+            "t": time.time(),
+            "pts_ns": pts_ns,
+            "frame": user_data.frame_index,
+            "mode": "",
+            "followed_id": None,
+            "explicit_lock": explicit_lock,
+            "last_change_ts": last_change_ts,
+            "detections": [],
+        }
+    else:
+        user_data._frame_log_data = None
+    try:
+        _app_callback_inner(element, buffer, user_data)
+    finally:
+        user_data.perf.frame_end(_perf_t0, user_data.ui_state)
+        # Snapshot the handles: another thread may None-out a sink
+        # between the is-not-None check and the .write() call (e.g.,
+        # shutdown racing with an in-flight frame). AttributeError joins
+        # the catch list for the same reason — None.write would raise it.
+        if user_data._frame_log_data is not None:
+            line = json.dumps(user_data._frame_log_data) + "\n"
+            for sink in (user_data.test_log_file,
+                         user_data.record_frame_log_file):
+                if sink is None:
+                    continue
+                try:
+                    sink.write(line)
+                except (ValueError, OSError, AttributeError):
+                    pass
+
+
+def _app_callback_inner(element, buffer, user_data):
+    roi = hailo.get_roi_from_buffer(buffer)
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    # Drop non-person detections (face, vehicle, license_plate, ...) from
+    # the ROI so downstream branches (display, record, openhd, webui)
+    # only see persons. The detector is multi-class but drone-follow only
+    # cares about people. This runs upstream of the output tee, so it
+    # applies once for all sinks.
+    persons = []
+    for det in detections:
+        if det.get_label() == "person":
+            persons.append(det)
+        else:
+            roi.remove_object(det)
+
+    target_state = user_data.target_state
+    ui_state = user_data.ui_state
+    config = user_data.controller_config
+    auto_select = bool(getattr(config, "auto_select", True)) if config is not None else True
+
+    if not persons:
+        user_data.tracker.update(_EMPTY_DET_ARRAY)
+        user_data.shared_state.update(None, available_ids=set())
+        if target_state is not None and target_state.get_target() is not None:
+            reid_mgr = user_data.reid_manager
+            if reid_mgr is not None and reid_mgr.has_gallery:
+                # ReID gallery exists — check timeout
+                last_seen = target_state.get_last_seen()
+                if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
+                                user_data.reid_search_timeout,
+                                "auto mode" if auto_select else "IDLE (auto-select off)")
+                    prev_target = target_state.get_target()
+                    target_state.enter_auto_mode()
+                    log_follow_change(prev_target, None, cause="TIMEOUT")
+                    reid_mgr.clear()
+                    if not auto_select:
+                        target_state.set_paused(True)
+                else:
+                    LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
+                                 target_state.get_target())
+            else:
+                prev_target = target_state.get_target()
+                target_state.enter_auto_mode()
+                log_follow_change(prev_target, None, cause="AUTO")
+                if not auto_select:
+                    target_state.set_paused(True)
+                    LOGGER.info("[IDLE] Target lost (no persons) — auto-select off, holding position")
+                else:
+                    LOGGER.info("[AUTO] Target lost (no persons, no ReID gallery) — returning to auto mode")
+        _paused = target_state.is_paused() if target_state else False
+        _update_ui(ui_state, [], {}, None, paused=_paused)
+        if target_state is None or target_state.get_target() is None:
+            LOGGER.debug("[SEARCH MODE] No person detected in frame")
+        _log_mode(user_data, FollowEvent.NO_PERSONS,
+                  target_state.get_target() if target_state else None)
+        return
+
+    # --- MOT dispatch ---
+    # ByteTracker / FastTracker runs every frame so the operator sees every
+    # visible track ID and can switch lock targets at any time. ByteTracker's
+    # internal lost_stracks buffer (track_buffer frames, default 30 = 1 s at
+    # 30 fps) handles short occlusions of the locked target via Kalman state
+    # propagation; ReID gallery handles longer dropouts.
+    target_id = target_state.get_target() if target_state is not None else None
+    reid_manager = user_data.reid_manager
+
+    available_ids, person_by_id, person_to_id, filtered_tlwh_by_id = \
+        _run_tracker(user_data.tracker, persons)
+
+    # Attach HailoUniqueID to every tracked person so downstream consumers
+    # (overlay, OpenHD bridge) can read the track ID off the detection object.
+    for person in persons:
+        tid = person_to_id.get(id(person))
+        if tid is not None:
+            person.add_object(hailo.HailoUniqueID(tid, hailo.TRACKING_ID))
+
+    _log_detections(user_data, persons, person_to_id)
+
+    # --- Target selection ---
+
+    best = None
+    follow_status = ""
+    if target_id is not None:
+        best = person_by_id.get(target_id)
+
+        if best is not None:
+            # Successfully tracking target
+            target_state.update_last_seen()
+            follow_status = f"ID {target_id}"
+
+            # ReID: build/update gallery while following (auto or locked)
+            if reid_manager is not None:
+                reid_manager.on_target_selected(target_id)
+                if reid_manager.should_update():
+                    frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
+                    if frame_bgr is not None:
+                        result = reid_manager.update_gallery(
+                            frame_bgr, best.get_bbox(),
+                            user_data.video_width, user_data.video_height,
+                            person_by_id=person_by_id)
+                        # Drift handling: gallery rejected the embedding because
+                        # it was too dissimilar from existing vectors. The
+                        # manager already ran a re-acquisition pass over the
+                        # visible detections; act on its result.
+                        if result.action == ACTION_SKIPPED_DRIFT:
+                            new_tid = result.reacquired_track_id
+                            if new_tid is not None and new_tid != target_id:
+                                # Tracker drifted onto a different person and
+                                # ReID found the right one — switch tracks.
+                                prev_target = target_id
+                                target_state.set_target(new_tid)
+                                log_follow_change(prev_target, new_tid, cause="REID-DRIFT")
+                                reid_manager.on_reidentified(new_tid)
+                                best = person_by_id.get(new_tid, best)
+                                target_id = new_tid
+                                target_state.update_last_seen()
+                                follow_status = f"REID-DRIFT→ID {new_tid}"
+                            elif new_tid is None:
+                                # Reacquire failed — hold position, retry
+                                # next frame. Mirrors the existing REID-lost
+                                # path's "no match" behaviour.
+                                user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
+                                _update_ui(ui_state, persons, person_to_id, None)
+                                _log_mode(user_data, FollowEvent.REID_DRIFT, target_id)
+                                return
+                            # new_tid == target_id ⇒ false drift (e.g. pose
+                            # change). Embedding was NOT stored, but we keep
+                            # tracking; next update_interval retries.
+        else:
+            # Target lost by tracker — try ReID re-identification.
+            # Note: we enter the gallery branch even when person_by_id is
+            # empty (i.e. tracker activated zero tracks this frame). In that
+            # case there's nothing to ReID-match against, but we still want
+            # to hold position and wait for the search timeout — the person
+            # may reappear in a frame or two. Bailing straight to auto on a
+            # single empty-tracker frame loses the lock unnecessarily.
+            if reid_manager is not None and reid_manager.has_gallery:
+                last_seen = target_state.get_last_seen()
+                if last_seen is not None and time.monotonic() - last_seen > user_data.reid_search_timeout:
+                    LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
+                                user_data.reid_search_timeout,
+                                "auto mode" if auto_select else "IDLE (auto-select off)")
+                    prev_target = target_state.get_target()
+                    target_state.enter_auto_mode()
+                    log_follow_change(prev_target, None, cause="TIMEOUT")
+                    reid_manager.clear()
+                    if not auto_select:
+                        target_state.set_paused(True)
+                    # Fall through to auto-select below (gated on auto_select)
+                else:
+                    if person_by_id:
+                        # Candidates available — try to re-identify among them.
+                        frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
+                        if frame_bgr is not None:
+                            new_tid = reid_manager.try_reidentify(
+                                frame_bgr, person_by_id,
+                                user_data.video_width, user_data.video_height)
+                            if new_tid is not None:
+                                # Re-identified — resume following with the new track ID
+                                prev_target = target_state.get_target()
+                                target_state.set_target(new_tid)
+                                log_follow_change(prev_target, new_tid, cause="REID")
+                                reid_manager.on_reidentified(new_tid)
+                                best = person_by_id[new_tid]
+                                target_state.update_last_seen()
+                                follow_status = f"REID→ID {new_tid}"
+                    else:
+                        # Tracker activated nothing — score raw detections
+                        # against the gallery. If the locked person is found
+                        # above the match threshold we drive the controller
+                        # from the raw bbox even though no tracker id exists,
+                        # so a follow keeps working when ByteTracker drops
+                        # the person below its activation threshold.
+                        frame_bgr = get_frame_bgr(buffer, user_data.video_width, user_data.video_height)
+                        if frame_bgr is not None:
+                            _, raw_match = reid_manager.score_visible_persons(
+                                frame_bgr, persons,
+                                user_data.video_width, user_data.video_height)
+                            if raw_match is not None:
+                                best = raw_match
+                                target_state.update_last_seen()
+                                follow_status = f"REID-RAW→ID {reid_manager.original_id}"
+
+                    if best is None:
+                        # No match (or no candidates) — hold position, retry next frame.
+                        user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
+                        _update_ui(ui_state, persons, person_to_id, None)
+                        _log_mode(user_data, FollowEvent.REID_SEARCH, target_id)
+                        return
+            else:
+                # No ReID gallery — return to auto mode (or IDLE if auto-select disabled).
+                # Show the operator-facing original ID when available; falling
+                # back to the current tracker ID otherwise.
+                display_id = target_id
+                if reid_manager is not None and reid_manager.original_id is not None:
+                    display_id = reid_manager.original_id
+                prev_target = target_id
+                target_state.enter_auto_mode()
+                log_follow_change(prev_target, None, cause="AUTO")
+                if not auto_select:
+                    target_state.set_paused(True)
+                    LOGGER.info("[IDLE] Target ID %s lost — auto-select off, holding position. Available: %s",
+                                display_id, sorted(available_ids) if available_ids else "none")
+                else:
+                    LOGGER.info("[AUTO] Target ID %s lost — returning to auto mode. Available: %s",
+                                display_id, sorted(available_ids) if available_ids else "none")
+
+    # Re-read target_id after possible enter_auto_mode() calls above
+    target_id = target_state.get_target() if target_state is not None else None
+
+    if target_id is None and best is None:
+        # No explicit target — decide between idle, hold, or auto-select
+        if target_state is not None and target_state.is_paused():
+            # True IDLE — hold position
+            user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
+            _update_ui(ui_state, persons, person_to_id, None, paused=True)
+            LOGGER.debug("[IDLE] Paused. Available: %s",
+                        sorted(available_ids) if available_ids else "none")
+            _log_mode(user_data, FollowEvent.IDLE, None)
+            return
+        if not auto_select:
+            # Auto-select disabled — pilot-led workflow. Hold position; wait for operator click.
+            user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
+            _update_ui(ui_state, persons, person_to_id, None, paused=True)
+            LOGGER.debug("[IDLE] auto-select off — waiting for operator selection. Available: %s",
+                        sorted(available_ids) if available_ids else "none")
+            _log_mode(user_data, FollowEvent.IDLE_NO_AUTO, None)
+            return
+        # AUTO mode — select biggest person
+        biggest_id, biggest_person = _find_biggest_person(person_by_id)
+        if biggest_id is not None:
+            target_state.set_target(biggest_id)
+            log_follow_change(None, biggest_id, cause="AUTO")
+            # Match manual-selection state: AUTO acquisition is treated as an explicit lock
+            # so OpenHD reports the real follow_id and the state machine is symmetric.
+            target_state.set_explicit_lock(True)
+            target_state.update_last_seen()
+            # Capture current bbox as the distance setpoint so the drone holds the
+            # current distance instead of converging to a fixed target_bbox_height.
+            _capture_bbox_setpoint(config, biggest_person)
+            best = biggest_person
+            follow_status = f"AUTO→ID {biggest_id}"
+            LOGGER.debug("[AUTO] Selected biggest person ID %s. Available: %s",
+                        biggest_id, sorted(available_ids) if available_ids else "none")
+        else:
+            user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
+            _update_ui(ui_state, persons, person_to_id, None)
+            _log_mode(user_data, FollowEvent.AUTO_NO_TRACKED, None)
+            return
+
+    if best is None:
+        # Safety fallback — should not normally reach here
+        user_data.shared_state.update(None, available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
+        _update_ui(ui_state, persons, person_to_id, None)
+        _log_mode(user_data, FollowEvent.FALLBACK, None)
+        return
+
+    # Prefer the tracker's Kalman-filtered tlwh over the raw post-NMS bbox.
+    # The KF is already running inside ByteTracker; pulling its output through
+    # to the controller damps detection-noise jitter and short-occlusion gaps
+    # in one place.
+    #
+    # Re-read target_id from target_state: the AUTO-acquisition branch above
+    # updates target_state via set_target(biggest_id) but doesn't refresh the
+    # local `target_id` captured earlier in this function. Re-reading here
+    # ensures we look up the filtered bbox under the just-acquired ID.
+    target_id = target_state.get_target() if target_state is not None else None
+    filtered = filtered_tlwh_by_id.get(target_id) if target_id is not None else None
+    if filtered:
+        fx, fy, fw, fh = filtered
+        cx = fx + fw / 2.0
+        cy = fy + fh / 2.0
+        bbox_h = fh
+    else:
+        bbox = best.get_bbox()
+        cx = bbox.xmin() + bbox.width() / 2.0
+        cy = bbox.ymin() + bbox.height() / 2.0
+        bbox_h = bbox.height()
+    if config is not None and bbox_h > 0:
+        _factor = (config.target_bbox_height / bbox_h) - 1.0
+        LOGGER.debug(
+            "ctrl: bh=%.3f bottom=%.3f target=%.3f factor=%.3f filtered=%s",
+            bbox_h, cy + bbox_h / 2.0, config.target_bbox_height, _factor,
+            bool(filtered),
+        )
+    user_data.shared_state.update(Detection(
+        label="person",
+        confidence=best.get_confidence(),
+        center_x=cx,
+        center_y=cy,
+        bbox_height=bbox_h,
+        timestamp=time.monotonic(),
+    ), available_ids=available_ids, available_bboxes=filtered_tlwh_by_id)
+
+    # Use the original ID for the UI so the operator sees a stable ID
+    # even after ReID re-identifies the person with a new tracker ID. Also
+    # covers the raw-match path, where `best` was selected by ReID directly
+    # without going through ByteTracker — in that case `best` isn't in
+    # `person_to_id` and would otherwise show no highlight at all.
+    ui_following_id = target_state.get_target() if target_state else None
+    ui_person_to_id = person_to_id
+    if reid_manager is not None and reid_manager.original_id is not None:
+        orig = reid_manager.original_id
+        cur = target_state.get_target() if target_state else None
+        best_has_track = person_to_id.get(id(best)) is not None
+        if (orig != cur and cur is not None) or not best_has_track:
+            ui_following_id = orig
+            ui_person_to_id = dict(person_to_id)
+            ui_person_to_id[id(best)] = orig
+    _update_ui(ui_state, persons, ui_person_to_id, ui_following_id)
+
+    available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
+    LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
+                follow_status, best.get_confidence(), cx, cy, bbox_h, available_str)
+    # Log the raw tracker id (not the stable UI label) so frames.jsonl
+    # ``followed_id`` matches the ``id`` field on detections in the same
+    # row. The offline renderer needs them to match — it can't paint the
+    # cross on the right bbox otherwise. UI's stable-label semantics
+    # apply to ui_state only; frames.jsonl is for the renderer.
+    log_followed_id = target_state.get_target() if target_state else None
+    _log_mode(user_data, follow_status, log_followed_id)
+
+
+# ---------------------------------------------------------------------------
+# OpenHD pipeline helpers (local to drone-follow; not in hailo-apps core)
+# ---------------------------------------------------------------------------
+
+# Vision-branch construction (output stage) and the metadata pad probe
+# both live in vision_branches.py — see that file's module docstring for
+# the full topology.
+from .vision_branches import (
+    TARGET_OVERLAY_CLASS_ID,  # re-exported for tests / external probes
+    assemble_output_stage,
+    wire_local_meta_probe,
+)
+
+
+
+# Sideband metadata file written by OpenHD with current SHM resolution
+_SHM_META_PATH = "/tmp/openhd_raw_video.meta"
+
+
+def _read_shm_resolution():
+    """Read current SHM resolution from OpenHD's sideband metadata file.
+
+    Returns (width, height, fps) or None if the file doesn't exist or is invalid.
+    OpenHD writes this file every time the camera pipeline (re)starts, so it
+    always reflects the active capture resolution.
+    """
+    import json as _json
+    try:
+        with open(_SHM_META_PATH, "r") as f:
+            meta = _json.loads(f.read())
+        w = int(meta["width"])
+        h = int(meta["height"])
+        fps = int(meta.get("fps", 30))
+        if w > 0 and h > 0 and fps > 0:
+            return (w, h, fps)
+    except (FileNotFoundError, KeyError, ValueError, _json.JSONDecodeError) as e:
+        LOGGER.debug("Cannot read SHM metadata from %s: %s", _SHM_META_PATH, e)
+    return None
+
+
+def _shm_source_pipeline(video_source, video_width, video_height, frame_rate, name="source"):
+    """Build a GStreamer source pipeline for OpenHD shared-memory NV12 passthrough.
+
+    shmsrc buffers are read-only (mmap'd shared memory).  Force an immediate
+    NV12->I420 conversion to create writable buffers (cheap UV deinterleave).
+
+    The caps MUST match the resolution that OpenHD is actually writing into
+    shared memory.  We read the sideband metadata file that OpenHD writes on
+    every pipeline (re)start to auto-detect the correct resolution, falling
+    back to the caller-supplied video_width/video_height if the file is absent.
+    """
+    from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
+
+    # Auto-detect resolution from OpenHD metadata
+    shm_res = _read_shm_resolution()
+    if shm_res is not None:
+        shm_w, shm_h, shm_fps = shm_res
+        if shm_w != video_width or shm_h != video_height or shm_fps != frame_rate:
+            LOGGER.info(
+                "SHM resolution from metadata (%dx%d@%d) differs from "
+                "CLI/defaults (%dx%d@%d) — using metadata values",
+                shm_w, shm_h, shm_fps, video_width, video_height, frame_rate,
+            )
+            video_width = shm_w
+            video_height = shm_h
+            frame_rate = shm_fps
+
+    socket_path = str(video_source).split('://', 1)[1]
+
+    source_element = (
+        f'shmsrc socket-path={socket_path} do-timestamp=true is-live=true name={name} ! '
+        f'video/x-raw,format=NV12,width={video_width},height={video_height},'
+        f'framerate={frame_rate}/1,pixel-aspect-ratio=1/1 ! '
+        f'videoconvert ! video/x-raw,format=I420 ! '
+    )
+    return (
+        f"{source_element} "
+        f"{QUEUE(name=f'{name}_scale_q')} ! "
+        f"videoscale name={name}_videoscale n-threads=2 ! "
+        f"{QUEUE(name=f'{name}_convert_q')} ! "
+        f"videoconvert n-threads=3 name={name}_convert qos=false ! "
+        f"video/x-raw, pixel-aspect-ratio=1/1, format=RGB, "
+        f"width={video_width}, height={video_height}"
+    )
+
+
+def _udp_h264_source_pipeline(video_source, video_width, video_height, frame_rate, name="source"):
+    """Build a GStreamer source pipeline for an RTP/H.264 UDP stream.
+
+    The hailo-apps SOURCE_PIPELINE for `udp://` assumes raw MJPEG datagrams
+    and pipes `udpsrc ! jpegdec`, which fails immediately on RTP-framed input
+    (`Not a JPEG file: starts with 0x80 0x60` — `0x80` = RTP v2, `0x60` = pt 96).
+
+    Gazebo's `gz-video-bridge` and most simulators send H.264 inside RTP, so
+    we replace that branch here with `udpsrc ! rtph264depay ! avdec_h264`.
+    """
+    from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
+
+    port = str(video_source).rsplit(':', 1)[-1]
+    caps = "application/x-rtp,media=video,encoding-name=H264,payload=96"
+
+    source_element = (
+        f'udpsrc port={port} caps="{caps}" name={name} ! '
+        f'{QUEUE(name=f"{name}_queue_rtp")} ! '
+        f'rtph264depay ! h264parse ! avdec_h264 name={name}_decodebin ! '
+    )
+    return (
+        f"{source_element} "
+        f"{QUEUE(name=f'{name}_scale_q')} ! "
+        f"videoscale name={name}_videoscale n-threads=2 ! "
+        f"{QUEUE(name=f'{name}_convert_q')} ! "
+        f"videoconvert n-threads=3 name={name}_convert qos=false ! "
+        f"video/x-raw, pixel-aspect-ratio=1/1, format=RGB, "
+        f"width={video_width}, height={video_height}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pipeline app factory
+# ---------------------------------------------------------------------------
+
+
+def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
+               parser: Optional[argparse.ArgumentParser] = None,
+               record_enabled=False, record_dir=None, reid_manager=None,
+               reid_search_timeout: float = 20.0,
+               tracker_name=None, log_perf=False,
+               controller_config: "Optional[ControllerConfig]" = None):
+    """Create the tiling pipeline app with drone-follow callback.
+
+    Follows the hailo-app pattern: build parser, create user_data,
+    instantiate GStreamerTilingApp. If eos_reached is a threading.Event,
+    EOS will set it instead of calling GStreamer shutdown (so we can land first).
+
+    Args:
+        shared_state: SharedDetectionState for passing detections to control loop
+        target_state: FollowTargetState for tracking-based target selection (optional)
+        eos_reached: threading.Event to signal EOS instead of shutdown (optional)
+        ui_state: SharedUIState for web UI (optional)
+        ui_fps: MJPEG stream frame rate (default: 10)
+        parser: Pre-built argparse parser with all domain args already registered.
+                If None, a bare pipeline parser is created (for backward compat).
+        record_dir: Directory for recording output files (optional)
+        reid_manager: ReIDManager for appearance-based re-identification (optional)
+        reid_search_timeout: Seconds to search via ReID before returning to auto mode (default: 20.0)
+        controller_config: ControllerConfig instance used for ByteTracker init
+            (reads .bytetracker_track_thresh / .bytetracker_track_buffer /
+            .bytetracker_match_thresh / .bytetracker_frame_rate). When None,
+            ControllerConfig() defaults are used — BYTE-IDENTICAL to the
+            legacy hardcoded literals (track_thresh=0.4, track_buffer=90,
+            match_thresh=0.5, frame_rate=30). RINT-03 wiring (Phase 6 Plan 06-03).
+    """
+    from hailo_apps.python.pipeline_apps.tiling.tiling_pipeline import (
+        GStreamerTilingApp,
+    )
+    from hailo_apps.python.core.gstreamer.gstreamer_app import app_callback_class
+    from hailo_apps.python.core.common.core import get_pipeline_parser
+    from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
+        INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
+        TILE_CROPPER_PIPELINE, SOURCE_PIPELINE,
+    )
+
+    if parser is None:
+        parser = get_pipeline_parser()
+
+    class DroneFollowUserData(app_callback_class):
+        def __init__(self, shared_state, target_state=None, ui_state=None,
+                     tracker=None, reid_manager=None, reid_search_timeout=20.0,
+                     log_perf=False):
+            super().__init__()
+            self.shared_state = shared_state
+            self.target_state = target_state
+            self.ui_state = ui_state
+            self.tracker = tracker
+            self.reid_manager = reid_manager
+            self.reid_search_timeout = reid_search_timeout
+            # controller_config is attached post-construction by robot_follow_app.py
+            # (kept as attribute so the callback can read it).
+            self.controller_config = None
+            # Target cross state — populated by the local-branch metadata
+            # pad probe each frame, read by the cairooverlay draw callback
+            # to render a green cross + state badge on display/record video.
+            # See vision_branches.TargetCrossState.
+            from .vision_branches import TargetCrossState
+            self.target_cross_state = TargetCrossState()
+            self.perf = PerfTracker(
+                log_perf=log_perf,
+                tracker_metrics=tracker.metrics if tracker is not None else None,
+            )
+            # Set after app creation so callback can extract frames for ReID
+            self.video_width = 0
+            self.video_height = 0
+            # Per-frame JSONL sinks. Both default to None; either or both
+            # may be set at any time:
+            #   * ``test_log_file``        — opened by ``--test-log`` for sim tests.
+            #   * ``record_frame_log_file`` — opened by ``start_recording``,
+            #     points at ``<bundle>/frames.jsonl`` and is the
+            #     production source for the offline overlay renderer.
+            # ``app_callback`` writes the same JSON line to whichever
+            # sinks are non-None, so the two paths can coexist.
+            self.test_log_file = None
+            self.record_frame_log_file = None
+            self.frame_index = 0
+            self._frame_log_data = None
+
+        def open_test_log(self, path):
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            self.test_log_file = open(path, "w", buffering=1)
+            LOGGER.info("[test-log] writing per-frame detection log to %s", path)
+
+        def close_test_log(self):
+            if self.test_log_file is not None:
+                try:
+                    self.test_log_file.close()
+                except OSError:
+                    pass
+                self.test_log_file = None
+
+        def open_record_frame_log(self, path):
+            """Open the per-frame JSONL sink for the current recording
+            bundle. Called by ``start_recording``; the sink lives next to
+            ``clean.mkv`` and is consumed by ``scripts/render_overlay.py``.
+            """
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            self.record_frame_log_file = open(path, "w", buffering=1)
+            LOGGER.info("[record] per-frame log -> %s", path)
+
+        def close_record_frame_log(self):
+            if self.record_frame_log_file is not None:
+                try:
+                    self.record_frame_log_file.close()
+                except OSError:
+                    pass
+                self.record_frame_log_file = None
+
+    class DroneFollowTilingApp(GStreamerTilingApp):
+        """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
+
+        def _add_tiling_arguments(self, parser):
+            """Register the upstream tiling args, then override their
+            defaults with our canonical pipeline shape.
+
+            ``set_defaults`` must run AFTER ``add_argument`` to take
+            effect (argparse evaluates action-level defaults first and
+            only applies parser-level defaults to fields that aren't
+            already set). Hooking here is the cleanest way to interpose
+            between registration and ``parse_args`` (which fires inside
+            ``super().__init__()`` further along the chain).
+
+            CLI flags continue to win over our defaults — pass
+            ``--tiles-x N`` to override per-run.
+            """
+            super()._add_tiling_arguments(parser)
+            from robot_follow.pipeline_defaults import TILE_DEFAULTS
+            parser.set_defaults(**TILE_DEFAULTS)
+
+        def __init__(self, app_callback, user_data, parser=None, eos_reached=None,
+                     ui_enabled=False, ui_state=None, ui_fps=30,
+                     record_enabled=False, record_dir=None):
+            self._eos_reached = eos_reached
+            self._ui_enabled = ui_enabled
+            self._record_enabled = record_enabled
+            self._ui_state = ui_state
+            self._ui_fps = ui_fps
+            self._recording = False
+            self._record_dir = record_dir or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
+            self._record_lock = threading.Lock()
+            self._shm_rebuild_pending = False
+            # Active recording session — a bundle directory and the two
+            # ``.mkv`` paths inside it. The clean branch (no overlay) is
+            # the source for ``scripts/render_overlay.py``; the overlay
+            # branch is what the operator saw live. Both are written
+            # for every recording session.
+            self._current_bundle_dir = None
+            self._current_clean_path = None
+            self._current_overlay_path = None
+            # Path the FILE_SINK_PIPELINE was instantiated with (chosen at
+            # pipeline-build time). Used as the toggle target so the file
+            # name shown to operators matches what GStreamer is writing.
+            self._initial_record_path = None
+
+            # Pre-detect SHM resolution BEFORE super().__init__() so that
+            # the tiling configuration (tile grid, overlap, batch size) is
+            # computed with the correct frame dimensions.  Without this,
+            # the base class configures tiling for the CLI default (e.g.
+            # 1280x720) while the SHM source actually delivers 640x480,
+            # causing a buffer size mismatch → Hailo DMA crash.
+            if parser is not None:
+                _pre_args, _ = parser.parse_known_args()
+                _pre_input = getattr(_pre_args, 'input', None)
+                if _pre_input and str(_pre_input).startswith('shm://'):
+                    shm_res = _read_shm_resolution()
+                    if shm_res is not None:
+                        shm_w, shm_h, shm_fps = shm_res
+                        LOGGER.info(
+                            "Pre-init: SHM metadata says %dx%d@%d — "
+                            "injecting into parser defaults",
+                            shm_w, shm_h, shm_fps)
+                        # Override the parser defaults so the base class
+                        # sees the correct resolution during configure().
+                        parser.set_defaults(
+                            width=shm_w, height=shm_h,
+                            frame_rate=shm_fps)
+
+            super().__init__(app_callback, user_data, parser=parser)
+            # After base class init, sync resolution from SHM metadata if in
+            # SHM mode so that self.video_width/height are correct for any
+            # future rebuild (watchdog, manual, etc.).
+            if str(getattr(self, 'video_source', '')).startswith('shm://'):
+                shm_res = _read_shm_resolution()
+                if shm_res is not None:
+                    self.video_width, self.video_height, self.frame_rate = shm_res
+            # Connect appsink (mjpeg_sink) + splitmuxsink (file_sink)
+            # signals after pipeline is created. The helper is a no-op
+            # for elements that aren't in the current pipeline.
+            self._connect_mjpeg_sink()
+            # Wire the highlight_target metadata pad probe to the
+            # local_meta_id identity on the display/record branch.
+            self._connect_local_meta_probe()
+
+        def _connect_mjpeg_sink(self):
+            """Connect MJPEG appsink (web UI) and both recording splitmuxsink
+            ``format-location-full`` signal handlers. Called after every
+            pipeline construction / rebuild.
+            """
+            self._Gst = _get_gst()
+            mjpeg_sink = self.pipeline.get_by_name("mjpeg_sink")
+            if mjpeg_sink:
+                mjpeg_sink.connect("new-sample", self._on_mjpeg_sample)
+            # Two recording sinks live in the pipeline when --record is set:
+            # ``file_sink_clean`` (raw, pre-overlay) and ``file_sink_overlay``
+            # (operator-visible). Each gets its own format-location callback
+            # so it can return the matching path inside the active session
+            # bundle directory.
+            clean_sink = self.pipeline.get_by_name("file_sink_clean")
+            if clean_sink:
+                clean_sink.connect("format-location-full",
+                                   self._on_record_format_location_clean)
+            overlay_sink = self.pipeline.get_by_name("file_sink_overlay")
+            if overlay_sink:
+                overlay_sink.connect("format-location-full",
+                                     self._on_record_format_location_overlay)
+
+        def _on_mjpeg_sample(self, appsink):
+            """appsink callback: extract pre-encoded JPEG bytes."""
+            Gst = self._Gst
+            sample = appsink.emit("pull-sample")
+            if sample:
+                buf = sample.get_buffer()
+                success, map_info = buf.map(Gst.MapFlags.READ)
+                if success:
+                    self._ui_state.update_frame(bytes(map_info.data))
+                    buf.unmap(map_info)
+            return Gst.FlowReturn.OK
+
+        def bus_call(self, bus, message, loop):
+            """Override to rebuild pipeline on errors in SHM mode instead of shutting down."""
+            import gi
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst, GLib
+            t = message.type
+            if t == Gst.MessageType.ERROR:
+                err, debug = message.parse_error()
+                is_shm = str(getattr(self, 'video_source', '')).startswith('shm://')
+                if is_shm and not self._shm_rebuild_pending:
+                    self._shm_rebuild_pending = True
+                    LOGGER.warning("SHM pipeline error (%s) — waiting for socket + rebuilding", err)
+                    # Start polling for the SHM socket to reappear (OpenHD may
+                    # be restarting its pipeline with a new resolution).
+                    self._shm_poll_count = 0
+                    GLib.timeout_add(500, self._shm_wait_for_socket)
+                    return True
+                elif is_shm:
+                    # Additional error while rebuild already pending — ignore
+                    return True
+            return super().bus_call(bus, message, loop)
+
+        def _shm_wait_for_socket(self):
+            """Poll until the SHM socket and metadata file exist, then rebuild.
+
+            OpenHD removes the socket and recreates it during pipeline restart.
+            The metadata file is written first (during setup()), then the socket
+            appears when shmsink enters PLAYING.  We poll every 500ms for up to
+            30s (60 attempts) before giving up.
+            """
+            self._shm_poll_count += 1
+            socket_path = str(self.video_source).split('://', 1)[1]
+            meta_ok = _read_shm_resolution() is not None
+            socket_ok = os.path.exists(socket_path)
+            if socket_ok and meta_ok:
+                LOGGER.info("SHM socket + metadata ready after %d polls — rebuilding pipeline",
+                            self._shm_poll_count)
+                self._shm_rebuild()
+                return False  # stop polling
+            if self._shm_poll_count >= 60:
+                LOGGER.warning("SHM socket/metadata did not reappear after 30s — rebuilding anyway")
+                self._shm_rebuild()
+                return False
+            if self._shm_poll_count % 10 == 0:
+                LOGGER.debug("Waiting for SHM socket (exists=%s) + metadata (exists=%s) [poll %d]",
+                             socket_ok, meta_ok, self._shm_poll_count)
+            return True  # keep polling
+
+        def _shm_rebuild(self):
+            """Rebuild pipeline after SHM error (e.g. OpenHD resolution change).
+
+            Re-reads the OpenHD metadata file so the new pipeline uses
+            the correct caps for the (potentially changed) resolution.
+            Performs a careful teardown to avoid kernel warnings from the
+            Hailo PCIe driver's DMA buffer mapping (find_vma race on
+            kernel 6.12+).
+            """
+            import gi
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+
+            self._shm_rebuild_pending = False
+            # Update our video dimensions from the metadata file so the
+            # rebuilt pipeline negotiates the correct SHM buffer layout.
+            shm_res = _read_shm_resolution()
+            if shm_res is not None:
+                new_w, new_h, new_fps = shm_res
+                if new_w != self.video_width or new_h != self.video_height:
+                    LOGGER.info(
+                        "SHM rebuild: resolution changed %dx%d -> %dx%d",
+                        self.video_width, self.video_height, new_w, new_h,
+                    )
+                self.video_width = new_w
+                self.video_height = new_h
+                self.frame_rate = new_fps
+
+            # Pre-teardown: transition the old pipeline through READY/NULL
+            # explicitly so in-flight Hailo inference buffers are drained
+            # before we create the new pipeline.
+            if self.pipeline:
+                LOGGER.debug("SHM rebuild: pipeline PLAYING -> NULL (drain Hailo buffers)")
+                self.pipeline.set_state(Gst.State.NULL)
+                self.pipeline.get_state(5 * Gst.SECOND)
+                bus = self.pipeline.get_bus()
+                if bus:
+                    bus.remove_signal_watch()
+                self.pipeline = None
+                # The Hailo PCIe driver needs time to fully release DMA
+                # buffer mappings before new ones can be allocated.
+                # Without this delay, hailo_vdma_buffer_map triggers
+                # kernel warnings (find_vma race) and a segfault.
+                LOGGER.debug("SHM rebuild: waiting for Hailo DMA release")
+                time.sleep(2.0)
+
+            # Reset tracker to clear stale predictions from old resolution
+            if hasattr(self, 'user_data') and hasattr(self.user_data, 'tracker'):
+                self.user_data.tracker.reset()
+                LOGGER.debug("SHM rebuild: tracker reset")
+
+            # Now build a fresh pipeline from scratch (skip base class
+            # teardown since we already did it above).
+            self.watchdog_paused = True
+            self.rebuild_count += 1
+            try:
+                LOGGER.debug("SHM rebuild: creating new pipeline")
+                pipeline_string = self.get_pipeline_string()
+                LOGGER.debug("SHM rebuild: pipeline string: %s", pipeline_string)
+
+                self.pipeline = Gst.parse_launch(pipeline_string)
+
+                bus = self.pipeline.get_bus()
+                bus.add_signal_watch()
+                bus.connect("message", self.bus_call, self.loop)
+
+                self._connect_callback()
+                self._on_pipeline_rebuilt()
+
+                from hailo_apps.python.core.gstreamer.gstreamer_app import disable_qos
+                disable_qos(self.pipeline)
+
+                ret = self.pipeline.set_state(Gst.State.PLAYING)
+                if ret == Gst.StateChangeReturn.FAILURE:
+                    LOGGER.error("SHM rebuild: failed to start new pipeline")
+                    self.loop.quit()
+                    return False
+
+                LOGGER.info("SHM rebuild: pipeline rebuilt and playing")
+                self.watchdog_paused = False
+            except Exception:
+                LOGGER.error("SHM rebuild: exception", exc_info=True)
+                self.loop.quit()
+            return False
+
+        def on_eos(self):
+            if self._eos_reached is not None:
+                self._eos_reached.set()
+            else:
+                super().on_eos()
+
+        def _on_pipeline_rebuilt(self):
+            super()._on_pipeline_rebuilt()
+            self._connect_mjpeg_sink()
+            self._connect_local_meta_probe()
+
+        def _connect_local_meta_probe(self):
+            """Attach the highlight_target metadata pad probe to the
+            local_meta_id identity element. The element only exists when
+            --display or --record is active, so this is a no-op otherwise.
+            Also wires the cairooverlay draw callback that renders the
+            target cross + state badge on display/record video.
+            """
+            target_state = getattr(self.user_data, "target_state", None)
+            cross_state = getattr(self.user_data, "target_cross_state", None)
+            wire_local_meta_probe(self.pipeline, target_state, cross_state)
+
+        # ---- Recording control ----
+
+        @property
+        def is_recording(self):
+            return self._recording
+
+        def _generate_bundle_paths(self):
+            """Create a session bundle directory and return its three paths.
+
+            Layout::
+
+                recordings/<YYYY-MM-DD_HH-MM-SS>/
+                ├── clean.mkv     (no overlay — feeds offline renderer)
+                ├── overlay.mkv   (operator-visible — bboxes + cross + badge)
+                ├── frames.jsonl  (per-frame metadata; PTS-aligned to clean.mkv)
+                └── manifest.json (version, args, video shape, initial config)
+
+            Returns ``(bundle_dir, clean_path, overlay_path)``.
+            """
+            os.makedirs(self._record_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            bundle_dir = os.path.join(self._record_dir, ts)
+            os.makedirs(bundle_dir, exist_ok=True)
+            return (bundle_dir,
+                    os.path.join(bundle_dir, "clean.mkv"),
+                    os.path.join(bundle_dir, "overlay.mkv"))
+
+        def _write_manifest(self, bundle_dir):
+            """Capture everything an offline renderer needs to reconstruct
+            the recording context into ``<bundle_dir>/manifest.json``.
+
+            Best-effort — never raises. The manifest is informational; the
+            renderer can still run from clean.mkv + frames.jsonl alone
+            (manifest just lets it pick the right ControllerConfig and
+            video dimensions without re-deriving them).
+            """
+            import subprocess
+            import sys
+
+            try:
+                from importlib.metadata import version as _pkg_version
+                df_version = _pkg_version("drone-follow")
+            except Exception:
+                df_version = "unknown"
+
+            git_sha = "unknown"
+            try:
+                here = os.path.dirname(os.path.abspath(__file__))
+                git_sha = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=here, stderr=subprocess.DEVNULL,
+                    timeout=2.0).decode().strip()
+            except (subprocess.SubprocessError, FileNotFoundError, OSError):
+                pass
+
+            cfg = getattr(self.user_data, "controller_config", None)
+            cfg_snapshot = cfg.to_dict() if cfg is not None else None
+
+            manifest = {
+                "drone_follow_version": df_version,
+                "git_sha": git_sha,
+                "argv": list(sys.argv),
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "video": {
+                    "width":  getattr(self, "video_width", None),
+                    "height": getattr(self, "video_height", None),
+                    "fps":    getattr(self, "frame_rate", None),
+                    "encoder_bitrate_kbps": getattr(
+                        self.options_menu, "record_bitrate", None),
+                },
+                "controller_config": cfg_snapshot,
+            }
+            path = os.path.join(bundle_dir, "manifest.json")
+            try:
+                with open(path, "w") as f:
+                    json.dump(manifest, f, indent=2, default=str)
+                LOGGER.info("[record] manifest -> %s", path)
+            except OSError:
+                LOGGER.exception("[record] failed to write manifest")
+
+        @property
+        def current_bundle_dir(self):
+            """The active recording session directory, or None.
+
+            Consumed by frame-log / event-log / manifest writers so they
+            land alongside ``clean.mkv`` + ``overlay.mkv`` for the same
+            session and can be ingested together by the offline renderer.
+            """
+            return self._current_bundle_dir
+
+        # Property kept for backwards compat — returns the overlay-baked
+        # path because that's what operators expect when watching playback.
+        @property
+        def _current_record_path(self):
+            return self._current_overlay_path
+
+        def _on_record_format_location_clean(self, splitmux, fragment_id, *_):
+            """``format-location-full`` for the clean (no-overlay) sink."""
+            return self._format_location("clean", self._current_clean_path)
+
+        def _on_record_format_location_overlay(self, splitmux, fragment_id, *_):
+            """``format-location-full`` for the overlay-baked sink."""
+            return self._format_location("overlay", self._current_overlay_path)
+
+        def _format_location(self, branch_name, pre_set_path):
+            """Shared body for the two format-location callbacks.
+
+            ``start_recording`` pre-generates both paths and stashes them
+            on the instance so the bridge / web UI caller gets a usable
+            return value immediately. The callbacks honour those pre-set
+            paths; only fall back to a fresh bundle when neither was set
+            (e.g. ``--record`` auto-start, where the valve opens before
+            any explicit ``start_recording`` call).
+            """
+            if pre_set_path:
+                LOGGER.info("[record] %s fragment -> %s", branch_name, pre_set_path)
+                return pre_set_path
+            bundle_dir, clean_path, overlay_path = self._generate_bundle_paths()
+            self._current_bundle_dir = bundle_dir
+            self._current_clean_path = clean_path
+            self._current_overlay_path = overlay_path
+            path = clean_path if branch_name == "clean" else overlay_path
+            LOGGER.info("[record] %s fragment -> %s (lazy bundle)",
+                        branch_name, path)
+            return path
+
+        def start_recording(self, path=None):
+            """Open both recording valves so frames flow through the clean
+            and overlay sub-branches. Each ``splitmuxsink`` lazily creates
+            a fresh ``.mkv`` inside a shared session bundle directory.
+
+            ``path`` is ignored (kept for API compat). Returns the bundle
+            directory the recording is being written into.
+            """
+            with self._record_lock:
+                if not self._record_enabled:
+                    LOGGER.warning("[record] recording branch not built — "
+                                   "pass --record (or --webui / --openhd "
+                                   "for runtime toggling)")
+                    return None
+                if self._recording:
+                    LOGGER.info("[record] Already recording: %s",
+                                self._current_bundle_dir)
+                    return self._current_bundle_dir
+
+                # Pre-generate the bundle now so callers (web UI / OpenHD
+                # bridge) see the real paths in the return value. The
+                # format-location callbacks honour these when splitmuxsink
+                # fires shortly after the first buffer arrives.
+                (self._current_bundle_dir,
+                 self._current_clean_path,
+                 self._current_overlay_path) = self._generate_bundle_paths()
+
+                # Write the session manifest first — it captures the
+                # context (version, argv, video shape, initial config)
+                # the offline renderer needs to reconstruct overlays.
+                self._write_manifest(self._current_bundle_dir)
+
+                # Open the per-frame JSONL sink inside the bundle BEFORE
+                # the valves open. The app_callback writes to this sink
+                # on every frame from now until stop_recording, so the
+                # renderer's frames.jsonl lines up 1:1 with clean.mkv.
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "open_record_frame_log"):
+                    try:
+                        user_data.open_record_frame_log(
+                            os.path.join(self._current_bundle_dir,
+                                         "frames.jsonl"))
+                    except OSError:
+                        LOGGER.exception("[record] failed to open frames.jsonl")
+
+                # Open the sparse event log alongside frames.jsonl. The
+                # offline renderer reads this to attribute followee
+                # transitions ("USER LOCKED ID 5" vs "REID re-acquire");
+                # all the wire-in sites (follow_server, openhd_bridge,
+                # reid_manager) call log_click / log_follow_change /
+                # log_reacquire as silent no-ops until this opens.
+                from robot_follow.follow_api.event_log import EventLog, log_record
+                try:
+                    EventLog.get().open(
+                        os.path.join(self._current_bundle_dir, "events.jsonl"))
+                    log_record("start", bundle=self._current_bundle_dir)
+                except OSError:
+                    LOGGER.exception("[record] failed to open events.jsonl")
+
+                # Open both valves under the lock so the two .mkv files
+                # start as close together as possible. Skew is bounded by
+                # the gap between the two property writes (sub-ms).
+                opened_any = False
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve is None:
+                        LOGGER.warning("[record] %s not found in pipeline",
+                                       valve_name)
+                        continue
+                    valve.set_property("drop", False)
+                    opened_any = True
+                if not opened_any:
+                    LOGGER.error("[record] no record valves found in pipeline")
+                    if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                        user_data.close_record_frame_log()
+                    return None
+
+                self._recording = True
+                LOGGER.info("[record] Recording started -> %s",
+                            self._current_bundle_dir)
+                return self._current_bundle_dir
+
+        def stop_recording(self):
+            """Close both record valves and emit ``split-now`` on both
+            splitmuxsinks so each ``.mkv`` is finalised. Also closes the
+            per-frame JSONL sink for the session. The next call to
+            :meth:`start_recording` produces a brand-new bundle directory.
+            """
+            with self._record_lock:
+                if not self._recording:
+                    return None
+
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve:
+                        valve.set_property("drop", True)
+
+                for sink_name in ("file_sink_clean", "file_sink_overlay"):
+                    file_sink = self.pipeline.get_by_name(sink_name)
+                    if file_sink is not None:
+                        try:
+                            file_sink.emit("split-now")
+                        except Exception:  # noqa: BLE001
+                            LOGGER.exception(
+                                "[record] split-now emission failed on %s",
+                                sink_name)
+
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                    user_data.close_record_frame_log()
+
+                # Bookend the event log and close it.
+                from robot_follow.follow_api.event_log import EventLog, log_record
+                log_record("stop", bundle=self._current_bundle_dir)
+                EventLog.get().close()
+
+                bundle = self._current_bundle_dir
+                self._recording = False
+                self._current_bundle_dir = None
+                self._current_clean_path = None
+                self._current_overlay_path = None
+                LOGGER.info("[record] Recording stopped, bundle finalised: %s", bundle)
+                return bundle
+
+        def cleanup_recording_branch(self):
+            """Send EOS to both recording sub-branches and walk them to
+            NULL so each ``splitmuxsink`` fragment finalises and the files
+            close cleanly on pipeline shutdown.
+            """
+            if not self._record_enabled:
+                return
+            Gst = _get_gst()
+            with self._record_lock:
+                # Send EOS into each valve so the encoder + muxer flush.
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve is not None:
+                        valve.set_property("drop", False)
+                        sink_pad = valve.get_static_pad("sink")
+                        if sink_pad is not None:
+                            sink_pad.send_event(Gst.Event.new_eos())
+                # Walk both record sub-branches down to NULL so the current
+                # splitmuxsink fragments (if any) finalise cleanly.
+                torn_down = False
+                for el_name in ("record_valve_clean", "record_valve_overlay",
+                                "file_sink_clean", "file_sink_overlay"):
+                    el = self.pipeline.get_by_name(el_name)
+                    if el is not None:
+                        el.set_state(Gst.State.NULL)
+                        torn_down = True
+                # Drop the per-frame JSONL sink alongside the GStreamer
+                # branch teardown so the file is flushed/closed even when
+                # an EOS-driven shutdown bypassed ``stop_recording``.
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                    user_data.close_record_frame_log()
+                # Same for events.jsonl — flushing on shutdown.
+                from robot_follow.follow_api.event_log import EventLog
+                EventLog.get().close()
+
+                if torn_down:
+                    last_bundle = self._current_bundle_dir
+                    if last_bundle:
+                        LOGGER.info("[record] Recording branch torn down "
+                                    "(last bundle: %s)", last_bundle)
+                    else:
+                        LOGGER.info("[record] Recording branch torn down "
+                                    "(no recording was active)")
+
+        def get_pipeline_string(self):
+            """Build the GStreamer pipeline string.
+
+            Source -> tile_cropper(detection) -> user_callback -> output stage.
+            The output stage is built by ``vision_branches.assemble_output_stage``;
+            see that module for the branch topology.
+            """
+            openhd = getattr(self.options_menu, 'openhd', False)
+            webui = self._ui_enabled
+            record = self._record_enabled
+            # ``args.display`` is authoritative here — the pre-parser in
+            # robot_follow_app.main() already applied the implicit-display
+            # rule via vision_branches.decide_branches() and wrote the
+            # resolved value back to options_menu.display.
+            display = getattr(self.options_menu, 'display', False)
+            is_shm = str(self.video_source).startswith('shm://')
+            is_udp = str(self.video_source).startswith('udp://')
+
+            # If nothing custom is requested and the source is standard,
+            # delegate to the upstream tiling app default pipeline.
+            if not display and not openhd and not webui and not record \
+                    and not is_shm and not is_udp:
+                return super().get_pipeline_string()
+
+            # ---- Source ----
+            if is_shm:
+                source_pipeline = _shm_source_pipeline(
+                    self.video_source, self.video_width, self.video_height,
+                    self.frame_rate,
+                )
+            elif is_udp:
+                source_pipeline = _udp_h264_source_pipeline(
+                    self.video_source, self.video_width, self.video_height,
+                    self.frame_rate,
+                )
+            else:
+                source_pipeline = SOURCE_PIPELINE(
+                    video_source=self.video_source,
+                    video_width=self.video_width,
+                    video_height=self.video_height,
+                    frame_rate=self.frame_rate,
+                    sync=self.sync,
+                )
+                # Pace file sources on PTS so playback runs at wall-clock.
+                source_pipeline += f" ! identity name=source_pacer sync={self.sync}"
+
+            # ---- Detection (tile cropper bypass on 1x1 identity case) ----
+            detection_pipeline = INFERENCE_PIPELINE(
+                hef_path=self.hef_path,
+                post_process_so=self.post_process_so,
+                post_function_name=self.post_function,
+                batch_size=self.batch_size,
+                config_json=self.labels_json,
+            )
+            skip_tiling = (
+                self.tiles_x == 1 and self.tiles_y == 1
+                and not self.use_multi_scale
+                and self.video_width == self.model_input_width
+                and self.video_height == self.model_input_height
+            )
+            if skip_tiling:
+                LOGGER.info(
+                    "Bypassing tile cropper: 1x1 tiles with frame "
+                    "(%dx%d) matching model input — direct inference",
+                    self.video_width, self.video_height,
+                )
+                infer_stage = detection_pipeline
+            else:
+                tiling_mode = 1 if self.use_multi_scale else 0
+                scale_level = self.scale_level if self.use_multi_scale else 0
+                infer_stage = TILE_CROPPER_PIPELINE(
+                    detection_pipeline,
+                    name='tile_cropper_wrapper',
+                    internal_offset=True,
+                    scale_level=scale_level,
+                    tiling_mode=tiling_mode,
+                    tiles_along_x_axis=self.tiles_x,
+                    tiles_along_y_axis=self.tiles_y,
+                    overlap_x_axis=self.overlap_x,
+                    overlap_y_axis=self.overlap_y,
+                    iou_threshold=self.iou_threshold,
+                    border_threshold=self.border_threshold,
+                )
+
+            # ---- Output stage (built in vision_branches.py) ----
+            record_output = None
+            if record:
+                # ``record_output`` here is only a splitmuxsink ``location``
+                # placeholder — the per-fragment paths are returned at
+                # runtime by ``_on_record_format_location_{clean,overlay}``,
+                # which route writes into a per-session bundle directory
+                # under ``self._record_dir``. The placeholder is never
+                # actually written to disk.
+                record_output = (
+                    getattr(self.options_menu, 'record_output', None)
+                    or os.path.join(self._record_dir, "placeholder.mkv")
+                )
+                self._initial_record_path = record_output
+
+            output_pipeline = assemble_output_stage(
+                display=display,
+                record=record,
+                openhd=openhd,
+                webui=webui,
+                openhd_port=getattr(self.options_menu, 'openhd_port', 5500),
+                openhd_bitrate_kbps=getattr(self.options_menu, 'openhd_bitrate', 3917),
+                ui_fps=self._ui_fps,
+                record_output=record_output,
+                record_bitrate_kbps=getattr(self.options_menu, 'record_bitrate', 5000),
+                video_sink=self.video_sink,
+                sync=self.sync,
+                show_fps=self.show_fps,
+                fakesink_sync=self.sync,
+            )
+            if record:
+                LOGGER.info("[record] Recording branch ready "
+                            "(bitrate %d kbps; click Record on the web UI / "
+                            "OpenHD to start a session bundle under %s — "
+                            "each session writes clean.mkv + overlay.mkv)",
+                            getattr(self.options_menu, 'record_bitrate', 5000),
+                            self._record_dir)
+
+            return ' ! '.join([source_pipeline, infer_stage,
+                               USER_CALLBACK_PIPELINE(), output_pipeline])
+
+    # RINT-03 (Phase 6 Plan 06-03): tracker init reads from controller_config.bytetracker_*.
+    # Legacy callers (controller_config=None) get ControllerConfig() defaults —
+    # byte-identical to the pre-Phase-6 hardcoded literals (0.4, 90, 0.5, 30).
+    from robot_follow.follow_api.config import ControllerConfig as _CC
+    _cfg = controller_config if controller_config is not None else _CC()
+    _tracker_name = tracker_name or "byte"
+    _t0 = time.monotonic()
+    _inner_tracker = create_tracker(
+        _tracker_name,
+        track_thresh=_cfg.bytetracker_track_thresh,
+        track_buffer=_cfg.bytetracker_track_buffer,
+        match_thresh=_cfg.bytetracker_match_thresh,
+        frame_rate=_cfg.bytetracker_frame_rate,
+    )
+    _init_ms = (time.monotonic() - _t0) * 1000.0
+    tracker = MetricsTracker(_inner_tracker, init_time_ms=_init_ms)
+    LOGGER.info("[tracking] %s tracker (init %.1fms) running synchronously in callback",
+                _tracker_name, _init_ms)
+
+    user_data = DroneFollowUserData(
+        shared_state, target_state, ui_state=ui_state, tracker=tracker,
+        reid_manager=reid_manager, reid_search_timeout=reid_search_timeout,
+        log_perf=log_perf,
+    )
+    # ui_enabled means "build the MJPEG/web-UI branch" — pre-parse the
+    # parser so we read the actual --webui flag instead of just whether
+    # ui_state was created (it always is, since the OpenHD bridge needs
+    # SharedUIState even when --webui isn't passed).
+    _webui_enabled = False
+    if parser is not None:
+        try:
+            _pre_args, _ = parser.parse_known_args()
+            _webui_enabled = getattr(_pre_args, 'webui', False)
+        except SystemExit:
+            pass
+    app = DroneFollowTilingApp(
+        app_callback, user_data, parser=parser, eos_reached=eos_reached,
+        ui_enabled=_webui_enabled, ui_state=ui_state, ui_fps=ui_fps,
+        record_enabled=record_enabled, record_dir=record_dir,
+    )
+    # Store video dimensions on user_data so the callback can extract
+    # frames for ReID cropping without needing a reference to the app.
+    user_data.video_width = app.video_width
+    user_data.video_height = app.video_height
+    return app

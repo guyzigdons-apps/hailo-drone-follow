@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# drone-follow standalone installer.
+# robot-follow standalone installer.
 #
 # Bootstraps hailo-apps-infra as a git submodule at ./hailo-apps, runs the
 # parent installer to lay down the venv + system bits, then installs the
-# drone-follow Python package editable into that venv, downloads ReID HEFs,
+# robot-follow Python package editable into that venv, downloads ReID HEFs,
 # and builds the React UI.
+#
+# Legacy note: the `drone-follow` console-script alias is preserved permanently
+# (see pyproject.toml [project.scripts]) so the boot service unit, the
+# ~/Desktop/drone-follow.conf file, and existing deployed units keep working
+# unchanged. `pip uninstall drone-follow -y` runs below to clear stale metadata
+# from the legacy `drone-follow` distribution name on already-deployed units.
 #
 # Idempotent: re-running picks up missing steps and skips ones already done.
 #
@@ -17,18 +23,19 @@
 #   --skip-python      skip pip install -e .
 #   --skip-hefs        skip ReID HEF downloads
 #   --skip-ui          skip npm install + UI build
+#   --rover            install ROS 2 Humble + Gazebo Garden apt deps (rover sim)
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APPS_DIR="$SCRIPT_DIR/hailo-apps"
-RESOURCES_HEF_DIR="/usr/local/hailo/resources/models/hailo8"
-
+# --- Parse flags first (before SCRIPT_DIR setup, so rover-only invocations
+# --- via stripped PATH can short-circuit to the Step-6 preflights without
+# --- tripping over dirname / cd on PATH=/tmp test paths).
 SKIP_SUBMODULE=false
 SKIP_APPS=false
 SKIP_PYTHON=false
 SKIP_HEFS=false
 SKIP_UI=false
+ROVER_DEPS=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-submodule) SKIP_SUBMODULE=true; shift ;;
@@ -36,13 +43,112 @@ while [[ $# -gt 0 ]]; do
     --skip-python)    SKIP_PYTHON=true; shift ;;
     --skip-hefs)      SKIP_HEFS=true; shift ;;
     --skip-ui)        SKIP_UI=true; shift ;;
+    --rover)          ROVER_DEPS=true; shift ;;
     -h|--help)
-      sed -n '2,16p' "$0"
+      sed -n '2,26p' "$0"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
   esac
 done
+
+# --- Step 6: Rover sim apt deps (only if --rover passed) ---------------------
+# RSIM-05: install ros-humble-ros-base, ros-humble-geometry-msgs, and the
+# Garden-suffixed ros-gz bridge (ros-humble-ros-gzgarden-bridge).  The
+# no-suffix form is the Fortress binding and must NOT be used here
+# (PITFALLS Pitfall 5).  See sim/rover/README.md for the Harmonic-migration
+# recipe.
+#
+# Placed BEFORE the hailo-apps SCRIPT_DIR setup so that a rover-only
+# invocation (--rover plus all five --skip-* flags) runs through Step-6
+# preflights without needing the hailo-apps submodule context.  When --rover
+# is NOT passed (default), this block is skipped silently and the existing
+# 5-step flow runs unchanged.
+if $ROVER_DEPS; then
+  echo "==> [6/6] Installing ROS 2 Humble + Gazebo Garden bridge (rover sim)"
+
+  # Preflight 1: apt-get must exist (Ubuntu/Debian only).
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "ERROR: --rover requires apt-get (Ubuntu/Debian only)." >&2
+    echo "       This rover-sim install path is sim-only and Linux-only;" >&2
+    echo "       see sim/rover/README.md for the Harmonic-migration note." >&2
+    exit 6
+  fi
+
+  # Preflight 2: ROS 2 Humble apt repo (packages.ros.org) must be configured —
+  # source of ros-humble-ros-base + ros-humble-geometry-msgs.
+  if ! apt-cache show ros-humble-ros-base >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+    echo "ERROR: ros-humble-ros-base not visible to apt-cache." >&2
+    echo "       Add the ROS 2 Humble apt repo first:" >&2
+    echo >&2
+    echo "         sudo apt install -y software-properties-common curl" >&2
+    echo "         sudo add-apt-repository universe -y" >&2
+    echo "         sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \\" >&2
+    echo "              -o /usr/share/keyrings/ros-archive-keyring.gpg" >&2
+    echo "         echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \\" >&2
+    echo "               http://packages.ros.org/ros2/ubuntu ${UBUNTU_CODENAME} main\" \\" >&2
+    echo "              | sudo tee /etc/apt/sources.list.d/ros2.list" >&2
+    echo "         sudo apt update" >&2
+    echo >&2
+    echo "       Full guide: https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debians.html" >&2
+    exit 7
+  fi
+
+  # Preflight 3: osrfoundation apt repo must be configured — source of
+  # ros-humble-ros-gzgarden-bridge (NOT packages.ros.org).
+  if ! apt-cache show ros-humble-ros-gzgarden-bridge >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+    echo "ERROR: ros-humble-ros-gzgarden-bridge not visible to apt-cache." >&2
+    echo "       Add the osrfoundation apt repo first:" >&2
+    echo >&2
+    echo "         sudo curl -sSL https://packages.osrfoundation.org/gazebo.gpg \\" >&2
+    echo "              -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg" >&2
+    echo "         echo \"deb [signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] \\" >&2
+    echo "               http://packages.osrfoundation.org/gazebo/ubuntu-stable \\" >&2
+    echo "               ${UBUNTU_CODENAME} main\" \\" >&2
+    echo "              | sudo tee /etc/apt/sources.list.d/gazebo-stable.list" >&2
+    echo "         sudo apt update" >&2
+    echo >&2
+    echo "       If your machine already runs Gazebo Harmonic instead of Garden," >&2
+    echo "       see sim/rover/README.md \"Migration to Harmonic\" for the" >&2
+    echo "       s/gzgarden/gzharmonic/ apt-name substitution." >&2
+    exit 8
+  fi
+
+  # Apt install.  Pin exact package names — RSIM-05 + PITFALLS Pitfall 5:
+  # the no-suffix gz-bridge form is the Fortress binding and breaks
+  # DiffDrive silently on Garden.
+  sudo apt-get install -y \
+       ros-humble-ros-base \
+       ros-humble-geometry-msgs \
+       ros-humble-ros-gzgarden-bridge \
+       gz-garden
+
+  # Post-install sanity: gz CLI must end up on PATH.
+  if ! command -v gz >/dev/null 2>&1; then
+    echo "ERROR: 'gz' CLI not found after apt install -- check apt logs." >&2
+    echo "       Re-run with: sudo apt-get install -y gz-garden" >&2
+    exit 9
+  fi
+
+  echo "==> Rover sim deps installed.  See sim/rover/README.md to launch."
+
+  # Rover-only mode: when all five hailo --skip-* flags are also set, exit
+  # cleanly so a contributor on a non-hailo box (rover-sim-only dev) doesn't
+  # trip over the hailo-apps submodule / venv assertions below.
+  if $SKIP_SUBMODULE && $SKIP_APPS && $SKIP_PYTHON && $SKIP_HEFS && $SKIP_UI; then
+    echo
+    echo "==> Rover-only install complete.  See sim/rover/README.md to launch."
+    exit 0
+  fi
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APPS_DIR="$SCRIPT_DIR/hailo-apps"
+RESOURCES_HEF_DIR="/usr/local/hailo/resources/models/hailo8"
 
 # --- Step 1: Init/update the hailo-apps submodule ----------------------------
 if ! $SKIP_SUBMODULE; then
@@ -85,6 +191,13 @@ python -c "import hailo_apps" >/dev/null 2>&1 || {
 }
 
 if ! $SKIP_PYTHON; then
+  # Idempotent: remove any prior installation of the legacy 'drone-follow'
+  # distribution so pip metadata + the old `drone-follow` console-script shim
+  # don't linger after the v1.1 rename. No-op on fresh installs. Runs as the
+  # invoking user (we're inside the activated venv from above).
+  echo "==> Removing any prior 'drone-follow' distribution (legacy name)"
+  pip uninstall drone-follow -y >/dev/null 2>&1 || true
+
   echo "==> [3/5] pip install -e $SCRIPT_DIR"
   pip install --upgrade pip
   pip install -e "$SCRIPT_DIR"
@@ -117,7 +230,7 @@ fi
 if ! $SKIP_UI; then
   echo "==> [5/5] React UI"
   if command -v npm >/dev/null 2>&1; then
-    pushd "$SCRIPT_DIR/drone_follow/ui" >/dev/null
+    pushd "$SCRIPT_DIR/robot_follow/ui" >/dev/null
     if [[ ! -f build/index.html ]] || [[ src/App.jsx -nt build/index.html ]]; then
       npm install
       npm run build
@@ -131,6 +244,6 @@ if ! $SKIP_UI; then
 fi
 
 echo
-echo "==> drone-follow install done. Next:"
+echo "==> robot-follow install done. Next:"
 echo "    source setup_env.sh"
-echo "    drone-follow --help"
+echo "    robot-follow --help    # 'drone-follow --help' (alias) also works"

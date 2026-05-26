@@ -35,3 +35,21 @@ cd "$APPS_DIR" || { echo "ERROR: cannot cd to $APPS_DIR" >&2; return 1 2>/dev/nu
 source "$APPS_DIR/setup_env.sh"
 cd "$_DF_ORIG_PWD" || true
 unset _DF_ORIG_PWD
+
+# Conditionally source ROS 2 Humble after the venv is active.
+#
+# Rationale (CONTEXT 03-abstraction § setup_env.sh ROS sourcing,
+# PITFALLS.md Pitfall 2):
+# - Venv-first sourcing keeps the hailo-apps venv's site-packages ahead
+#   of /opt/ros/humble/lib/python3.10/site-packages on sys.path, so any
+#   pure-Python shim in the venv that shadows an rclpy submodule does NOT
+#   hide rclpy's _rclpy_pybind11 .so.
+# - Idempotent: drone-only users on a non-ROS box see no change; rover
+#   users get ROS for free; drone users on a ROS-equipped box source ROS
+#   but the drone path is unaffected (ROS env vars don't conflict with
+#   the venv's Python or MAVSDK).
+# - Single file check (no `command -v ros2` — chicken-and-egg before sourcing).
+if [ -f /opt/ros/humble/setup.bash ]; then
+    # shellcheck disable=SC1091
+    source /opt/ros/humble/setup.bash
+fi

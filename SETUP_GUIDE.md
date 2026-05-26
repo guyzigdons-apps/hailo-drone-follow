@@ -28,7 +28,7 @@ Both: Raspberry Pi OS Bookworm 64-bit.
 | [hailo-drone-follow](git@github.com:guyzigdons-apps/hailo-drone-follow.git) | `feature/openhd-integration-new` | Air |
 
 > **Clone layout:** The OpenHD/QOpenHD repos are cloned **inside the
-> drone-follow repo root** (alongside `scripts/`, `drone_follow/`, etc.) — not
+> drone-follow repo root** (alongside `scripts/`, `robot_follow/`, etc.) — not
 > in `$HOME`. They're listed in `.gitignore`. `scripts/install_ground_station.sh`
 > handles cloning automatically.
 
@@ -408,7 +408,7 @@ OpenHD which treats it as an external video source.
 
 **Manual command** (or just `scripts/start_air.sh`):
 ```bash
-drone-follow --input rpi --openhd --horizontal-mirror \
+robot-follow --input rpi --openhd --horizontal-mirror \
     --connection tcpout://127.0.0.1:5760
 ```
 > **Note:** `--horizontal-mirror` is only for selfie mode (front-facing camera).
@@ -428,7 +428,7 @@ drone-follow reads from SHM and performs AI inference only (no encoding).
 
 **Manual command** (or `scripts/start_air.sh --mode shm`):
 ```bash
-drone-follow --input shm:///tmp/openhd_raw_video \
+robot-follow --input shm:///tmp/openhd_raw_video \
     --connection tcpout://127.0.0.1:5760
 ```
 
@@ -466,12 +466,12 @@ Manual invocation:
 # Layout 2: source ~/hailo-apps-internal/setup_env.sh
 
 # Mode A (Camera Type 5):
-drone-follow --input rpi --openhd --horizontal-mirror \
+robot-follow --input rpi --openhd --horizontal-mirror \
     --connection tcpout://127.0.0.1:5760 \
     --tiles-x 1 --tiles-y 1
 
 # Mode B (SHM):
-drone-follow --input shm:///tmp/openhd_raw_video \
+robot-follow --input shm:///tmp/openhd_raw_video \
     --connection tcpout://127.0.0.1:5760 \
     --tiles-x 1 --tiles-y 1
 ```
@@ -523,11 +523,11 @@ For archival captures, prefer **air-side** — it's higher quality and link-inde
 
 ### Air-side recording
 
-Add `--record` to either Mode A or Mode B startup. The video is encoded by an ffmpeg subprocess (libx264, ultrafast preset, 5 Mbps) writing to `~/hailo-drone-follow/drone_follow/recordings/rec_<timestamp>.mp4`. Recording auto-starts ~1 s after the GStreamer pipeline reaches PLAYING; it can also be toggled at any time from the web UI's Record button (with `--webui`). On Ctrl-C / EOS / shutdown the file is finalised cleanly.
+Add `--record` to either Mode A or Mode B startup. The video is encoded by an ffmpeg subprocess (libx264, ultrafast preset, 5 Mbps) writing to `~/hailo-drone-follow/robot_follow/recordings/rec_<timestamp>.mp4`. Recording auto-starts ~1 s after the GStreamer pipeline reaches PLAYING; it can also be toggled at any time from the web UI's Record button (with `--webui`). On Ctrl-C / EOS / shutdown the file is finalised cleanly.
 
 ```bash
 # Mode A + air-side recording:
-drone-follow --input rpi --openhd --record \
+robot-follow --input rpi --openhd --record \
     --connection tcpout://127.0.0.1:5760 \
     --tiles-x 1 --tiles-y 1
 ```

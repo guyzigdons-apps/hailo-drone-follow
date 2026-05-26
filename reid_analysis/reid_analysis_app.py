@@ -2,7 +2,7 @@
 """
 ReID Video Analysis App
 =======================
-Uses GStreamerTilingApp (same as drone_follow) for person detection with
+Uses GStreamerTilingApp (same as robot_follow) for person detection with
 Hailo NPU tiling pipeline. Extracts ReID embeddings, matches against a
 gallery using pluggable strategies, and logs every match decision for
 offline evaluation.
