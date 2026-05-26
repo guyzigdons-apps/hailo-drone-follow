@@ -274,7 +274,81 @@ real detections are inevitably lost.
 | **Offline GT analysis** | `analyze_pxt.py --containment-merge` | 100% recall (audit verified, 0 false suppressions on 14 inspected pairs), perfect cleanup. The strip is too aggressive for ground-truth where every real detection matters. |
 | **Realtime drone-follow pipeline** | C++ strip at `border-threshold=0.005`, dense grid tagged `,m`, rescue tiles `,s` | Runs in the aggregator (no Python post-processing pad probe needed). Kills phantoms + fragments at acceptable recall cost. The tracker (ByteTrack + ReID) interpolates across the occasional lost frame. |
 
-### 8.7 Implementation files
+### 8.7 Best-GT recipe (use this when you need the canonical ground truth)
+
+Generate the cleanest possible GT for `DJI_20260430103421_0010_D_rotated.MP4`:
+
+```bash
+source setup_env.sh
+# 1. Raw GT with strip OFF (passing --border-threshold 0 auto-drops the dense-grid 'm' tag).
+python tiling_benchmark/run_pxt_bench.py \
+    --out-dir tiling_benchmark/pxt_runs_clean \
+    --only GT-12x9-25-multi \
+    --skip-analyze \
+    --border-threshold 0
+# 2. Apply Python phantom filter + containment-merge.
+python tiling_benchmark/clean_frames.py \
+    --input  tiling_benchmark/pxt_runs_clean/pxt_GT-12x9-25-multi.frames.json \
+    --containment-merge \
+    --output tiling_benchmark/pxt_runs_clean/pxt_GT-12x9-25-multi.clean.frames.json
+```
+
+Output (1036 frames, 35 s of footage):
+
+| stage | dets | delta |
+|---|---:|---:|
+| raw aggregator output | 6 900 | — |
+| after phantom filter (`is_phantom`, tile-shape match) | 6 717 | −183 (2.7 %) |
+| after containment-merge (`area_small < 0.5·area_big`, centre inside) | 6 346 | −371 (5.5 %) |
+
+Visual audit across the 10 hardest containment-merge-drop frames (882, 979, 853, 855, 859, 861, 881, 883, 884, 886) — **zero false suppressions across 36 inspected drops**. All suppressed dets are either yolov8n class-0 phantoms on empty terrain or geometric fragment-vs-whole pairs. Audit PNGs available at `tiling_benchmark/pxt_runs_clean/audit_zoom/<frame>_zoom.png` (raw / clean side-by-side, ~1100×550 zoom on the action area).
+
+### 8.8 `tiling_bench.py` auto-disables dense-grid strip on `--border-threshold 0`
+
+When `--border-threshold 0` is passed, `tiling_bench.py` now also drops the
+`,m` tag on the dense grid (sets `grid_tile_mode=""`). Without this, the
+aggregator would still run `remove_exceeded_bboxes` for any tile tagged
+multi-scale because `DYNAMIC_TILE_CROPPER_PIPELINE` only emits
+`border-threshold=…` for truthy values — a zero value would silently fall
+back to the aggregator's built-in 0.1 default. Auto-disabling on 0
+preserves the user's intent ("strip off, clean in Python").
+
+### 8.9 Future work — dynamic tracker tile
+
+The current GT uses a static 12×9 dense grid + extras. For the realtime
+drone-follow runtime we have richer per-frame context that the GT pipeline
+ignores: the tracker's current target position (and bbox), plus any weak
+detections from previous frames. A natural production-grade extension is
+to add **one extra tile per frame, centred on the current target**:
+
+- **Source**: the most-recent confirmed ByteTrack track for the locked
+  target (`hailo_drone_detection_manager`), or — when there's no lock — the
+  highest-confidence person/vehicle from the previous frame as a "weak
+  hint".
+- **Tile geometry**: a square (or aspect-matched) crop ~2× the target's
+  bbox size, clamped to frame extents. Roughly the size of one 12×9 tile
+  but positioned exactly on the object.
+- **Wiring**: emit it as a HailoTileROI from a Python pad probe upstream of
+  `hailotilecropper_dynamic`. The cropper already accepts dynamic tiles
+  alongside `tiles-static` (it's why we use the `_dynamic` variant). Tag
+  the tracker tile `,s` so the aggregator's boundary-strip leaves it
+  alone — it's a rescue tile, not a fragment-producing one.
+- **Win for inference budget**: replace ~half the dense grid (e.g. drop
+  12×9 → 4×3 native + tracker tile) so each frame runs 13 tiles instead
+  of 108. ~8× fewer chip inferences per frame.
+- **Win for accuracy**: the tracker tile is sized to the actual object,
+  so the model sees the target at near-1:1 pixel density even when the
+  drone-camera distance changes mid-flight. Combined with the
+  containment-merge filter, fragment artefacts disappear because there's
+  one canonical "best view" of the target every frame.
+- **Risk**: when the tracker drifts or is lost, the tracker tile lands on
+  the wrong region. The ReID gallery + raw-detection fallback already in
+  `reid_manager.py` mitigates this (existing code path).
+
+**Not to be implemented in the current iteration** — this is a follow-up
+once the GT pipeline is settled and we move to dynamic-tiling experiments.
+
+### 8.10 Implementation files
 
 - `hailo-apps/hailo_apps/postprocess/cpp/hailotilecropper_dynamic/gsthailotilecropper_dynamic.{cpp,hpp}` — new `tiling-mode` property + per-tile 5th field in `tiles-static`.
 - `hailo-apps/hailo_apps/postprocess/cpp/hailotilecropper_dynamic/tests/e2e/test_e2e_tiling_mode.py` — 8 tests including HailoTileROI metadata propagation check.

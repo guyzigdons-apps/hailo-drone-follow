@@ -419,6 +419,15 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
             # via per-tile mode tagging on tiles-static, so the aggregator's
             # boundary-strip filter is wanted. Read the parser value directly.
             border_threshold_for_agg = self.options_menu.border_threshold
+            # When border-threshold is 0, the user is opting OUT of the
+            # in-aggregator boundary-strip (typical for "best GT" runs that
+            # rely on Python cleaners — phantom filter + containment-merge —
+            # downstream). Drop the per-tile 'm' tag on the dense grid so the
+            # aggregator never runs remove_exceeded_bboxes; otherwise the
+            # aggregator falls back to its default 0.1 threshold because
+            # DYNAMIC_TILE_CROPPER_PIPELINE only emits border-threshold=...
+            # for truthy values.
+            grid_tile_mode = "m" if border_threshold_for_agg > 0 else ""
             tile_cropper_pipeline = DYNAMIC_TILE_CROPPER_PIPELINE(
                 detection_pipeline,
                 name="tile_cropper_wrapper",
@@ -430,11 +439,11 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                 tiles_y=tiles_y,
                 overlap_x=overlap_x,
                 overlap_y=overlap_y,
-                # Dense grid tagged 'm' so the aggregator's boundary-strip
-                # filter (border-threshold) removes fragments + class-0 phantoms.
-                # Extras already carry per-tile mode overrides (see above).
+                # Dense grid tagged 'm' (when border-strip is enabled) so the
+                # aggregator's boundary-strip removes fragments + class-0
+                # phantoms. Extras already carry per-tile mode overrides.
                 tiling_mode="single-scale",
-                grid_tile_mode="m",
+                grid_tile_mode=grid_tile_mode,
             )
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()

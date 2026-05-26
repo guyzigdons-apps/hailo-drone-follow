@@ -38,3 +38,5 @@ gstshark_*/
 
 # Tiling benchmark run outputs + preview cache
 tiling_benchmark/pxt_runs/
+tiling_benchmark/pxt_runs_clean/
+tiling_benchmark/pxt_runs_yolov8m/
