@@ -49,12 +49,19 @@ import socket
 import struct
 import sys
 
+from robot_follow.follow_api.follow_mode import FollowMode
+
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 5511          # drone-follow openhd_bridge sends JSON here
 QOPENHD_HOST = "127.0.0.1"
 QOPENHD_PORT = 5520         # QOpenHD HailoDetectionModel listens here
 
-MODE_BYTE = {"AUTO": 0, "LOCKED": 1, "SEARCH": 2, "IDLE": 3}
+# Per-bbox packer — used inside the encode_v4 hot loop. Defining the
+# ``Struct`` once and reusing ``.pack_into`` skips the format-string
+# parse on every bbox AND gives us a ``.size`` constant so the manual
+# ``off += 11`` magic number disappears.
+_BBOX_STRUCT = struct.Struct("<HHHHHB")
+assert _BBOX_STRUCT.size == 11, "bbox layout drifted from OpenHD v4 wire format"
 
 
 def _norm_u16(v: float) -> int:
@@ -63,8 +70,13 @@ def _norm_u16(v: float) -> int:
     return max(0, min(65535, iv))
 
 
-def encode_v4(report: dict) -> bytes:
-    """Build the v4 binary detection payload from a drone-follow JSON report."""
+def encode_v4(report: dict) -> bytearray:
+    """Build the v4 binary detection payload from a drone-follow JSON report.
+
+    Returns a ``bytearray`` (which is itself ``bytes``-like, so callers
+    can pass it to ``socket.sendto`` directly — no defensive ``bytes()``
+    copy needed).
+    """
     bboxes = report.get("bboxes") or []
     active_id = int(report.get("active_id") or 0)
     # follow_id sits inside the params block (DF_FOLLOW_ID maps to "follow_id").
@@ -74,10 +86,10 @@ def encode_v4(report: dict) -> bytes:
         follow_id = int(follow_id_raw)
     except (TypeError, ValueError):
         follow_id = 0
-    mode_byte = MODE_BYTE.get(report.get("mode", "AUTO"), 0)
+    mode_byte = FollowMode.from_str(report.get("mode")).byte
 
     count = min(len(bboxes), 126)
-    out = bytearray(7 + count * 11)
+    out = bytearray(7 + count * _BBOX_STRUCT.size)
     out[0] = 4
     struct.pack_into("<HhBB", out, 1,
                      active_id & 0xFFFF,
@@ -87,15 +99,15 @@ def encode_v4(report: dict) -> bytes:
     off = 7
     for i in range(count):
         b = bboxes[i]
-        struct.pack_into("<HHHHHB", out, off,
-                         int(b.get("id", 0)) & 0xFFFF,
-                         _norm_u16(float(b.get("cx", 0.0))),
-                         _norm_u16(float(b.get("cy", 0.0))),
-                         _norm_u16(float(b.get("w", 0.0))),
-                         _norm_u16(float(b.get("h", 0.0))),
-                         0x01 if b.get("tracked") else 0x00)
-        off += 11
-    return bytes(out)
+        _BBOX_STRUCT.pack_into(out, off,
+                               int(b.get("id", 0)) & 0xFFFF,
+                               _norm_u16(float(b.get("cx", 0.0))),
+                               _norm_u16(float(b.get("cy", 0.0))),
+                               _norm_u16(float(b.get("w", 0.0))),
+                               _norm_u16(float(b.get("h", 0.0))),
+                               0x01 if b.get("tracked") else 0x00)
+        off += _BBOX_STRUCT.size
+    return out
 
 
 def main() -> int:

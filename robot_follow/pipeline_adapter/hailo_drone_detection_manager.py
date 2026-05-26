@@ -16,7 +16,12 @@ from typing import Optional
 import hailo
 import numpy as np
 
-from robot_follow.follow_api.event_log import log_follow_change
+from robot_follow.follow_api.event_log import (
+    EventLog,
+    FollowCause,
+    log_follow_change,
+    log_record,
+)
 from robot_follow.follow_api.types import Detection
 from robot_follow.perf_tracker import PerfTracker
 
@@ -322,7 +327,7 @@ def _app_callback_inner(element, buffer, user_data):
                                 "auto mode" if auto_select else "IDLE (auto-select off)")
                     prev_target = target_state.get_target()
                     target_state.enter_auto_mode()
-                    log_follow_change(prev_target, None, cause="TIMEOUT")
+                    log_follow_change(prev_target, None, cause=FollowCause.TIMEOUT)
                     reid_mgr.clear()
                     if not auto_select:
                         target_state.set_paused(True)
@@ -332,7 +337,7 @@ def _app_callback_inner(element, buffer, user_data):
             else:
                 prev_target = target_state.get_target()
                 target_state.enter_auto_mode()
-                log_follow_change(prev_target, None, cause="AUTO")
+                log_follow_change(prev_target, None, cause=FollowCause.AUTO)
                 if not auto_select:
                     target_state.set_paused(True)
                     LOGGER.info("[IDLE] Target lost (no persons) — auto-select off, holding position")
@@ -400,7 +405,7 @@ def _app_callback_inner(element, buffer, user_data):
                                 # ReID found the right one — switch tracks.
                                 prev_target = target_id
                                 target_state.set_target(new_tid)
-                                log_follow_change(prev_target, new_tid, cause="REID-DRIFT")
+                                log_follow_change(prev_target, new_tid, cause=FollowCause.REID_DRIFT)
                                 reid_manager.on_reidentified(new_tid)
                                 best = person_by_id.get(new_tid, best)
                                 target_id = new_tid
@@ -433,7 +438,7 @@ def _app_callback_inner(element, buffer, user_data):
                                 "auto mode" if auto_select else "IDLE (auto-select off)")
                     prev_target = target_state.get_target()
                     target_state.enter_auto_mode()
-                    log_follow_change(prev_target, None, cause="TIMEOUT")
+                    log_follow_change(prev_target, None, cause=FollowCause.TIMEOUT)
                     reid_manager.clear()
                     if not auto_select:
                         target_state.set_paused(True)
@@ -450,7 +455,7 @@ def _app_callback_inner(element, buffer, user_data):
                                 # Re-identified — resume following with the new track ID
                                 prev_target = target_state.get_target()
                                 target_state.set_target(new_tid)
-                                log_follow_change(prev_target, new_tid, cause="REID")
+                                log_follow_change(prev_target, new_tid, cause=FollowCause.REID)
                                 reid_manager.on_reidentified(new_tid)
                                 best = person_by_id[new_tid]
                                 target_state.update_last_seen()
@@ -487,7 +492,7 @@ def _app_callback_inner(element, buffer, user_data):
                     display_id = reid_manager.original_id
                 prev_target = target_id
                 target_state.enter_auto_mode()
-                log_follow_change(prev_target, None, cause="AUTO")
+                log_follow_change(prev_target, None, cause=FollowCause.AUTO)
                 if not auto_select:
                     target_state.set_paused(True)
                     LOGGER.info("[IDLE] Target ID %s lost — auto-select off, holding position. Available: %s",
@@ -521,7 +526,7 @@ def _app_callback_inner(element, buffer, user_data):
         biggest_id, biggest_person = _find_biggest_person(person_by_id)
         if biggest_id is not None:
             target_state.set_target(biggest_id)
-            log_follow_change(None, biggest_id, cause="AUTO")
+            log_follow_change(None, biggest_id, cause=FollowCause.AUTO)
             # Match manual-selection state: AUTO acquisition is treated as an explicit lock
             # so OpenHD reports the real follow_id and the state machine is symmetric.
             target_state.set_explicit_lock(True)
@@ -1300,7 +1305,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 # all the wire-in sites (follow_server, openhd_bridge,
                 # reid_manager) call log_click / log_follow_change /
                 # log_reacquire as silent no-ops until this opens.
-                from robot_follow.follow_api.event_log import EventLog, log_record
                 try:
                     EventLog.get().open(
                         os.path.join(self._current_bundle_dir, "events.jsonl"))
@@ -1361,7 +1365,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     user_data.close_record_frame_log()
 
                 # Bookend the event log and close it.
-                from robot_follow.follow_api.event_log import EventLog, log_record
                 log_record("stop", bundle=self._current_bundle_dir)
                 EventLog.get().close()
 
@@ -1406,7 +1409,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 if user_data is not None and hasattr(user_data, "close_record_frame_log"):
                     user_data.close_record_frame_log()
                 # Same for events.jsonl — flushing on shutdown.
-                from robot_follow.follow_api.event_log import EventLog
                 EventLog.get().close()
 
                 if torn_down:

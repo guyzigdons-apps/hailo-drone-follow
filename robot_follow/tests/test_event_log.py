@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 
 from robot_follow.follow_api.event_log import (
-    EventLog, log_click, log_follow_change, log_reacquire, log_record,
+    EVENT_LOG_SCHEMA,
+    EventKind,
+    EventLog,
+    FollowCause,
+    log_click,
+    log_follow_change,
+    log_reacquire,
+    log_record,
 )
 
 
@@ -114,3 +121,108 @@ def test_reopen_truncates(tmp_path):
     rows = _read_rows(path)
     assert len(rows) == 1
     assert rows[0]["action"] == "stop"
+
+
+# --- Enum / schema / context-manager (Sagigamil review feedback) ------------
+
+def test_event_kind_enum_values():
+    """EventKind values are the wire strings; (str, Enum) lets enum
+    instances compare equal to the raw string."""
+    assert EventKind.CLICK == "click"
+    assert EventKind.FOLLOW_CHANGE == "follow_change"
+    assert EventKind.REACQUIRE == "reacquire"
+    assert EventKind.RECORD == "record"
+
+
+def test_follow_cause_enum_values():
+    assert FollowCause.USER == "USER"
+    assert FollowCause.CLEAR == "CLEAR"
+    assert FollowCause.REID == "REID"
+    assert FollowCause.REID_DRIFT == "REID-DRIFT"
+    assert FollowCause.AUTO == "AUTO"
+    assert FollowCause.TIMEOUT == "TIMEOUT"
+
+
+def test_log_follow_change_accepts_enum_or_string(tmp_path):
+    """Convenience wrapper takes FollowCause enum or raw string; both
+    serialise to the same string in the JSONL."""
+    path = tmp_path / "events.jsonl"
+    EventLog.get().open(str(path))
+    log_follow_change(None, 5, cause=FollowCause.USER)
+    log_follow_change(5, None, cause="CLEAR")  # legacy string path
+    rows = _read_rows(path)
+    assert rows[0]["cause"] == "USER"
+    assert rows[1]["cause"] == "CLEAR"
+
+
+def test_emit_accepts_enum_kind(tmp_path):
+    """emit() can be called with EventKind directly (no .value needed)."""
+    path = tmp_path / "events.jsonl"
+    EventLog.get().open(str(path))
+    EventLog.get().emit(EventKind.CLICK, source="webui", id=42)
+    rows = _read_rows(path)
+    assert rows[0]["kind"] == "click"
+    assert rows[0]["source"] == "webui"
+    assert rows[0]["id"] == 42
+
+
+def test_context_manager_closes_on_exit(tmp_path):
+    """`with EventLog.get().session(path)` opens AND auto-closes."""
+    path = tmp_path / "events.jsonl"
+    log = EventLog.get()
+    assert not log.is_open
+    with log.session(str(path)):
+        assert log.is_open
+        log_record("start")
+    assert not log.is_open  # exited cleanly
+    rows = _read_rows(path)
+    assert rows[0]["action"] == "start"
+
+
+def test_context_manager_closes_on_exception(tmp_path):
+    """Exception inside the with-block still closes the log."""
+    path = tmp_path / "events.jsonl"
+    log = EventLog.get()
+    with pytest.raises(RuntimeError):
+        with log.session(str(path)):
+            log_record("start")
+            raise RuntimeError("boom")
+    assert not log.is_open
+
+
+def test_iter_rows_parses_back_what_was_written(tmp_path):
+    path = tmp_path / "events.jsonl"
+    EventLog.get().open(str(path))
+    log_click(source="webui", det_id=5)
+    log_follow_change(None, 5, cause=FollowCause.USER)
+    log_record("stop")
+    EventLog.get().close()
+
+    rows = list(EventLog.iter_rows(str(path)))
+    assert [r["kind"] for r in rows] == ["click", "follow_change", "record"]
+
+
+def test_iter_rows_skips_malformed_lines(tmp_path):
+    """A corrupt line in the middle of a long log shouldn't kill the
+    reader — flight reviews need to be resilient."""
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        '{"t": 1.0, "kind": "record", "action": "start"}\n'
+        'this is not json\n'
+        '{"t": 2.0, "kind": "record", "action": "stop"}\n'
+    )
+    rows = list(EventLog.iter_rows(str(path)))
+    assert len(rows) == 2
+    assert rows[0]["action"] == "start"
+    assert rows[1]["action"] == "stop"
+
+
+def test_schema_shape():
+    """Sanity-check the schema declares each EventKind in its oneOf
+    branches — adding a new EventKind without updating the schema would
+    be a silent contract drift."""
+    branch_kinds = {
+        b["properties"]["kind"]["const"]
+        for b in EVENT_LOG_SCHEMA["oneOf"]
+    }
+    assert branch_kinds == {k.value for k in EventKind}

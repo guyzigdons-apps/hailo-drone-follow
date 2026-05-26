@@ -42,6 +42,8 @@ from typing import Optional, Tuple
 
 import hailo
 
+from robot_follow.follow_api.follow_mode import FollowMode
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -545,7 +547,7 @@ def highlight_target(pad, info, target_state, cross_state=None):
                 is_locked = bool(target_state.is_explicit_lock())
             except Exception:  # noqa: BLE001 — older FollowTargetState shapes
                 is_locked = False
-            cross_state.set(cx, cy, "LOCKED" if is_locked else "AUTO")
+            cross_state.set(cx, cy, FollowMode.LOCKED if is_locked else FollowMode.AUTO)
             # Drop the target detection so hailooverlay doesn't draw a bbox
             # over the cross. The other branches' shared metadata is fine —
             # the orchestrator's view of state was populated upstream in
@@ -575,7 +577,7 @@ def highlight_target(pad, info, target_state, cross_state=None):
             # searching, even though there's no center to draw the cross
             # at. The downstream cairo callback renders just the badge
             # ("SEARCH") when cx/cy are None.
-            cross_state.set(None, None, "SEARCH")
+            cross_state.set(None, None, FollowMode.SEARCH)
         else:
             # No target at all (cleared / boot-up before AUTO acquires).
             cross_state.clear()
@@ -764,7 +766,7 @@ def _draw_state_badge(context, mode, width, height, flash_active=False) -> None:
     # warm amber on dark for SEARCH so the state stands out from tracking.
     if flash_active:
         text_color = (1.0, 1.0, 1.0, 1.0)
-    elif mode.upper() == "SEARCH":
+    elif str(mode).upper() == FollowMode.SEARCH.value:
         text_color = _BADGE_SEARCH_TEXT
     else:
         text_color = _CROSS_GREEN

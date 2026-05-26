@@ -71,6 +71,7 @@ import cairo
 # the live state log makes sense in flight, but it's noise here.
 logging.getLogger("robot_follow.follow_api.state").setLevel(logging.WARNING)
 
+from robot_follow.follow_api.event_log import FollowCause  # noqa: E402
 from robot_follow.follow_api.state import FollowTargetState  # noqa: E402
 from robot_follow.pipeline_adapter.vision_branches import (  # noqa: E402
     NON_TARGET_BBOX_COLOR_RGB,
@@ -85,28 +86,38 @@ LOG = logging.getLogger("render_overlay")
 # Event log — follow_change cause attribution for the toast
 # ---------------------------------------------------------------------------
 
-# Mapping from ``cause`` strings emitted by the live drone-follow code
-# (see drone_follow/follow_api/event_log.py callers) to the toast text
-# we paint on the rendered overlay. Falls back to "TARGET CHANGED" when
-# events.jsonl is missing or a cause is unrecognised.
+# Each cause maps to a callable that builds the toast string given the
+# new target id (``to_id``, which may be ``None`` for clear/idle/timeout
+# transitions). Lives next to ``FollowCause`` rather than referencing
+# raw strings — adding a new cause means importing the enum value here
+# and adding one row to the table. Per Sagigamil review feedback.
+_TOAST_TABLE: dict = {
+    FollowCause.USER:       lambda to_id: (f"USER LOCKED ID {to_id}"
+                                            if to_id is not None else "USER IDLE"),
+    FollowCause.CLEAR:      lambda to_id: "TARGET CLEARED",
+    FollowCause.REID:       lambda to_id: (f"REID RE-ACQUIRED ID {to_id}"
+                                            if to_id is not None else "REID RE-ACQUIRED"),
+    FollowCause.REID_DRIFT: lambda to_id: (f"REID-DRIFT → ID {to_id}"
+                                            if to_id is not None else "REID-DRIFT"),
+    FollowCause.AUTO:       lambda to_id: (f"AUTO → ID {to_id}"
+                                            if to_id is not None else "TARGET LOST"),
+    FollowCause.TIMEOUT:    lambda to_id: "REID TIMEOUT",
+}
+
+
 def _toast_for(cause: str, to_id: Optional[int]) -> str:
-    if cause == "USER" and to_id is not None:
-        return f"USER LOCKED ID {to_id}"
-    if cause == "USER":
-        return "USER IDLE"
-    if cause == "CLEAR":
-        return "TARGET CLEARED"
-    if cause == "REID" and to_id is not None:
-        return f"REID RE-ACQUIRED ID {to_id}"
-    if cause == "REID-DRIFT" and to_id is not None:
-        return f"REID-DRIFT → ID {to_id}"
-    if cause == "AUTO" and to_id is not None:
-        return f"AUTO → ID {to_id}"
-    if cause == "AUTO":
-        return "TARGET LOST"
-    if cause == "TIMEOUT":
-        return "REID TIMEOUT"
-    return "TARGET CHANGED"
+    """Resolve the toast banner text for a follow_change event. Falls
+    back to "TARGET CHANGED" when the cause is missing or unrecognised
+    (legacy bundles or future causes not yet in :class:`FollowCause`).
+    """
+    try:
+        cause_enum = FollowCause(cause)
+    except ValueError:
+        return "TARGET CHANGED"
+    builder = _TOAST_TABLE.get(cause_enum)
+    if builder is None:
+        return "TARGET CHANGED"
+    return builder(to_id)
 
 
 class EventIndex:

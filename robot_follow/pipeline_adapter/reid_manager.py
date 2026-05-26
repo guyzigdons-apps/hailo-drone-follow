@@ -16,6 +16,8 @@ from typing import Optional
 
 import numpy as np
 
+from robot_follow.follow_api.event_log import log_reacquire
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -576,13 +578,7 @@ class ReIDManager:
         self._duplicate_streak = 0
         # Emit a sparse-log event so the offline renderer can attribute
         # this transition as "REID re-acquire" rather than "USER LOCKED".
-        # Lazy import — keep follow_api off the reid_manager module-load
-        # path so tests that stub reid don't pull the whole follow_api.
-        try:
-            from robot_follow.follow_api.event_log import log_reacquire
-            log_reacquire(new_track_id)
-        except Exception:  # noqa: BLE001 — never fail recovery on logging
-            pass
+        log_reacquire(new_track_id)
         LOGGER.debug("[REID] Tracking resumed via ReID for ID %s", self._original_id)
 
     # ------------------------------------------------------------------
