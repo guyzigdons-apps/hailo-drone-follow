@@ -271,6 +271,15 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                  "tiles via tiles-static). Format 'tiles_x,tiles_y,overlap_x,overlap_y'. "
                  "Repeatable. Useful for multi-scale GT: --extra-grid 1,1,0,0 --extra-grid 3,2,0,0",
         )
+        parser.add_argument(
+            "--extra-rect", action="append", default=[],
+            metavar="X,Y,W,H",
+            help="Additional arbitrary rectangle added to tiles-static (tagged "
+                 "'s' = single-scale, no boundary-strip — treated as a rescue "
+                 "tile). All four values normalized to [0,1] of the frame; the "
+                 "rect spans x..x+w by y..y+h. Repeatable. Useful for a fixed "
+                 "centred rescue tile that doesn't fit the regular-grid mould.",
+        )
 
     def on_eos(self):
         hailo_logger.info("EOS received; writing bench summary and shutting down")
@@ -371,15 +380,35 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                 ox, oy = float(parts[2]), float(parts[3])
                 extra_grids_parsed.append((tx, ty, ox, oy))
                 extras.extend(_grid_to_static_tiles(tx, ty, ox, oy, mode="s"))
+            extra_rects_parsed: list[tuple[float, float, float, float]] = []
+            for spec in self.options_menu.extra_rect:
+                parts = [p.strip() for p in spec.split(",")]
+                if len(parts) != 4:
+                    raise ValueError(
+                        f"--extra-rect expects 'x,y,w,h', got {spec!r}"
+                    )
+                rx, ry, rw, rh = (float(parts[0]), float(parts[1]),
+                                  float(parts[2]), float(parts[3]))
+                if not (0.0 <= rx < 1.0 and 0.0 <= ry < 1.0
+                        and 0.0 < rw <= 1.0 and 0.0 < rh <= 1.0
+                        and rx + rw <= 1.0 + 1e-4
+                        and ry + rh <= 1.0 + 1e-4):
+                    raise ValueError(
+                        f"--extra-rect out of range [0,1]: {spec!r}"
+                    )
+                extra_rects_parsed.append((rx, ry, rw, rh))
+                extras.append(f"{rx:.6f},{ry:.6f},{rw:.6f},{rh:.6f},s")
             tiles_static = ";".join(extras)
             hailo_logger.info(
                 "Bench grid: %dx%d, overlap (x=%.2f, y=%.2f), full_frame=%s, "
-                "center_tile=%s (size=%.2f), extra_grids=%s, tiles_static(extras)=%s",
+                "center_tile=%s (size=%.2f), extra_grids=%s, extra_rects=%s, "
+                "tiles_static(extras)=%s",
                 tiles_x, tiles_y, overlap_x, overlap_y,
                 self.options_menu.include_full_frame,
                 self.options_menu.include_center_tile,
                 self.options_menu.center_tile_size,
                 extra_grids_parsed,
+                extra_rects_parsed,
                 tiles_static,
             )
 
@@ -541,6 +570,13 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                      float(p.split(",")[2].strip()),
                      float(p.split(",")[3].strip())]
                     for p in self.options_menu.extra_grid
+                ],
+                "extra_rects": [
+                    [float(p.split(",")[0].strip()),
+                     float(p.split(",")[1].strip()),
+                     float(p.split(",")[2].strip()),
+                     float(p.split(",")[3].strip())]
+                    for p in self.options_menu.extra_rect
                 ],
             },
             "video": {

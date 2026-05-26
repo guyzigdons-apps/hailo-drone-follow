@@ -84,7 +84,15 @@ CONFIGS = [
     # tile size scales. 25% overlap is enough — see plan rationale.
     {"label": "GT-12x9-25-multi", "tiles_x": 12, "tiles_y": 9, "overlap_x": 0.25, "overlap_y": 0.25,
      "source_w": None, "source_h": None, "is_gt": True,
-     "extra_grids": [(1, 1, 0.0, 0.0), (3, 2, 0.25, 0.25)]},
+     "extra_grids": [(1, 1, 0.0, 0.0), (3, 2, 0.25, 0.25)],
+     # Centred VGA-aspect rescue rect, 1920x1440 (640*3 by 480*3). Exact
+     # 3x integer downscale to the 640x480 model input — zero
+     # interpolation, pure box-average sampling. Covers ~32% w × ~43% h
+     # of the 6016x3384 frame; lands on the action band at 3x per-object
+     # resolution finer than the 3x2 medium tile, so cars and people
+     # that straddle multiple 12x9 tiles get one whole-object detection
+     # here with the right confidence to dominate NMS.
+     "extra_rects": ["center_vga_3x"]},
 
     # No-tiling baselines.
     {"label": "1x1-native",  "tiles_x": 1, "tiles_y": 1, "overlap_x": 0.0, "overlap_y": 0.0,
@@ -134,6 +142,42 @@ def run_one(cfg: dict, video: str, out_dir: Path, extra_args: list[str]) -> tupl
         cmd.append("--include-full-frame")
     for (gx, gy, gox, goy) in cfg.get("extra_grids", []):
         cmd += ["--extra-grid", f"{gx},{gy},{gox},{goy}"]
+    # extra_rects entries are either:
+    #   (a) explicit normalized (x, y, w, h) tuples
+    #   (b) the literal string "center_vga_Nx" → centred 4:3 crop sized
+    #       640*N by 480*N pixels (model input × integer N). Downscales
+    #       exactly N:1 to the 640x480 model input, so the cropper resize
+    #       is a pure integer box-average with no interpolation. Use
+    #       larger N for more coverage at coarser per-object resolution.
+    #       e.g. N=3 → 1920x1440 (~32% w, ~43% h of 6016x3384); N=5 →
+    #       3200x2400 (~53% w, ~71% h). Falls back to a literal string
+    #       like "center_vga_5x" for higher N.
+    src_w = int(cfg.get("source_w") or 0) or 0
+    src_h = int(cfg.get("source_h") or 0) or 0
+    for entry in cfg.get("extra_rects", []):
+        if isinstance(entry, str) and entry.startswith("center_vga_") and entry.endswith("x"):
+            try:
+                n = int(entry[len("center_vga_"):-1])
+            except ValueError:
+                raise ValueError(f"unrecognized extra_rect spec: {entry!r}")
+            if n < 1 or src_w <= 0 or src_h <= 0:
+                raise ValueError(
+                    f"{entry} requires source_w/source_h and N>=1; got "
+                    f"src={src_w}x{src_h} N={n}")
+            crop_w_px = 640 * n
+            crop_h_px = 480 * n
+            if crop_w_px > src_w or crop_h_px > src_h:
+                raise ValueError(
+                    f"{entry} crop {crop_w_px}x{crop_h_px} exceeds source "
+                    f"{src_w}x{src_h}")
+            rx = (src_w - crop_w_px) / 2.0 / src_w
+            ry = (src_h - crop_h_px) / 2.0 / src_h
+            rw = crop_w_px / src_w
+            rh = crop_h_px / src_h
+            cmd += ["--extra-rect", f"{rx:.6f},{ry:.6f},{rw:.6f},{rh:.6f}"]
+        else:
+            x, y, w, h = entry
+            cmd += ["--extra-rect", f"{x:.6f},{y:.6f},{w:.6f},{h:.6f}"]
     cmd += extra_args
     print(f"\n=== Running config '{cfg['label']}' ===")
     print(" ".join(cmd), flush=True)

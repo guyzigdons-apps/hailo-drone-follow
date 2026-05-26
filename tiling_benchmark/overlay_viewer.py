@@ -114,26 +114,52 @@ def grid_tiles(tiles_x: int, tiles_y: int,
 
 def tile_rects_from_config(
     cfg: dict,
-) -> list[tuple[float, float, float, float]]:
+) -> list[tuple[float, float, float, float, str]]:
     """Reconstruct the full tile list (grid + extras) from a frames.json
-    ``config`` block. Output is in normalized [0,1] frame coordinates.
+    ``config`` block. Output is normalized [0,1] frame coordinates with a
+    category label per rect:
+
+      * ``'multi-scale'`` — the main dense grid; the aggregator's
+        boundary-strip filter (remove_exceeded_bboxes) runs on these tiles.
+        Tagged ',m' in tiles-static. Fragment-producing layer.
+      * ``'single-scale'`` — coarser rescue tiles (full-frame, center-tile,
+        extra_grids, extra_rects). The aggregator preserves detections in
+        these. Tagged ',s' in tiles-static.
+      * ``'dynamic'`` — per-frame HailoTileROI attached upstream (e.g. a
+        future tracker-tile). Reserved category — no run-side config
+        reconstruction possible because the geometry varies per frame.
+
+    The category is purely a visualization aid; downstream code (e.g.
+    ``is_phantom``) only needs the (x, y, w, h) shape and ignores the 5th
+    field.
     """
     if not cfg:
         return []
+    out: list[tuple[float, float, float, float, str]] = []
     tiles_x = int(cfg.get("tiles_x", 0) or 0)
     tiles_y = int(cfg.get("tiles_y", 0) or 0)
     ox = float(cfg.get("overlap_x", 0.0) or 0.0)
     oy = float(cfg.get("overlap_y", 0.0) or 0.0)
-    rects = grid_tiles(tiles_x, tiles_y, ox, oy)
+    for (x, y, w, h) in grid_tiles(tiles_x, tiles_y, ox, oy):
+        out.append((x, y, w, h, "multi-scale"))
     if cfg.get("include_full_frame"):
-        rects.append((0.0, 0.0, 1.0, 1.0))
+        out.append((0.0, 0.0, 1.0, 1.0, "single-scale"))
     if cfg.get("include_center_tile"):
         s = float(cfg.get("center_tile_size", 0.0) or 0.0)
         if s > 0.0:
             s = min(s, 1.0)
             off = (1.0 - s) / 2.0
-            rects.append((off, off, s, s))
-    return rects
+            out.append((off, off, s, s, "single-scale"))
+    for entry in (cfg.get("extra_grids") or []):
+        tx, ty, gox, goy = (int(entry[0]), int(entry[1]),
+                            float(entry[2]), float(entry[3]))
+        for (x, y, w, h) in grid_tiles(tx, ty, gox, goy):
+            out.append((x, y, w, h, "single-scale"))
+    for entry in (cfg.get("extra_rects") or []):
+        rx, ry, rw, rh = (float(entry[0]), float(entry[1]),
+                          float(entry[2]), float(entry[3]))
+        out.append((rx, ry, rw, rh, "single-scale"))
+    return out
 
 
 def parse_frames_arg(arg: str) -> tuple[Path, str | None]:
@@ -153,8 +179,15 @@ class Run:
         self.idx = idx
         self.colour_bgr = colour_bgr
         self.config: dict = config or {}
-        self.tile_rects: list[tuple[float, float, float, float]] = \
-            tile_rects_from_config(self.config)
+        # Typed list with category in the 5th field (for colour-coding).
+        self.tile_rects_typed: list[
+            tuple[float, float, float, float, str]
+        ] = tile_rects_from_config(self.config)
+        # 4-tuple version for downstream consumers (is_phantom etc.) that
+        # don't care about category.
+        self.tile_rects: list[tuple[float, float, float, float]] = [
+            (x, y, w, h) for (x, y, w, h, _cat) in self.tile_rects_typed
+        ]
         self.visible_var: tk.BooleanVar | None = None  # set after Tk root exists
         # Containment-merge per-frame cache: key = (frame_no, area_ratio_max,
         # center_slack, hide_phantoms). Value = (kept_dets_list, n_suppressed).
@@ -754,18 +787,37 @@ class OverlayViewer:
         else:
             crop = src_rgb[y0:y1, x0:x1]
 
-        # Interpolation: zoom-in (resize factor >= 1) => NEAREST so the
-        # user sees real pixels. Zoom-out (factor < 1) => INTER_AREA.
-        crop_h, crop_w = crop.shape[:2]
-        resize_factor = (cw / crop_w + ch / crop_h) / 2.0
-        interp = cv2.INTER_NEAREST if resize_factor >= 1.0 else cv2.INTER_AREA
-        # cv2.resize wants (w, h). We resize to canvas-fill (the crop
-        # already matches the viewport aspect ratio modulo clamping).
-        disp = cv2.resize(crop, (cw, ch), interpolation=interp)
+        # Aspect-preserving letterbox: pick a uniform canvas-per-SOURCE-pixel
+        # scale that fits the clamped viewport entirely inside the canvas,
+        # then resize the crop to that disp size and paste centred. The
+        # `crop` array can be either source pixels (full-res path) or cache
+        # pixels (preview-cache path); either way, its data covers the
+        # source viewport (x1-x0) × (y1-y0). We MUST compute the scale in
+        # source-px terms so bbox drawing — which uses source-px coords —
+        # ends up at the right canvas location regardless of which crop
+        # path supplied the pixels.
+        viewport_src_w = float(x1 - x0)
+        viewport_src_h = float(y1 - y0)
+        scale_uniform = min(cw / viewport_src_w, ch / viewport_src_h)
+        disp_w = max(1, int(round(viewport_src_w * scale_uniform)))
+        disp_h = max(1, int(round(viewport_src_h * scale_uniform)))
+        # Interpolation: zoom-in (canvas-per-src-px >= 1) → NEAREST so the
+        # user sees real pixels. Zoom-out → INTER_AREA.
+        interp = cv2.INTER_NEAREST if scale_uniform >= 1.0 else cv2.INTER_AREA
+        resized_crop = cv2.resize(crop, (disp_w, disp_h), interpolation=interp)
+        disp = np.zeros((ch, cw, 3), dtype=resized_crop.dtype)
+        off_x = (cw - disp_w) // 2
+        off_y = (ch - disp_h) // 2
+        disp[off_y:off_y + disp_h, off_x:off_x + disp_w] = resized_crop
 
-        # Effective scale for drawing bboxes onto disp.
-        scale_x = cw / float(x1 - x0)
-        scale_y = ch / float(y1 - y0)
+        # Effective uniform scale for drawing bboxes / tile rects onto
+        # disp. Same value for both axes; bbox draw code maps source-px
+        # → disp-px via `int((src - x0) * scale + off)`, so aspect is
+        # preserved regardless of canvas geometry.
+        scale_x = scale_uniform
+        scale_y = scale_uniform
+        _draw_off_x = off_x
+        _draw_off_y = off_y
 
         # The disp image is RGB (cache is RGB; full-res path converts at
         # read time). cv2 draw fns are channel-agnostic — they just write
@@ -833,11 +885,11 @@ class OverlayViewer:
                 # Cull if entirely outside the (clamped) viewport.
                 if sx2 < x0 or sx1 > x1 or sy2 < y0 or sy1 > y1:
                     continue
-                # Map to canvas px.
-                dx1 = int((sx1 - x0) * scale_x)
-                dy1 = int((sy1 - y0) * scale_y)
-                dx2 = int((sx2 - x0) * scale_x)
-                dy2 = int((sy2 - y0) * scale_y)
+                # Map to canvas px (with letterbox offset).
+                dx1 = int((sx1 - x0) * scale_x) + _draw_off_x
+                dy1 = int((sy1 - y0) * scale_y) + _draw_off_y
+                dx2 = int((sx2 - x0) * scale_x) + _draw_off_x
+                dy2 = int((sy2 - y0) * scale_y) + _draw_off_y
                 cv2.rectangle(disp, (dx1, dy1), (dx2, dy2), colour, 2)
                 tag = f"{det.get('label', '?')} {conf:.2f}"
                 cv2.putText(disp, tag, (dx1, max(15, dy1 - 4)),
@@ -851,6 +903,7 @@ class OverlayViewer:
         # overlap.
         tile_source_run, tile_rects_drawn = self._draw_tiles(
             disp, x0, y0, x1, y1, scale_x, scale_y, visible_runs,
+            _draw_off_x, _draw_off_y,
         )
 
         # HUD on the rescaled canvas (NOT on source — that's the key fix).
@@ -900,7 +953,8 @@ class OverlayViewer:
     def _draw_tiles(self, disp: np.ndarray,
                     x0: int, y0: int, x1: int, y1: int,
                     scale_x: float, scale_y: float,
-                    visible_runs: list[Run]) -> tuple[Run | None, int]:
+                    visible_runs: list[Run],
+                    off_x: int = 0, off_y: int = 0) -> tuple[Run | None, int]:
         """Overlay the tile rectangles from the selected source run.
 
         Returns ``(source_run, n_rects_drawn)`` for the HUD legend. If the
@@ -916,9 +970,19 @@ class OverlayViewer:
         if source_run is None:
             return None, 0
 
-        colour = (255, 255, 255)  # neutral white so it doesn't fight bboxes.
+        # Category → BGR. Multi-scale tiles are the fragment-producing
+        # dense grid (boundary-stripped by the aggregator) — drawn in cyan
+        # to stand out from common detection colours (green person /
+        # orange vehicle). Single-scale rescue tiles in white-yellow.
+        # Dynamic tiles (future per-frame attachments) in lime green.
+        CAT_COLOURS = {
+            "multi-scale":  (255, 200, 0),    # cyan-ish blue (BGR)
+            "single-scale": (0, 255, 255),    # yellow (BGR)
+            "dynamic":      (0, 255, 100),    # lime green (BGR)
+        }
+        DEFAULT_TILE_COLOUR = (255, 255, 255)
         drawn = 0
-        for (nx, ny, nw, nh) in source_run.tile_rects:
+        for (nx, ny, nw, nh, cat) in source_run.tile_rects_typed:
             sx1 = nx * self.src_w
             sy1 = ny * self.src_h
             sx2 = (nx + nw) * self.src_w
@@ -926,10 +990,11 @@ class OverlayViewer:
             # Cull rectangles entirely outside the viewport.
             if sx2 < x0 or sx1 > x1 or sy2 < y0 or sy1 > y1:
                 continue
-            dx1 = int((sx1 - x0) * scale_x)
-            dy1 = int((sy1 - y0) * scale_y)
-            dx2 = int((sx2 - x0) * scale_x)
-            dy2 = int((sy2 - y0) * scale_y)
+            dx1 = int((sx1 - x0) * scale_x) + off_x
+            dy1 = int((sy1 - y0) * scale_y) + off_y
+            dx2 = int((sx2 - x0) * scale_x) + off_x
+            dy2 = int((sy2 - y0) * scale_y) + off_y
+            colour = CAT_COLOURS.get(cat, DEFAULT_TILE_COLOUR)
             cv2.rectangle(disp, (dx1, dy1), (dx2, dy2), colour, 1)
             drawn += 1
         return source_run, drawn
@@ -969,8 +1034,15 @@ class OverlayViewer:
 
         tile_line: str | None = None
         if tile_source_run is not None:
+            cat_counts: dict[str, int] = {}
+            for (_x, _y, _w, _h, cat) in tile_source_run.tile_rects_typed:
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            cat_summary = " ".join(
+                f"{cat}={n}"
+                for cat, n in sorted(cat_counts.items())
+            ) or "(none)"
             tile_line = (f"tile src: {tile_source_run.label}"
-                         f"  (n={tile_rects_drawn})")
+                         f"  (n={tile_rects_drawn}; {cat_summary})")
 
         # Background strip behind HUD for legibility.
         line_h = 22

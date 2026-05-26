@@ -91,6 +91,11 @@ def _compute_tile_rects(config: dict) -> list[tuple[float, float, float, float]]
             parts = s.split(",")
             rects.append((float(parts[0]), float(parts[1]),
                           float(parts[2]), float(parts[3])))
+    for entry in (config.get("extra_rects") or []):
+        # entry is tuple-like / list-like (x, y, w, h)
+        rx, ry, rw, rh = (float(entry[0]), float(entry[1]),
+                          float(entry[2]), float(entry[3]))
+        rects.append((rx, ry, rw, rh))
     return rects
 
 
