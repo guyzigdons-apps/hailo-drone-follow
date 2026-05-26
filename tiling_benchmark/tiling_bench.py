@@ -345,11 +345,21 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
             # Grid is configured directly on the plugin via tiles-along-x/y-axis +
             # overlap-x/y-axis (matches upstream hailotilecropper). Extras like
             # full-frame and center tile go through tiles-static.
+            #
+            # Tile-mode tagging: the dense grid (tiles_x*tiles_y) is the
+            # "fragment-producing" layer and is tagged 'm' (multi-scale) so the
+            # downstream hailotileaggregator runs remove_exceeded_bboxes on it,
+            # dropping fragments that touch tile borders and the yolov8n class-0
+            # phantom artefact. Extras (full-frame, center-tile, extra-grids)
+            # are the rescue layer and are tagged 's' (single-scale) so the
+            # aggregator preserves detections in them, including objects that
+            # happen to be near a tile edge of the coarser tile.
             extras: list[str] = []
             if self.options_menu.include_full_frame and not (tiles_x == 1 and tiles_y == 1):
-                extras.append("0.000000,0.000000,1.000000,1.000000")
+                extras.append("0.000000,0.000000,1.000000,1.000000,s")
             if self.options_menu.include_center_tile:
-                extras.append(_center_tile_static(self.options_menu.center_tile_size))
+                extras.append(_center_tile_static(
+                    self.options_menu.center_tile_size, mode="s"))
             extra_grids_parsed: list[tuple[int, int, float, float]] = []
             for spec in self.options_menu.extra_grid:
                 parts = [p.strip() for p in spec.split(",")]
@@ -360,7 +370,7 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                 tx, ty = int(parts[0]), int(parts[1])
                 ox, oy = float(parts[2]), float(parts[3])
                 extra_grids_parsed.append((tx, ty, ox, oy))
-                extras.extend(_grid_to_static_tiles(tx, ty, ox, oy))
+                extras.extend(_grid_to_static_tiles(tx, ty, ox, oy, mode="s"))
             tiles_static = ";".join(extras)
             hailo_logger.info(
                 "Bench grid: %dx%d, overlap (x=%.2f, y=%.2f), full_frame=%s, "
@@ -379,7 +389,8 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
             # the gst element. Mirroring it here makes the log
             # show exactly what hailotilecropper_dynamic will receive (and
             # therefore which rectangles will produce a cropped tile).
-            _grid_rects = (_grid_to_static_tiles(tiles_x, tiles_y, overlap_x, overlap_y)
+            _grid_rects = (_grid_to_static_tiles(tiles_x, tiles_y, overlap_x, overlap_y,
+                                                 mode="m")
                            if (tiles_x > 0 and tiles_y > 0) else [])
             _extra_rects = [r for r in tiles_static.split(";") if r.strip()] if tiles_static else []
             _all_rects = _grid_rects + _extra_rects
@@ -403,17 +414,27 @@ class GStreamerTilingBenchApp(GStreamerTilingApp):
                     len(_all_rects), self.batch_size,
                 )
 
+            # Bypass configuration.py's zero-out of border_threshold when
+            # use_multi_scale=False — we're now running effectively multi-scale
+            # via per-tile mode tagging on tiles-static, so the aggregator's
+            # boundary-strip filter is wanted. Read the parser value directly.
+            border_threshold_for_agg = self.options_menu.border_threshold
             tile_cropper_pipeline = DYNAMIC_TILE_CROPPER_PIPELINE(
                 detection_pipeline,
                 name="tile_cropper_wrapper",
                 internal_offset=True,
                 iou_threshold=self.iou_threshold,
-                border_threshold=self.border_threshold,
+                border_threshold=border_threshold_for_agg,
                 tiles_static=tiles_static,
                 tiles_x=tiles_x,
                 tiles_y=tiles_y,
                 overlap_x=overlap_x,
                 overlap_y=overlap_y,
+                # Dense grid tagged 'm' so the aggregator's boundary-strip
+                # filter (border-threshold) removes fragments + class-0 phantoms.
+                # Extras already carry per-tile mode overrides (see above).
+                tiling_mode="single-scale",
+                grid_tile_mode="m",
             )
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()

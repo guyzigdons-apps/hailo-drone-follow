@@ -91,22 +91,47 @@ def passthrough_callback(pad, buffer, user_data):
     return
 
 
-def _center_tile_static(size: float) -> str:
+_VALID_TILE_MODES = ("", "m", "s", "multi-scale", "single-scale", "0", "1")
+
+
+def _suffix_tile(rect: str, mode: str) -> str:
+    """Append ',<mode>' to a 'x,y,w,h' rect string if mode is non-empty.
+    `mode` is the cropper's per-tile mode override (see hailotilecropper_dynamic's
+    tiles-static property docstring). Empty string ⇒ inherit cropper default."""
+    if not mode:
+        return rect
+    if mode not in _VALID_TILE_MODES:
+        raise ValueError(
+            f"tile mode must be one of {_VALID_TILE_MODES!r}, got {mode!r}")
+    return f"{rect},{mode}"
+
+
+def _center_tile_static(size: float, mode: str = "") -> str:
     """Return a single static-tile rectangle string for a centered square tile of
     side `size` (fraction of frame). Useful as an extra fixed tile to give the
     detector a higher-resolution look at the middle of the frame on top of a
-    regular grid."""
+    regular grid.
+
+    `mode` (optional) is the per-tile mode override appended to the rect string
+    — see :func:`_grid_to_static_tiles`."""
     if not (0.0 < size <= 1.0):
         raise ValueError(f"center-tile-size must be in (0, 1], got {size}")
     x = (1.0 - size) / 2.0
-    return f"{x:.6f},{x:.6f},{size:.6f},{size:.6f}"
+    return _suffix_tile(f"{x:.6f},{x:.6f},{size:.6f},{size:.6f}", mode)
 
 
 def _grid_to_static_tiles(tiles_x: int, tiles_y: int,
-                          overlap_x: float, overlap_y: float) -> list[str]:
+                          overlap_x: float, overlap_y: float,
+                          mode: str = "") -> list[str]:
     """Convert a regular tiles_x*tiles_y grid into a list of normalized
-    'x,y,w,h' rectangles. Math: T = 1/(N - (N-1)*o); step = T*(1-o).
+    'x,y,w,h[,mode]' rectangles. Math: T = 1/(N - (N-1)*o); step = T*(1-o).
     For N==1 returns a single full-axis tile.
+
+    `mode` (optional, default "") is a per-tile mode override for
+    hailotilecropper_dynamic's tiles-static parser. Accepts ``"m"`` /
+    ``"multi-scale"`` / ``"1"`` (boundary-strip ON) or ``"s"`` /
+    ``"single-scale"`` / ``"0"`` (boundary-strip OFF). Empty ⇒ inherit the
+    cropper-level ``tiling-mode`` default.
     """
     if tiles_x < 1 or tiles_y < 1:
         return []
@@ -119,7 +144,8 @@ def _grid_to_static_tiles(tiles_x: int, tiles_y: int,
     rects = []
     for (y, h) in axis(tiles_y, overlap_y):
         for (x, w) in axis(tiles_x, overlap_x):
-            rects.append(f"{x:.6f},{y:.6f},{w:.6f},{h:.6f}")
+            rects.append(_suffix_tile(
+                f"{x:.6f},{y:.6f},{w:.6f},{h:.6f}", mode))
     return rects
 
 
@@ -131,7 +157,9 @@ def DYNAMIC_TILE_CROPPER_PIPELINE(inner_pipeline: str, name: str,
                                   tiles_x: int = 0,
                                   tiles_y: int = 0,
                                   overlap_x: float = 0.0,
-                                  overlap_y: float = 0.0) -> str:
+                                  overlap_y: float = 0.0,
+                                  tiling_mode: str = "single-scale",
+                                  grid_tile_mode: str = "") -> str:
     """Cropper+aggregator subgraph using `hailotilecropper_dynamic`.
 
     Same I/O contract as the upstream `TILE_CROPPER_PIPELINE` helper: bypass
@@ -145,21 +173,36 @@ def DYNAMIC_TILE_CROPPER_PIPELINE(inner_pipeline: str, name: str,
     the requested grid as static rectangles in Python and concatenate them
     onto any extra `tiles_static` rectangles passed in. Pass
     `tiles_x=tiles_y=0` to disable the grid.
+
+    `tiling_mode` sets the cropper-level ``tiling-mode`` property — the
+    default applied to every static tile that doesn't carry its own per-tile
+    mode override. Default is ``"single-scale"`` (legacy behaviour: the
+    aggregator's boundary-strip pass is off).
+
+    `grid_tile_mode` (optional) tags every dense-grid rect with this per-tile
+    mode override; useful when the dense grid is the "fragment-producing"
+    layer and you want boundary-strip ON for those tiles while leaving any
+    extra rescue tiles in ``tiles_static`` untagged (inheriting the cropper
+    default). Use ``"m"`` for multi-scale (strip ON) or ``"s"`` for
+    single-scale (strip OFF).
     """
     border = (
         f"border-threshold={str(border_threshold).lower()} "
         if border_threshold else ""
     )
-    grid_rects = _grid_to_static_tiles(tiles_x, tiles_y, overlap_x, overlap_y) \
+    grid_rects = _grid_to_static_tiles(tiles_x, tiles_y, overlap_x, overlap_y,
+                                       mode=grid_tile_mode) \
         if (tiles_x > 0 and tiles_y > 0) else []
     extra_rects = [r for r in tiles_static.split(";") if r.strip()] if tiles_static else []
     all_rects = grid_rects + extra_rects
     static_str = ";".join(all_rects)
     static_prop = f'tiles-static="{static_str}" ' if static_str else ""
+    mode_prop = f"tiling-mode={tiling_mode} " if tiling_mode else ""
     return (
         f"{QUEUE(name=f'{name}_input_q')} ! "
         f"hailotilecropper_dynamic name={name}_cropper "
-        f"internal-offset={str(internal_offset).lower()} {static_prop}"
+        f"internal-offset={str(internal_offset).lower()} "
+        f"{mode_prop}{static_prop}"
         f"hailotileaggregator name={name}_agg "
         f"flatten-detections=true iou-threshold={iou_threshold} {border}"
         f"{name}_cropper. ! {QUEUE(name=f'{name}_bypass_q')} ! {name}_agg.sink_0 "
