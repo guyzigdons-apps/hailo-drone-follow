@@ -82,6 +82,94 @@ LOG = logging.getLogger("render_overlay")
 
 
 # ---------------------------------------------------------------------------
+# Event log — follow_change cause attribution for the toast
+# ---------------------------------------------------------------------------
+
+# Mapping from ``cause`` strings emitted by the live drone-follow code
+# (see drone_follow/follow_api/event_log.py callers) to the toast text
+# we paint on the rendered overlay. Falls back to "TARGET CHANGED" when
+# events.jsonl is missing or a cause is unrecognised.
+def _toast_for(cause: str, to_id: Optional[int]) -> str:
+    if cause == "USER" and to_id is not None:
+        return f"USER LOCKED ID {to_id}"
+    if cause == "USER":
+        return "USER IDLE"
+    if cause == "CLEAR":
+        return "TARGET CLEARED"
+    if cause == "REID" and to_id is not None:
+        return f"REID RE-ACQUIRED ID {to_id}"
+    if cause == "REID-DRIFT" and to_id is not None:
+        return f"REID-DRIFT → ID {to_id}"
+    if cause == "AUTO" and to_id is not None:
+        return f"AUTO → ID {to_id}"
+    if cause == "AUTO":
+        return "TARGET LOST"
+    if cause == "TIMEOUT":
+        return "REID TIMEOUT"
+    return "TARGET CHANGED"
+
+
+class EventIndex:
+    """Sequential reader over ``events.jsonl`` filtered to ``follow_change``.
+
+    The renderer walks frames in PTS order; at each detected transition
+    it pulls the next ``follow_change`` event whose wall-clock ``t`` is
+    at-or-after the current frame's ``t`` field. If no events.jsonl is
+    present, every call returns ``None`` and the renderer falls back to
+    the default "TARGET CHANGED" toast.
+    """
+
+    def __init__(self, path: Optional[Path]) -> None:
+        self._events: list[dict] = []
+        self._cursor = 0
+        if path is None or not path.is_file():
+            return
+        with open(path) as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    row = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("kind") == "follow_change":
+                    self._events.append(row)
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+    def next_at_or_after(self, wall_t: float,
+                        expected_to: Optional[int]) -> Optional[dict]:
+        """Return the next follow_change event with t >= wall_t, advancing
+        the cursor past it. Only returns an event whose ``to`` matches the
+        renderer's observed target transition — a defence against drift
+        between frames.jsonl and events.jsonl timestamps.
+        """
+        # Tolerance window: events.jsonl is wall-clock, frames.jsonl is
+        # wall-clock too, both stamped on the same machine, but they
+        # cross-thread races mean the event can land a few ms before or
+        # after the matching frame. Search a ~250 ms window centred on
+        # wall_t.
+        lo = wall_t - 0.25
+        while self._cursor < len(self._events):
+            ev = self._events[self._cursor]
+            t = ev.get("t", 0.0)
+            if t < lo:
+                self._cursor += 1
+                continue
+            if t > wall_t + 0.25:
+                # Future event — leave for the next call.
+                return None
+            self._cursor += 1
+            if ev.get("to") == expected_to:
+                return ev
+            # Mismatched ``to`` — skip and keep searching the window for
+            # one that does match.
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Frame log
 # ---------------------------------------------------------------------------
 
@@ -248,6 +336,9 @@ def _cross_state_from_row(row: dict, target_state: ReplayTargetState,
 # ---------------------------------------------------------------------------
 
 def _ffprobe(path: Path) -> dict:
+    """Fall-back source of video dimensions when ``manifest.json`` doesn't
+    have them (e.g. recordings made before Phase 4 of the bundle layout).
+    """
     out = subprocess.check_output(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries",
@@ -268,6 +359,26 @@ def _ffprobe(path: Path) -> dict:
         "fps":      fps,
         "duration": float(stream.get("duration", 0.0) or 0.0),
     }
+
+
+def _video_info_from_manifest(manifest: dict, clean: Path) -> dict:
+    """Prefer manifest dims (cheap, no subprocess) and only ffprobe when
+    a field is missing. Falls back to the full ffprobe path cleanly.
+
+    Returns a dict with width / height / fps / source ("manifest" or
+    "ffprobe") so the caller can log which path was used.
+    """
+    video = manifest.get("video") if isinstance(manifest, dict) else None
+    if isinstance(video, dict):
+        w = video.get("width")
+        h = video.get("height")
+        fps = video.get("fps")
+        if w and h and fps:
+            return {"width": int(w), "height": int(h), "fps": float(fps),
+                    "source": "manifest"}
+    info = _ffprobe(clean)
+    info["source"] = "ffprobe"
+    return info
 
 
 def _decode_proc(clean: Path):
@@ -302,6 +413,7 @@ def render(bundle_dir: str | os.PathLike,
     bundle = Path(bundle_dir).resolve()
     clean = bundle / "clean.mkv"
     frames_path = bundle / "frames.jsonl"
+    events_path = bundle / "events.jsonl"
     manifest_path = bundle / "manifest.json"
     output = bundle / output_name
 
@@ -328,10 +440,22 @@ def render(bundle_dir: str | os.PathLike,
             f"predates the overlay-replay feature: {frames_path}")
     LOG.info("loaded %d frame rows", len(frame_log))
 
-    info = _ffprobe(clean)
+    # follow_change events drive the change-toast attribution. Missing
+    # events.jsonl (recordings predating Phase 3) is handled: every
+    # transition falls back to the default "TARGET CHANGED" text.
+    event_index = EventIndex(events_path if events_path.is_file() else None)
+    if len(event_index):
+        LOG.info("loaded %d follow_change events", len(event_index))
+    else:
+        LOG.info("no events.jsonl (or no follow_change events) — "
+                 "using default 'TARGET CHANGED' toast")
+
+    # Prefer manifest dims (cheap) over ffprobe (subprocess).
+    info = _video_info_from_manifest(manifest, clean)
     width, height, fps = info["width"], info["height"], info["fps"]
     frame_bytes_size = width * height * 4  # BGRA = 4 bytes/pixel
-    LOG.info("clean.mkv: %dx%d @ %.3f fps", width, height, fps)
+    LOG.info("clean.mkv: %dx%d @ %.3f fps (from %s)",
+             width, height, fps, info["source"])
 
     target_state = ReplayTargetState()
     cross_state = TargetCrossState()
@@ -382,6 +506,16 @@ def render(bundle_dir: str | os.PathLike,
                     target_state.set_virtual_now(pts_seconds)
                     if followed_id != prev_followed:
                         target_state.mark_change_at_virtual_time(pts_seconds)
+                        # Resolve the toast text from events.jsonl. We
+                        # search a 250 ms window around the frame's
+                        # wall-clock ``t``; a matching ``to`` confirms it
+                        # really is the same transition the live pipeline
+                        # logged.
+                        frame_wall_t = float(row.get("t") or 0.0)
+                        ev = event_index.next_at_or_after(
+                            frame_wall_t, followed_id)
+                        cause = ev.get("cause") if ev else None
+                        cross_state.set_toast(_toast_for(cause or "", followed_id))
                         prev_followed = followed_id
                     if followed_id is None:
                         target_state.enter_auto_mode()
@@ -408,21 +542,30 @@ def render(bundle_dir: str | os.PathLike,
             encode.stdin.write(bytes(buf))
             frame_index += 1
     finally:
+        # Close the encoder's stdin so it sees EOF and flushes; then
+        # block on both subprocesses without an artificial timeout.
+        # ffmpeg can be slow on long inputs (multi-GB recordings on a
+        # Pi5 take minutes), and an arbitrary cap just produces flaky
+        # SIGKILLs that lose the final fragment.
         if encode.stdin is not None:
             try:
                 encode.stdin.close()
             except BrokenPipeError:
                 pass
-        decode.wait(timeout=30.0)
-        encode.wait(timeout=120.0)
+        decode.wait()
+        encode.wait()
 
+    # Failure reporting: read stderr only on non-zero exit. ``read()`` is
+    # safe here because both subprocesses have terminated.
     if decode.returncode not in (0, None):
-        err = decode.stderr.read().decode("utf-8", errors="replace")
-        LOG.error("ffmpeg decode failed (rc=%s): %s", decode.returncode, err)
+        err = decode.stderr.read().decode("utf-8", errors="replace").strip()
+        LOG.error("ffmpeg decode failed (rc=%s):\n%s",
+                  decode.returncode, err or "<no stderr>")
         raise SystemExit("decode failed")
     if encode.returncode not in (0, None):
-        err = encode.stderr.read().decode("utf-8", errors="replace")
-        LOG.error("ffmpeg encode failed (rc=%s): %s", encode.returncode, err)
+        err = encode.stderr.read().decode("utf-8", errors="replace").strip()
+        LOG.error("ffmpeg encode failed (rc=%s):\n%s",
+                  encode.returncode, err or "<no stderr>")
         raise SystemExit("encode failed")
 
     dt = time.monotonic() - t0

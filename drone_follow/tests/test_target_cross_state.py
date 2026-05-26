@@ -41,6 +41,42 @@ def test_set_with_none_drops_the_cross():
     assert s.get() == (None, None, None)
 
 
+def test_toast_default_is_none():
+    s = TargetCrossState()
+    assert s.get_toast() is None
+
+
+def test_set_toast_persists_across_set():
+    """set() updates cx/cy/mode; toast has its own lifecycle so the
+    offline renderer can attribute a transition with set_toast() and
+    then have _cross_state_from_row call clear() without losing it.
+    """
+    s = TargetCrossState()
+    s.set_toast("USER LOCKED ID 7")
+    s.set(0.5, 0.5, "LOCKED")
+    assert s.get_toast() == "USER LOCKED ID 7"
+
+
+def test_clear_does_not_wipe_toast():
+    """clear() resets cx/cy/mode but leaves the toast alone — important
+    so the change-toast survives a transition to None (which clears the
+    cross-state) and the flash window can still render it.
+    """
+    s = TargetCrossState()
+    s.set(0.5, 0.5, "LOCKED")
+    s.set_toast("REID TIMEOUT")
+    s.clear()
+    assert s.get() == (None, None, None)
+    assert s.get_toast() == "REID TIMEOUT"
+
+
+def test_set_toast_none_explicit_clears_it():
+    s = TargetCrossState()
+    s.set_toast("USER LOCKED ID 7")
+    s.set_toast(None)
+    assert s.get_toast() is None
+
+
 def test_concurrent_writers_and_readers_dont_tear():
     """The state crosses thread boundaries: pad-probe runs on the streaming
     thread, draw on the cairooverlay's drawing thread. A torn read (e.g.

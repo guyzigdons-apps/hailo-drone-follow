@@ -56,27 +56,50 @@ class TargetCrossState:
     convention). ``mode`` is one of ``"LOCKED"`` / ``"AUTO"`` / ``None``
     so the cairo overlay can draw a small state badge alongside the cross.
     ``None`` everywhere ⇒ no target visible this frame ⇒ no cross drawn.
+
+    ``toast`` is optional flashable text. Live highlight_target leaves it
+    ``None`` so the cairo callback renders the default "TARGET CHANGED"
+    banner. The offline renderer resolves cause (USER / REID / AUTO / …)
+    from ``events.jsonl`` and sets a specific string so post-flight
+    review can attribute switches at a glance.
     """
 
-    __slots__ = ("_lock", "_cx", "_cy", "_mode")
+    __slots__ = ("_lock", "_cx", "_cy", "_mode", "_toast")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._cx: Optional[float] = None
         self._cy: Optional[float] = None
         self._mode: Optional[str] = None
+        self._toast: Optional[str] = None
 
     def set(self, cx: Optional[float], cy: Optional[float],
             mode: Optional[str]) -> None:
         with self._lock:
             self._cx, self._cy, self._mode = cx, cy, mode
 
+    def set_toast(self, text: Optional[str]) -> None:
+        """Override the change-toast text for the next draw. ``None``
+        restores the default ("TARGET CHANGED").
+        """
+        with self._lock:
+            self._toast = text
+
     def clear(self) -> None:
-        self.set(None, None, None)
+        # ``_toast`` is intentionally NOT reset: it has its own lifecycle
+        # via the cairo draw callback's flash window. Resetting it here
+        # would suppress the "target cleared / lost" toast on transitions
+        # to None — exactly the moment the operator most needs to see why.
+        with self._lock:
+            self._cx = self._cy = self._mode = None
 
     def get(self) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         with self._lock:
             return self._cx, self._cy, self._mode
+
+    def get_toast(self) -> Optional[str]:
+        with self._lock:
+            return self._toast
 
 # Sentinel class_id used to retag the locked/auto target detection on
 # the local branch. The YAML style-config maps this to a thicker green
@@ -605,17 +628,7 @@ def draw_target_cross(overlay, context, timestamp, duration,
     cairo surface.
     """
     cx_norm, cy_norm, mode = cross_state.get()
-    if cx_norm is None and cy_norm is None and not mode:
-        return  # nothing to draw
-
-    # cairooverlay::draw doesn't supply width/height directly; read them
-    # off the element's sink pad caps. Cached on the element on first draw.
-    if dims is not None:
-        width, height = dims
-    else:
-        width, height = _cached_overlay_dims(overlay)
-    if width is None or height is None:
-        return
+    toast_override = cross_state.get_toast()
 
     # Optional followee-changed flash. Only when target_state is wired.
     flash_active = False
@@ -627,6 +640,21 @@ def draw_target_cross(overlay, context, timestamp, duration,
         if change_ts is not None:
             import time as _time
             flash_active = (_time.monotonic() - change_ts) < _FOLLOWEE_FLASH_SECS
+
+    # Skip early only if there's truly nothing to draw — including no
+    # active flash carrying a toast over from a recent transition.
+    if (cx_norm is None and cy_norm is None and not mode
+            and not (flash_active and toast_override)):
+        return
+
+    # cairooverlay::draw doesn't supply width/height directly; read them
+    # off the element's sink pad caps. Cached on the element on first draw.
+    if dims is not None:
+        width, height = dims
+    else:
+        width, height = _cached_overlay_dims(overlay)
+    if width is None or height is None:
+        return
 
     if cx_norm is not None and cy_norm is not None:
         cx = cx_norm * width
@@ -663,9 +691,13 @@ def draw_target_cross(overlay, context, timestamp, duration,
         _draw_state_badge(context, mode, width, height, flash_active)
 
     # When the followee just changed, also draw a centered toast so the
-    # operator sees the transition even if they weren't watching the badge.
+    # operator sees the transition even if they weren't watching the
+    # badge. Live path leaves toast_override as None → default text.
+    # Offline renderer resolves cause from events.jsonl and supplies
+    # specific text (e.g. "USER LOCKED ID 5" / "REID RE-ACQUIRED ID 5").
     if flash_active:
-        _draw_followee_changed_toast(context, mode, width, height)
+        toast_text = toast_override or "TARGET CHANGED"
+        _draw_followee_changed_toast(context, mode, width, height, toast_text)
 
 
 def _draw_state_badge(context, mode, width, height, flash_active=False) -> None:
@@ -699,11 +731,15 @@ def _draw_state_badge(context, mode, width, height, flash_active=False) -> None:
     context.show_text(text)
 
 
-def _draw_followee_changed_toast(context, mode, width, height) -> None:
+def _draw_followee_changed_toast(context, mode, width, height,
+                                 text="TARGET CHANGED") -> None:
     """Centred banner shown for _FOLLOWEE_FLASH_SECS after the followee
     changes. Visible whether the operator was watching the corner or not.
+
+    ``text`` defaults to ``"TARGET CHANGED"`` for live recordings; the
+    offline renderer passes a cause-specific string ("USER LOCKED ID 5",
+    "REID RE-ACQUIRED ID 5", …) sourced from ``events.jsonl``.
     """
-    text = "TARGET CHANGED"
     pad_x = 14
     pad_y = 8
     font_size = max(16, int(height * 0.034))

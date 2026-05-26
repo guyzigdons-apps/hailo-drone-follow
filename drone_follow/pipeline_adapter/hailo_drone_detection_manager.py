@@ -16,6 +16,7 @@ from typing import Optional
 import hailo
 import numpy as np
 
+from drone_follow.follow_api.event_log import log_follow_change
 from drone_follow.follow_api.types import Detection
 from drone_follow.perf_tracker import PerfTracker
 
@@ -319,7 +320,9 @@ def _app_callback_inner(element, buffer, user_data):
                     LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
                                 user_data.reid_search_timeout,
                                 "auto mode" if auto_select else "IDLE (auto-select off)")
+                    prev_target = target_state.get_target()
                     target_state.enter_auto_mode()
+                    log_follow_change(prev_target, None, cause="TIMEOUT")
                     reid_mgr.clear()
                     if not auto_select:
                         target_state.set_paused(True)
@@ -327,7 +330,9 @@ def _app_callback_inner(element, buffer, user_data):
                     LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
                                  target_state.get_target())
             else:
+                prev_target = target_state.get_target()
                 target_state.enter_auto_mode()
+                log_follow_change(prev_target, None, cause="AUTO")
                 if not auto_select:
                     target_state.set_paused(True)
                     LOGGER.info("[IDLE] Target lost (no persons) — auto-select off, holding position")
@@ -393,7 +398,9 @@ def _app_callback_inner(element, buffer, user_data):
                             if new_tid is not None and new_tid != target_id:
                                 # Tracker drifted onto a different person and
                                 # ReID found the right one — switch tracks.
+                                prev_target = target_id
                                 target_state.set_target(new_tid)
+                                log_follow_change(prev_target, new_tid, cause="REID-DRIFT")
                                 reid_manager.on_reidentified(new_tid)
                                 best = person_by_id.get(new_tid, best)
                                 target_id = new_tid
@@ -424,7 +431,9 @@ def _app_callback_inner(element, buffer, user_data):
                     LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
                                 user_data.reid_search_timeout,
                                 "auto mode" if auto_select else "IDLE (auto-select off)")
+                    prev_target = target_state.get_target()
                     target_state.enter_auto_mode()
+                    log_follow_change(prev_target, None, cause="TIMEOUT")
                     reid_manager.clear()
                     if not auto_select:
                         target_state.set_paused(True)
@@ -439,7 +448,9 @@ def _app_callback_inner(element, buffer, user_data):
                                 user_data.video_width, user_data.video_height)
                             if new_tid is not None:
                                 # Re-identified — resume following with the new track ID
+                                prev_target = target_state.get_target()
                                 target_state.set_target(new_tid)
+                                log_follow_change(prev_target, new_tid, cause="REID")
                                 reid_manager.on_reidentified(new_tid)
                                 best = person_by_id[new_tid]
                                 target_state.update_last_seen()
@@ -474,7 +485,9 @@ def _app_callback_inner(element, buffer, user_data):
                 display_id = target_id
                 if reid_manager is not None and reid_manager.original_id is not None:
                     display_id = reid_manager.original_id
+                prev_target = target_id
                 target_state.enter_auto_mode()
+                log_follow_change(prev_target, None, cause="AUTO")
                 if not auto_select:
                     target_state.set_paused(True)
                     LOGGER.info("[IDLE] Target ID %s lost — auto-select off, holding position. Available: %s",
@@ -508,6 +521,7 @@ def _app_callback_inner(element, buffer, user_data):
         biggest_id, biggest_person = _find_biggest_person(person_by_id)
         if biggest_id is not None:
             target_state.set_target(biggest_id)
+            log_follow_change(None, biggest_id, cause="AUTO")
             # Match manual-selection state: AUTO acquisition is treated as an explicit lock
             # so OpenHD reports the real follow_id and the state machine is symmetric.
             target_state.set_explicit_lock(True)
