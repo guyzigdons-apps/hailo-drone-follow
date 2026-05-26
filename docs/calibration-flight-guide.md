@@ -36,7 +36,7 @@ damping knob.
 Do these once before the calibration session. None of these values get touched
 mid-flight.
 
-1. **Load a clean baseline** — on the ground, `drone-follow --config
+1. **Load a clean baseline** — on the ground, `robot-follow --config
    df_config.example.json ...` (or set the JSON path in your boot config).
    Calibrate from a known starting point, not from yesterday's in-progress
    tweaks.
@@ -54,7 +54,7 @@ mid-flight.
    batteries so you have room to repeat one.
 6. **Subject** — you (solo). Pace is ~2 m/s (brisk walk / slow jog). You'll
    need open space of ~30 m in each direction.
-7. **Slider operator** — your phone connected to QOpenHD (or the drone-follow
+7. **Slider operator** — your phone connected to QOpenHD (or the robot-follow
    web UI). Sliders are **live** — values apply the moment you let go. Use
    the **Save config (air)** toggle after each flight to persist good values.
 
@@ -249,7 +249,7 @@ If both flights converged cleanly, you should land near values like these
 
 ## Post-flight review
 
-1. Pull recordings off the drone (`drone_follow/recordings/rec_*.mp4`).
+1. Pull recordings off the drone (`robot_follow/recordings/rec_*.mp4`).
 2. For each axis, eyeball the target bounding box over time:
    - **Yaw:** `center_x` should sit near 0.5 with small excursions.
    - **Forward (distance):** `bbox_height` should sit near *Target bbox height*

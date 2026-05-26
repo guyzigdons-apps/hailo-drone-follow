@@ -319,8 +319,8 @@ fi
 # left root-owned. We deliberately don't chown the whole APP_ROOT —
 # git-tracked files were already user-owned and we don't want to touch
 # unrelated files the user has staged.
-chown_back "${APP_ROOT}/drone_follow/ui/node_modules"
-chown_back "${APP_ROOT}/drone_follow/ui/build"
+chown_back "${APP_ROOT}/robot_follow/ui/node_modules"
+chown_back "${APP_ROOT}/robot_follow/ui/build"
 for egg in "${APP_ROOT}"/*.egg-info; do
     [ -e "$egg" ] && chown_back "$egg"
 done

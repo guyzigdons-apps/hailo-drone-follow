@@ -78,7 +78,7 @@ has the SHM region mapped.
 
 ### 3. drone-follow — Auto-detect Resolution from Metadata
 
-**File:** `drone_follow/pipeline_adapter/hailo_drone_detection_manager.py`
+**File:** `robot_follow/pipeline_adapter/hailo_drone_detection_manager.py`
 
 Three changes:
 
@@ -203,7 +203,7 @@ User selects new resolution in QOpenHD
 
 | File | Change |
 |------|--------|
-| `drone_follow/pipeline_adapter/hailo_drone_detection_manager.py` | `_read_shm_resolution()`, auto-detect in `_shm_source_pipeline()`, socket polling in `_shm_wait_for_socket()`, rebuild in `_shm_rebuild()` |
+| `robot_follow/pipeline_adapter/hailo_drone_detection_manager.py` | `_read_shm_resolution()`, auto-detect in `_shm_source_pipeline()`, socket polling in `_shm_wait_for_socket()`, rebuild in `_shm_rebuild()` |
 
 ---
 

@@ -63,7 +63,7 @@ CONFIGS = [
         "include_full_frame": True,
     },
     # Adds a centered ~0.4x0.4 tile on top of the 3x2 grid — gives a higher
-    # pixel-density look at the frame center where drone-follow targets bias.
+    # pixel-density look at the frame center where robot-follow targets bias.
     {
         "label": "3x2+center",
         "tiles_x": 3, "tiles_y": 2,

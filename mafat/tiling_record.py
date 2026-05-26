@@ -182,7 +182,7 @@ class GStreamerTilingRecordApp(GStreamerTilingApp):
             "--include-center-tile",
             action="store_true",
             help="Append a centered square static tile to the grid. Useful for "
-                 "drone-follow scenarios where the target is biased to the frame center.",
+                 "robot-follow scenarios where the target is biased to the frame center.",
         )
         parser.add_argument(
             "--center-tile-size",
