@@ -117,6 +117,23 @@ CONFIGS = [
     # Hybrid: 4x3 (4:3-aspect tiles) + whole-frame rescue for large objects.
     {"label": "4x3-native+full", "tiles_x": 4, "tiles_y": 3, "overlap_x": 0.25, "overlap_y": 0.25,
      "source_w": None, "source_h": None, "include_full_frame": True},
+
+    # +vga3x variants — same grid as above plus one centred VGA-3x rescue
+    # rect (1920x1440 src-px = exact 3x integer downscale to model input).
+    # Costs only +1 inference per frame; should pull up recall on
+    # action-band targets that fragment across grid tiles.
+    {"label": "2x2-native+vga3x", "tiles_x": 2, "tiles_y": 2, "overlap_x": 0.25, "overlap_y": 0.25,
+     "source_w": None, "source_h": None, "extra_rects": ["center_vga_3x"]},
+    {"label": "3x2-native+vga3x", "tiles_x": 3, "tiles_y": 2, "overlap_x": 0.25, "overlap_y": 0.25,
+     "source_w": None, "source_h": None, "extra_rects": ["center_vga_3x"]},
+    {"label": "3x3-native+vga3x", "tiles_x": 3, "tiles_y": 3, "overlap_x": 0.25, "overlap_y": 0.25,
+     "source_w": None, "source_h": None, "extra_rects": ["center_vga_3x"]},
+    {"label": "4x3-native+vga3x", "tiles_x": 4, "tiles_y": 3, "overlap_x": 0.25, "overlap_y": 0.25,
+     "source_w": None, "source_h": None, "extra_rects": ["center_vga_3x"]},
+    {"label": "6x4-native+vga3x", "tiles_x": 6, "tiles_y": 4, "overlap_x": 0.25, "overlap_y": 0.25,
+     "source_w": None, "source_h": None, "extra_rects": ["center_vga_3x"]},
+    {"label": "8x6-native+vga3x", "tiles_x": 8, "tiles_y": 6, "overlap_x": 0.25, "overlap_y": 0.25,
+     "source_w": None, "source_h": None, "extra_rects": ["center_vga_3x"]},
 ]
 
 
