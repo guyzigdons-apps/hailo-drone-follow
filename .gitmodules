@@ -4,4 +4,4 @@
 [submodule "hailo-apps"]
 	path = hailo-apps
 	url = git@github.com:hailocs/hailo-apps-internal.git
-	branch = community_plugins
+	branch = community_apps
