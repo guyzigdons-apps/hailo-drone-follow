@@ -582,7 +582,7 @@ _FOLLOWEE_FLASH_SECS = 2.0   # badge tints + "TARGET CHANGED" text for this long
 
 
 def draw_target_cross(overlay, context, timestamp, duration,
-                      cross_state, target_state=None):
+                      cross_state, target_state=None, dims=None):
     """``cairooverlay::draw`` handler — renders the target cross + a small
     state badge.
 
@@ -595,6 +595,14 @@ def draw_target_cross(overlay, context, timestamp, duration,
       * ``cx`` / ``cy`` set — full draw: cross at target center + badge.
       * ``cx`` / ``cy`` ``None`` but ``mode`` set — badge-only (SEARCH).
       * everything ``None`` — early-return; frame passes through clean.
+
+    ``dims`` is an offline-render escape hatch: when provided as
+    ``(width, height)`` the function uses it directly instead of reading
+    sink-pad caps off ``overlay``. The live cairo callback path leaves
+    it ``None`` and ``overlay`` is resolved via :func:`_cached_overlay_dims`.
+    The offline renderer (``scripts/render_overlay.py``) passes a stub
+    overlay and supplies ``dims`` so the same draw code runs over a raw
+    cairo surface.
     """
     cx_norm, cy_norm, mode = cross_state.get()
     if cx_norm is None and cy_norm is None and not mode:
@@ -602,7 +610,10 @@ def draw_target_cross(overlay, context, timestamp, duration,
 
     # cairooverlay::draw doesn't supply width/height directly; read them
     # off the element's sink pad caps. Cached on the element on first draw.
-    width, height = _cached_overlay_dims(overlay)
+    if dims is not None:
+        width, height = dims
+    else:
+        width, height = _cached_overlay_dims(overlay)
     if width is None or height is None:
         return
 
