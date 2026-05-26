@@ -172,6 +172,118 @@ def filter_tile_shaped(frames_doc: dict, tol: float) -> tuple[int, int]:
     return dropped, total
 
 
+def is_contained_fragment(det_small: dict, det_big: dict,
+                          area_ratio_max: float = 0.5,
+                          center_slack: float = 0.0) -> bool:
+    """Return True if det_small should be suppressed by det_big under
+    containment-merge.
+
+    Rules (ALL must hold):
+    1. Same class — det_small['label'] == det_big['label']  (or class_id eq).
+    2. det_small.area < area_ratio_max * det_big.area.
+    3. det_small.center lies within det_big (with optional ``center_slack``
+       margin in normalized coords, default 0 = strict containment of center).
+    """
+    # 1. Same-class check. Prefer label string when both sides have one,
+    #    otherwise fall back to class_id. The two HEFs in the bench produce
+    #    label strings consistently, so this branch is almost always the
+    #    string path; the class_id fallback exists for parity with
+    #    det_class_key() semantics.
+    lbl_s = (det_small.get("label") or "").lower() if det_small.get("label") else None
+    lbl_b = (det_big.get("label") or "").lower() if det_big.get("label") else None
+    if lbl_s is not None and lbl_b is not None:
+        if lbl_s != lbl_b:
+            return False
+    else:
+        cid_s = det_small.get("class_id")
+        cid_b = det_big.get("class_id")
+        if cid_s is None or cid_b is None or int(cid_s) != int(cid_b):
+            return False
+
+    bbox_s = det_small.get("bbox") or []
+    bbox_b = det_big.get("bbox") or []
+    if len(bbox_s) < 4 or len(bbox_b) < 4:
+        return False
+    sx, sy, sw, sh = (float(bbox_s[0]), float(bbox_s[1]),
+                      float(bbox_s[2]), float(bbox_s[3]))
+    bx, by, bw, bh = (float(bbox_b[0]), float(bbox_b[1]),
+                      float(bbox_b[2]), float(bbox_b[3]))
+    area_s = sw * sh
+    area_b = bw * bh
+    if area_b <= 0:
+        return False
+
+    # 2. Size ratio. Strict '<' so an area-tied det is NOT suppressed
+    #    (it'll come first in the area-DESC pass anyway).
+    if area_s >= area_ratio_max * area_b:
+        return False
+
+    # 3. Centre containment (with slack).
+    cx = sx + sw / 2.0
+    cy = sy + sh / 2.0
+    if cx < bx - center_slack or cx > bx + bw + center_slack:
+        return False
+    if cy < by - center_slack or cy > by + bh + center_slack:
+        return False
+    return True
+
+
+def containment_merge(dets: list[dict], area_ratio_max: float = 0.5,
+                      center_slack: float = 0.0) -> list[dict]:
+    """Sort dets by area DESC. For each big det, suppress any later (smaller)
+    det that is_contained_fragment relative to it. Returns the kept list.
+
+    The original ``dets`` list is not mutated; a new list is returned that
+    contains references to the kept det dicts (no copies).
+    """
+    # Annotate with original index + area for a stable area-DESC sort.
+    indexed: list[tuple[int, float, dict]] = []
+    for i, d in enumerate(dets):
+        bbox = d.get("bbox") or []
+        if len(bbox) < 4:
+            # Malformed — keep but treat as zero area so it sorts last.
+            indexed.append((i, 0.0, d))
+            continue
+        area = float(bbox[2]) * float(bbox[3])
+        indexed.append((i, area, d))
+    # Sort area DESC, then original-index ASC for determinism on ties.
+    indexed.sort(key=lambda t: (-t[1], t[0]))
+
+    suppressed: set[int] = set()
+    n = len(indexed)
+    for big_pos in range(n):
+        big_orig_idx, _big_area, big_det = indexed[big_pos]
+        if big_orig_idx in suppressed:
+            continue
+        for small_pos in range(big_pos + 1, n):
+            small_orig_idx, _small_area, small_det = indexed[small_pos]
+            if small_orig_idx in suppressed:
+                continue
+            if is_contained_fragment(small_det, big_det,
+                                     area_ratio_max=area_ratio_max,
+                                     center_slack=center_slack):
+                suppressed.add(small_orig_idx)
+    return [d for i, d in enumerate(dets) if i not in suppressed]
+
+
+def filter_containment_merge(frames_doc: dict,
+                             area_ratio_max: float = 0.5,
+                             center_slack: float = 0.0) -> tuple[int, int]:
+    """Mutate ``frames_doc`` in place, applying :func:`containment_merge`
+    per frame. Returns ``(suppressed, original_total)``."""
+    suppressed = 0
+    total = 0
+    for fr in frames_doc.get("frames", []):
+        dets = fr.get("detections") or []
+        before = len(dets)
+        total += before
+        kept = containment_merge(dets, area_ratio_max=area_ratio_max,
+                                 center_slack=center_slack)
+        suppressed += before - len(kept)
+        fr["detections"] = kept
+    return suppressed, total
+
+
 def filter_classes(frames_doc: dict,
                    keep_labels: list[str] | None,
                    keep_class_ids: list[int] | None) -> tuple[int, int]:
@@ -399,6 +511,19 @@ def main(argv=None) -> int:
     ap.add_argument("--tile-shape-tol", type=float, default=0.01,
                     help="Normalized tolerance for the exact-tile-shape arm of the "
                          "phantom filter (default 0.01).")
+    ap.add_argument("--containment-merge", action="store_true",
+                    help="Apply a post-NMS containment-merge filter: drop any det "
+                         "whose centre lies inside a larger same-class det and whose "
+                         "area is less than --containment-area-ratio times the "
+                         "larger det's area. Addresses the architectural flaw where "
+                         "IoU-based NMS keeps small fragments contained inside "
+                         "whole-object detections (see PERF_REPORT sec 7.1).")
+    ap.add_argument("--containment-area-ratio", type=float, default=0.5,
+                    help="Area-ratio ceiling for containment-merge: suppress smaller "
+                         "det only if small.area < ratio * big.area (default 0.5).")
+    ap.add_argument("--containment-center-slack", type=float, default=0.0,
+                    help="Centre-containment slack in normalized coords for "
+                         "containment-merge (default 0.0 = strict).")
     ap.add_argument("--filter-classes", nargs="+", default=None,
                     metavar="LABEL",
                     help="Keep only detections whose label is in this list (case-"
@@ -418,6 +543,14 @@ def main(argv=None) -> int:
             pct = (100.0 * dropped / total) if total else 0.0
             print(f"[phantom] {file_label}: dropped {dropped} phantoms "
                   f"({pct:.1f}%)")
+        if args.containment_merge:
+            suppressed, total = filter_containment_merge(
+                doc,
+                area_ratio_max=args.containment_area_ratio,
+                center_slack=args.containment_center_slack,
+            )
+            print(f"[containment-merge] {file_label}: suppressed "
+                  f"{suppressed} of {total} dets")
         if args.filter_classes or args.keep_classes_from_class_ids:
             dropped, total = filter_classes(
                 doc,
@@ -450,6 +583,9 @@ def main(argv=None) -> int:
                  "bins_px": [list(b) for b in bins],
                  "drop_tile_shaped": bool(args.drop_tile_shaped),
                  "tile_shape_tol": float(args.tile_shape_tol),
+                 "containment_merge": bool(args.containment_merge),
+                 "containment_area_ratio": float(args.containment_area_ratio),
+                 "containment_center_slack": float(args.containment_center_slack),
                  "filter_classes": list(args.filter_classes) if args.filter_classes else None,
                  "keep_classes_from_class_ids": list(args.keep_classes_from_class_ids)
                                                  if args.keep_classes_from_class_ids else None,

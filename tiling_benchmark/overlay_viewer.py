@@ -45,10 +45,10 @@ try:
     # Allow `python tiling_benchmark/overlay_viewer.py` (script mode) AND
     # `python -m tiling_benchmark.overlay_viewer` (module mode).
     from .preview_cache import PreviewCache
-    from .analyze_pxt import is_phantom
+    from .analyze_pxt import containment_merge, is_phantom
 except ImportError:  # pragma: no cover - script-mode fallback
     from preview_cache import PreviewCache  # type: ignore
-    from analyze_pxt import is_phantom  # type: ignore
+    from analyze_pxt import containment_merge, is_phantom  # type: ignore
 
 # Distinct BGR colours — matches bench/overlay_dets.py palette order.
 PALETTE = [
@@ -156,6 +156,12 @@ class Run:
         self.tile_rects: list[tuple[float, float, float, float]] = \
             tile_rects_from_config(self.config)
         self.visible_var: tk.BooleanVar | None = None  # set after Tk root exists
+        # Containment-merge per-frame cache: key = (frame_no, area_ratio_max,
+        # center_slack, hide_phantoms). Value = (kept_dets_list, n_suppressed).
+        # We key on the filter params so toggling phantoms or tuning the ratio
+        # doesn't surface stale results, but identical-params re-renders (zoom,
+        # pan) are O(1).
+        self._cm_cache: dict[tuple, tuple[list[dict], int]] = {}
 
 
 FULL_RES_LRU_CAP = 8  # Phase 3: small full-res frame cache for zoomed-in views.
@@ -238,6 +244,13 @@ class OverlayViewer:
         # Per-run phantom count for the current frame (rebuilt each render
         # when hiding is ON; used for the HUD legend).
         self._phantoms_hidden_per_run: dict[str, int] = {}
+        # Containment-merge filter: default ON. Suppresses same-class dets
+        # whose centre lies inside a larger det and whose area is below
+        # `area_ratio_max * big.area`. See analyze_pxt.containment_merge and
+        # PERF_REPORT sec 7.1.
+        self._containment_merge_var = tk.BooleanVar(value=True)
+        # Per-run merged count for the current frame (used for HUD legend).
+        self._merged_per_run: dict[str, int] = {}
         # Phase 4 state: sidebar zoom slider (two-way synced with wheel) +
         # opt-in native-res zoom (full-res cv2 decode past cache density).
         self._zoom_var = tk.DoubleVar(value=1.0)
@@ -332,6 +345,16 @@ class OverlayViewer:
         # analyze_pxt.is_phantom).
         tk.Checkbutton(tiles_lf, text="Hide phantoms",
                        variable=self._hide_phantoms_var,
+                       fg="white", bg="#202020",
+                       activebackground="#202020",
+                       activeforeground="white",
+                       selectcolor="#404040",
+                       command=self._render).pack(anchor="w")
+        # Containment-merge: suppresses small same-class dets contained
+        # inside a larger same-class det (post-NMS NMS-fragment fix; see
+        # analyze_pxt.containment_merge).
+        tk.Checkbutton(tiles_lf, text="Containment-merge",
+                       variable=self._containment_merge_var,
                        fg="white", bg="#202020",
                        activebackground="#202020",
                        activeforeground="white",
@@ -754,7 +777,9 @@ class OverlayViewer:
         # Draw bboxes for visible runs.
         conf_min = float(self._conf_min_var.get())
         hide_phantoms = bool(self._hide_phantoms_var.get())
+        apply_cm = bool(self._containment_merge_var.get())
         self._phantoms_hidden_per_run = {}
+        self._merged_per_run = {}
         visible_runs: list[Run] = []
         for r in self.runs:
             if not r.visible_var.get():
@@ -762,12 +787,42 @@ class OverlayViewer:
             visible_runs.append(r)
             colour = _rgb(r.colour_bgr)
             n_phantoms = 0
-            for det in r.idx.get(self.frame_no, []):
-                conf = float(det.get("confidence", 0.0))
-                if conf < conf_min:
-                    continue
+            # Stage 1: filter the per-frame det list by phantom rule.
+            # (Confidence is checked later in the draw loop so the slider
+            # doesn't bust the containment-merge cache.)
+            raw_dets = r.idx.get(self.frame_no, [])
+            after_phantom: list[dict] = []
+            for det in raw_dets:
                 if hide_phantoms and r.tile_rects and is_phantom(det, r.tile_rects):
                     n_phantoms += 1
+                    continue
+                after_phantom.append(det)
+            # Stage 2: containment-merge over the post-phantom list. Cache
+            # keyed on (frame, params, post-phantom-list identity).
+            if apply_cm:
+                cache_key = (self.frame_no, hide_phantoms, 0.5, 0.0)
+                cached = r._cm_cache.get(cache_key)
+                if cached is None:
+                    kept = containment_merge(after_phantom,
+                                             area_ratio_max=0.5,
+                                             center_slack=0.0)
+                    n_merged = len(after_phantom) - len(kept)
+                    r._cm_cache[cache_key] = (kept, n_merged)
+                    # Keep cache bounded — drop oldest entries beyond a small
+                    # window so scrubbing through the video doesn't leak.
+                    if len(r._cm_cache) > 128:
+                        first_key = next(iter(r._cm_cache))
+                        r._cm_cache.pop(first_key, None)
+                else:
+                    kept, n_merged = cached
+                if n_merged > 0:
+                    self._merged_per_run[r.label] = n_merged
+                draw_dets = kept
+            else:
+                draw_dets = after_phantom
+            for det in draw_dets:
+                conf = float(det.get("confidence", 0.0))
+                if conf < conf_min:
                     continue
                 bx, by, bw, bh = det["bbox"]
                 # bbox in source-px
@@ -938,7 +993,13 @@ class OverlayViewer:
             # disp is RGB; palette is BGR — swap channels for legend swatches.
             rgb_colour = (r.colour_bgr[2], r.colour_bgr[1], r.colour_bgr[0])
             n_ph = self._phantoms_hidden_per_run.get(r.label, 0)
-            txt = r.label if n_ph == 0 else f"{r.label}  (phantoms hidden: {n_ph})"
+            n_mg = self._merged_per_run.get(r.label, 0)
+            extras: list[str] = []
+            if n_ph > 0:
+                extras.append(f"phantoms hidden: {n_ph}")
+            if n_mg > 0:
+                extras.append(f"merged: {n_mg}")
+            txt = r.label if not extras else f"{r.label}  ({'; '.join(extras)})"
             cv2.putText(disp, txt, (pad, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                         rgb_colour, 2, cv2.LINE_AA)

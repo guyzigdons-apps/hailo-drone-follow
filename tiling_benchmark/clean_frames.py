@@ -30,6 +30,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 from analyze_pxt import (  # noqa: E402
     _compute_tile_rects,
+    containment_merge,
     is_phantom,
 )
 
@@ -84,6 +85,16 @@ def main(argv=None) -> int:
     ap.add_argument("--tile-shape-tol", type=float, default=0.01,
                     help="Normalized tolerance for the exact-tile-shape arm of "
                          "the phantom filter (default 0.01).")
+    ap.add_argument("--containment-merge", action="store_true",
+                    help="Also apply the containment-merge post-NMS filter: drop "
+                         "any det whose centre is inside a larger same-class det "
+                         "and whose area is < ratio * big_area. Opt-in to preserve "
+                         "backwards compat with raw-NMS pipelines.")
+    ap.add_argument("--containment-area-ratio", type=float, default=0.5,
+                    help="Area-ratio ceiling for containment-merge (default 0.5).")
+    ap.add_argument("--containment-center-slack", type=float, default=0.0,
+                    help="Centre-containment slack in normalized coords for "
+                         "containment-merge (default 0.0 = strict).")
     ap.add_argument("--in-place", action="store_true",
                     help="Overwrite the input file. Destructive — destroys "
                          "the raw detections.")
@@ -108,7 +119,24 @@ def main(argv=None) -> int:
 
     dropped, total = clean_frames_doc(doc, args.tile_shape_tol)
     pct = (100.0 * dropped / total) if total else 0.0
-    print(f"dropped {dropped} of {total} detections ({pct:.1f}%)")
+    print(f"[phantom] dropped {dropped} of {total} detections ({pct:.1f}%)")
+
+    if args.containment_merge:
+        cm_suppressed = 0
+        cm_total = 0
+        for fr in doc.get("frames", []):
+            dets = fr.get("detections") or []
+            cm_total += len(dets)
+            kept = containment_merge(
+                dets,
+                area_ratio_max=args.containment_area_ratio,
+                center_slack=args.containment_center_slack,
+            )
+            cm_suppressed += len(dets) - len(kept)
+            fr["detections"] = kept
+        cm_pct = (100.0 * cm_suppressed / cm_total) if cm_total else 0.0
+        print(f"[containment-merge] suppressed {cm_suppressed} of "
+              f"{cm_total} detections ({cm_pct:.1f}%)")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w") as f:
