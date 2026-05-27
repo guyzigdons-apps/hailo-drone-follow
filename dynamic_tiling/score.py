@@ -22,32 +22,34 @@ class RunScore:
     n_hit: int
     recall: float
     mean_iou: float
-    per_frame_iou: dict  # frame_idx -> iou (0.0 if missed)
+    per_frame_iou: dict[int, float | None]  # frame_idx -> IoU, or None if no prediction that frame
 
 
 def score_run(gt_traj: dict, pred_traj: dict, iou_thr: float = 0.5) -> RunScore:
-    """gt_traj/pred_traj: {frame_idx: (x,y,w,h) normalized} (pred may have None)."""
+    """gt_traj/pred_traj: {frame_idx: (x,y,w,h) normalized}. A frame missing from pred_traj, or present with value None, counts as a miss (IoU contribution 0)."""
     per_frame = {}
     n_hit = 0
     iou_sum = 0.0
     for f, gt_box in gt_traj.items():
         pred_box = pred_traj.get(f)
-        iou = _iou(gt_box, pred_box) if pred_box else 0.0
+        iou = _iou(gt_box, pred_box) if pred_box is not None else None
         per_frame[f] = iou
-        if iou >= iou_thr:
+        if iou is not None and iou >= iou_thr:
             n_hit += 1
             iou_sum += iou
     n = len(gt_traj)
     return RunScore(
         n_gt_frames=n, n_hit=n_hit,
         recall=(n_hit / n) if n else 0.0,
-        mean_iou=(iou_sum / n_hit) if n_hit else 0.0,
+        mean_iou=(iou_sum / n_hit) if n_hit else 0.0,  # mean IoU over HIT frames only (iou >= iou_thr)
         per_frame_iou=per_frame,
     )
 
 
 def compare(name_a: str, a: RunScore, name_b: str, b: RunScore) -> dict:
     return {
-        name_a: dict(recall=a.recall, mean_iou=a.mean_iou, hits=a.n_hit),
-        name_b: dict(recall=b.recall, mean_iou=b.mean_iou, hits=b.n_hit),
+        name_a: dict(recall=a.recall, mean_iou=a.mean_iou, hits=a.n_hit,
+                     n_gt_frames=a.n_gt_frames),
+        name_b: dict(recall=b.recall, mean_iou=b.mean_iou, hits=b.n_hit,
+                     n_gt_frames=b.n_gt_frames),
     }
