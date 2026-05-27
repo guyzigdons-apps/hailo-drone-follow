@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Iterable, Sequence
 
 from .types import CropRect, Det
 
 
-def map_to_source(crop_dets, crop: CropRect, src_w: int, src_h: int) -> list[Det]:
+def map_to_source(crop_dets: Iterable, crop: CropRect, src_w: int, src_h: int) -> list[Det]:
     """Map crop-local normalized detections into normalized full-frame Dets.
 
     `crop_dets` items expose .cls .x .y .w .h .score normalized within the crop

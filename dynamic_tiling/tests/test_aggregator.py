@@ -17,6 +17,9 @@ def test_map_to_source_places_box_correctly():
     assert abs(o.x - 1160 / 4000) < 1e-6
     assert abs(o.y - (500 + 0.25 * 480) / 3000) < 1e-6
     assert abs(o.w - (0.5 * 640) / 4000) < 1e-6
+    assert abs(o.h - (0.5 * 480) / 3000) < 1e-6   # height uses crop.h, not crop.w
+    assert o.cls == 0
+    assert abs(o.score - 0.9) < 1e-6
 
 
 def test_nms_merges_overlapping_same_class():
