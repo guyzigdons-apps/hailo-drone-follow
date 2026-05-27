@@ -31,16 +31,15 @@ class HefBackend:
     """Real on-chip backend wrapping tiling_benchmark HefHandle."""
 
     def __init__(self, hef_path: str, nms_score_threshold: float = 0.25):
-        from probe_phantom_hef import HefHandle  # via _vendor_paths
-        self._HefHandle = HefHandle
+        from probe_phantom_hef import HefHandle, decode_nms_output  # via _vendor_paths
         self._handle = HefHandle.open(hef_path, nms_score_threshold=nms_score_threshold)
+        self._decode = decode_nms_output
 
     def infer(self, frame, crop: CropRect, frame_idx: int) -> list:
-        from probe_phantom_hef import decode_nms_output
         sub = frame[crop.y:crop.y + crop.h, crop.x:crop.x + crop.w]
         resized = cv2.resize(sub, (MODEL_W, MODEL_H), interpolation=cv2.INTER_LINEAR)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        return decode_nms_output(self._handle.infer(rgb))
+        return self._decode(self._handle.infer(rgb))
 
     def close(self) -> None:
         self._handle.close()
