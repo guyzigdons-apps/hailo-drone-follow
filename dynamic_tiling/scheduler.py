@@ -40,10 +40,12 @@ class TileScheduler:
         cy = (by + bh / 2) * self.src_h
         src_h_px = max(1.0, bh * self.src_h)
         crop_w = src_h_px * MODEL_H * MODEL_ASPECT / self.target_model_h
-        lo = MODEL_W / self.max_zoom
+        lo = MODEL_W / self.max_zoom            # crop_w floor => scale <= max_zoom (cap zoom-in)
         crop_w = max(lo, min(float(MODEL_W) * 4, crop_w))
-        crop_w = min(crop_w, float(MODEL_W))
+        crop_w = min(crop_w, float(MODEL_W))    # scale >= 1.0: don't upscale a target that already fits
         need_w = bw * self.src_w * (1 + 2 * self.roi_margin_frac)
+        # Always contain the WHOLE target. A target wider than 640 src-px is already
+        # large and intentionally downscales (scale < 1) to stay whole — it needs no zoom.
         crop_w = max(crop_w, need_w)
         return CropRect.from_center_width(cx, cy, int(round(crop_w))).clamp(
             self.src_w, self.src_h)
@@ -55,9 +57,12 @@ class TileScheduler:
         if lock.status in ("SEARCHING", "LOST") and lock.track_id is not None:
             gx, gy = self.recovery_grid
             bx, by, bw, bh = lock.bbox_norm
+            # Lever 4: extrapolate the last-known centre by predicted motion during the gap.
+            ecx = bx + bw / 2 + lock.last_velocity[0] * lock.frames_since_seen
+            ecy = by + bh / 2 + lock.last_velocity[1] * lock.frames_since_seen
             span = 0.4
-            x0 = max(0.0, (bx + bw / 2 - span / 2)) * self.src_w
-            y0 = max(0.0, (by + bh / 2 - span / 2)) * self.src_h
+            x0 = max(0.0, ecx - span / 2) * self.src_w
+            y0 = max(0.0, ecy - span / 2) * self.src_h
             crops = self._grid(gx, gy, x0, y0, span * self.src_w, span * self.src_h, "s")
         else:
             if on_cadence:

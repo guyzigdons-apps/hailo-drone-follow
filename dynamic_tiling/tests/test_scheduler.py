@@ -46,3 +46,19 @@ def test_recovery_grid_throttled_by_budget():
     tight.charge(4, frame_idx=0)
     crops = sched.decide(lock, frame_idx=1, meter=tight)
     assert len(crops) <= 4
+
+
+def test_recovery_grid_follows_predicted_motion():
+    sched = TileScheduler(src_w=4000, src_h=3000, discovery_period=15,
+                          recovery_grid=(3, 3))
+    # Same last-known bbox; one stationary, one moving right while lost for 5 frames.
+    still = LockState(track_id=7, bbox_norm=(0.40, 0.40, 0.08, 0.20),
+                      status="SEARCHING", frames_since_seen=5, last_velocity=(0.0, 0.0))
+    moving = LockState(track_id=7, bbox_norm=(0.40, 0.40, 0.08, 0.20),
+                       status="SEARCHING", frames_since_seen=5, last_velocity=(0.02, 0.0))
+    cs = sched.decide(still, frame_idx=1, meter=_meter())
+    cm = sched.decide(moving, frame_idx=1, meter=_meter())
+    # Mean tile centre x should shift right for the moving target.
+    mean_x_still = sum(c.x + c.w / 2 for c in cs) / len(cs)
+    mean_x_moving = sum(c.x + c.w / 2 for c in cm) / len(cm)
+    assert mean_x_moving > mean_x_still
