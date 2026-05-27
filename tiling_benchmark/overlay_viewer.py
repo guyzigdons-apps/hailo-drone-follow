@@ -296,8 +296,7 @@ class OverlayViewer:
         )
         # Container for tile-source radiobutton widgets so we can rebuild it
         # when visibility changes (only visible runs are listed).
-        self._tile_source_radio_frame: tk.Frame | None = None
-        self._tile_source_radios: list[tk.Radiobutton] = []
+        self._tile_source_menu: tk.OptionMenu | None = None
 
         self._build_ui()
         self._bind_events()
@@ -331,15 +330,17 @@ class OverlayViewer:
         runs_lf = tk.LabelFrame(sidebar, text="Runs", fg="white", bg="#202020",
                                 labelanchor="nw", padx=6, pady=4)
         runs_lf.pack(fill=tk.X, padx=6, pady=(8, 4))
-        for r in self.runs:
-            row = tk.Frame(runs_lf, bg="#202020")
-            row.pack(fill=tk.X, pady=1)
-            swatch = tk.Label(row, text="    ", bg=bgr_to_hex(r.colour_bgr),
+        # Two-column grid of run-visibility toggles (swatch + checkbox).
+        # Re-render is driven by the trace_add on each r.visible_var, which
+        # also refreshes the tile-source dropdown.
+        for i, r in enumerate(self.runs):
+            cell = tk.Frame(runs_lf, bg="#202020")
+            cell.grid(row=i // 2, column=i % 2, sticky="w",
+                      padx=(0, 10), pady=1)
+            swatch = tk.Label(cell, text="  ", bg=bgr_to_hex(r.colour_bgr),
                               width=2, relief=tk.RAISED, bd=1)
-            swatch.pack(side=tk.LEFT, padx=(0, 6))
-            # Re-render is driven by the trace_add on r.visible_var, which
-            # also rebuilds the tile-source radio list.
-            cb = tk.Checkbutton(row, text=r.label, variable=r.visible_var,
+            swatch.pack(side=tk.LEFT, padx=(0, 4))
+            cb = tk.Checkbutton(cell, text=r.label, variable=r.visible_var,
                                 fg="white", bg="#202020",
                                 activebackground="#202020",
                                 activeforeground="white",
@@ -358,9 +359,20 @@ class OverlayViewer:
                        activeforeground="white",
                        selectcolor="#404040",
                        command=self._render).pack(anchor="w")
-        # Tile-source radio (one row per currently-visible run).
-        self._tile_source_radio_frame = tk.Frame(tiles_lf, bg="#202020")
-        self._tile_source_radio_frame.pack(fill=tk.X, padx=(16, 0))
+        # Tile-source dropdown (only one run's tiles drawn at a time).
+        ts_row = tk.Frame(tiles_lf, bg="#202020")
+        ts_row.pack(fill=tk.X, padx=(16, 0), pady=(2, 2))
+        tk.Label(ts_row, text="from:", fg="white", bg="#202020").pack(side=tk.LEFT)
+        self._tile_source_menu = tk.OptionMenu(ts_row, self._tile_source_var, "")
+        self._tile_source_menu.config(bg="#303030", fg="white",
+                                      activebackground="#404040",
+                                      activeforeground="white",
+                                      highlightthickness=0, bd=1,
+                                      anchor="w")
+        self._tile_source_menu["menu"].config(bg="#303030", fg="white",
+                                              activebackground="#404040",
+                                              activeforeground="white")
+        self._tile_source_menu.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._rebuild_tile_source_radios()
         # Phase 4: opt-in native-res zoom. When OFF (default), zooming past
         # cache resolution stays on the cache with INTER_NEAREST upscale (fast
@@ -511,19 +523,16 @@ class OverlayViewer:
                  justify=tk.LEFT, anchor="w").pack(fill=tk.X)
 
     def _rebuild_tile_source_radios(self) -> None:
-        """Repopulate the tile-source radio with one entry per visible run.
+        """Repopulate the tile-source dropdown with the visible runs.
 
         Called on init and whenever a run's visibility checkbox toggles. If
         the currently selected tile source has just been hidden, fall back
         to the first remaining visible run. If no runs are visible the
-        radio is empty (tile overlay will be skipped at draw time).
+        dropdown is empty (tile overlay will be skipped at draw time).
         """
-        frame = self._tile_source_radio_frame
-        if frame is None:
+        menu_widget = self._tile_source_menu
+        if menu_widget is None:
             return
-        for w in self._tile_source_radios:
-            w.destroy()
-        self._tile_source_radios = []
 
         visible_runs = [r for r in self.runs
                         if r.visible_var is not None and r.visible_var.get()]
@@ -531,17 +540,13 @@ class OverlayViewer:
         if self._tile_source_var.get() not in visible_labels:
             self._tile_source_var.set(visible_labels[0] if visible_labels else "")
 
-        for r in visible_runs:
-            rb = tk.Radiobutton(frame, text=r.label,
-                                variable=self._tile_source_var,
-                                value=r.label,
-                                fg="white", bg="#202020",
-                                activebackground="#202020",
-                                activeforeground="white",
-                                selectcolor="#404040",
-                                command=self._render)
-            rb.pack(anchor="w")
-            self._tile_source_radios.append(rb)
+        menu = menu_widget["menu"]
+        menu.delete(0, "end")
+        for lbl in visible_labels:
+            menu.add_command(
+                label=lbl,
+                command=lambda v=lbl: (self._tile_source_var.set(v),
+                                       self._render()))
 
     def _on_visibility_changed(self, *_args) -> None:
         # Triggered by Tk trace_add on each Run.visible_var.
