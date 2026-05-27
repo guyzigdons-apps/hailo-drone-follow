@@ -40,3 +40,10 @@ def test_lock_enters_searching_then_recovers():
     s = lock.step([_person(0.43, 0.40)])
     assert s.status == "TRACKING"
     assert lock.track_id == tid
+
+
+def test_no_spurious_velocity_on_first_lock():
+    lock = TargetLock()
+    s = lock.step([_person(0.40, 0.40)], lock_if_unlocked=True)
+    assert s.status == "TRACKING"
+    assert abs(s.last_velocity[0]) < 1e-6 and abs(s.last_velocity[1]) < 1e-6

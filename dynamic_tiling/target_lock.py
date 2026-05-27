@@ -10,6 +10,7 @@ from drone_follow.pipeline_adapter.tracker_factory import create_tracker
 from .types import Det, LockState
 
 _SCALE = 1000.0
+_REACQ_IOU = 0.3  # min IoU vs last-known bbox to (re)acquire a track
 
 
 def dets_to_array(person_dets: Sequence[Det]) -> np.ndarray:
@@ -45,6 +46,9 @@ class TargetLock:
     first acquired and never changes, even if ByteTracker internally assigns the
     re-appearing person a new track id.  ``_bt_track_id`` is the *current*
     ByteTracker track id, which can change silently via IoU re-acquisition.
+
+    Single-target offline scope — there is intentionally no give-up timeout;
+    persistent re-id is the real pipeline's job.
     """
 
     def __init__(self, track_buffer: int = 90, **tracker_kwargs):
@@ -72,7 +76,7 @@ class TargetLock:
             i = _iou_tlwh(gt_bbox_norm, t.filtered_tlwh)
             if i > best_iou:
                 best, best_iou = t, i
-        if best is not None and best_iou > 0.3:
+        if best is not None and best_iou > _REACQ_IOU:
             self._set_track(best.track_id)
 
     def step(self, person_dets: Sequence[Det], *, lock_if_unlocked: bool = False,
@@ -98,7 +102,7 @@ class TargetLock:
         # The public track_id (stable identity) is NOT changed.
         s = self.state
         if cur is None and self._bt_track_id is not None and s.bbox_norm[2] > 0:
-            best_iou, best_track = 0.3, None
+            best_iou, best_track = _REACQ_IOU, None
             for t in tracks:
                 if t.is_activated and t.filtered_tlwh and t.track_id != self._bt_track_id:
                     iou = _iou_tlwh(s.bbox_norm, t.filtered_tlwh)
@@ -109,8 +113,9 @@ class TargetLock:
                 cur = best_track
 
         if cur is not None:
-            cx_old = s.bbox_norm[0] + s.bbox_norm[2] / 2 if s.frames_since_seen == 0 else None
-            cy_old = s.bbox_norm[1] + s.bbox_norm[3] / 2 if s.frames_since_seen == 0 else None
+            had_prev = s.frames_since_seen == 0 and s.bbox_norm[2] > 0
+            cx_old = s.bbox_norm[0] + s.bbox_norm[2] / 2 if had_prev else None
+            cy_old = s.bbox_norm[1] + s.bbox_norm[3] / 2 if had_prev else None
             s.bbox_norm = tuple(cur.filtered_tlwh)
             cx_new = s.bbox_norm[0] + s.bbox_norm[2] / 2
             cy_new = s.bbox_norm[1] + s.bbox_norm[3] / 2
@@ -119,6 +124,7 @@ class TargetLock:
             s.status = "TRACKING"
             s.frames_since_seen = 0
         else:
+            # last_velocity is deliberately retained during loss so the scheduler can extrapolate ROI placement.
             s.frames_since_seen += 1
             s.status = "SEARCHING" if s.frames_since_seen <= self.track_buffer else "LOST"
         s.track_id = self.track_id
