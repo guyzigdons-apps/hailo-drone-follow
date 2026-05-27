@@ -62,3 +62,15 @@ def test_recovery_grid_follows_predicted_motion():
     mean_x_still = sum(c.x + c.w / 2 for c in cs) / len(cs)
     mean_x_moving = sum(c.x + c.w / 2 for c in cm) / len(cm)
     assert mean_x_moving > mean_x_still
+
+
+def test_discovery_grid_covers_full_frame():
+    sched = TileScheduler(src_w=4000, src_h=3000, discovery_period=1,
+                          discovery_grid=(3, 2))
+    lock = LockState(track_id=None, status="LOST")  # no ROI, no recovery
+    crops = sched.decide(lock, frame_idx=0, meter=_meter())
+    assert len(crops) == 6
+    assert min(c.x for c in crops) == 0
+    assert max(c.x + c.w for c in crops) == 4000
+    assert min(c.y for c in crops) == 0
+    assert max(c.y + c.h for c in crops) == 3000
