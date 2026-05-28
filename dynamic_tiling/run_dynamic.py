@@ -18,7 +18,6 @@ from pathlib import Path
 
 import cv2
 
-import dynamic_tiling  # noqa: F401
 from .budget import BudgetMeter
 from .scheduler import TileScheduler
 from .target_lock import TargetLock
@@ -40,7 +39,7 @@ def _frame_iter(cap, max_frames):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--video", required=True)
+    ap.add_argument("--video", required=True, type=Path)
     ap.add_argument("--gt", required=True, type=Path)
     ap.add_argument("--hef",
                     default="/usr/local/hailo/resources/models/hailo10h/"
@@ -56,7 +55,7 @@ def main():
                     default=Path("dynamic_tiling/runs/dynamic_run.frames.json"))
     args = ap.parse_args()
 
-    cap = cv2.VideoCapture(args.video)
+    cap = cv2.VideoCapture(str(args.video))
     if not cap.isOpened():
         raise SystemExit(f"cannot open video: {args.video}")
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -80,7 +79,10 @@ def main():
         backend.close()
         cap.release()
 
-    sc = score_run(gt_traj, res.pred_traj, iou_thr=0.5)
+    # Score only over frames actually played (matters when --max-frames is set);
+    # otherwise recall denominator includes frames we never had a chance to detect on.
+    gt_for_score = {f: bb for f, bb in gt_traj.items() if f < res.n_frames}
+    sc = score_run(gt_for_score, res.pred_traj, iou_thr=0.5)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     emit_frames_json(res, label=f"dynamic-b{int(args.budget)}", out_path=args.out)
 
