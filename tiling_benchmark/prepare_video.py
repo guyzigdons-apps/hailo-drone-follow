@@ -20,11 +20,63 @@ Usage:
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+# 6K source dimensions (DJI Mavic 4 Pro main camera; spec §8.1)
+SRC_6K_W = 6016
+SRC_6K_H = 3384
+SRC_NATIVE_FOV_DEG = 70
+
+# Allowed FOV variants. Anything outside this set would require upscaling
+# from the 6K source, which is disallowed (spec §8.2).
+ALLOWED_FOVS = (70, 60, 50)
+
+
+def fov_to_crop_dims(fov_deg: int) -> tuple[int, int]:
+    """Return the (crop_w, crop_h) needed to emulate `fov_deg` from a 6K source.
+
+    Derived from `crop_ratio = tan(fov_deg/2) / tan(70°/2)` per spec §8.2.
+    `crop_h` is the smallest even integer >= `SRC_6K_H * crop_ratio` (h264/h265
+    encoders require even dims), and `crop_w` is derived from `crop_h` so the
+    source 16:9 aspect ratio is preserved exactly (`int(crop_h * 16/9)`).
+
+    The published spec §8.2 table values fall out of this construction:
+        FOV-70: (6016, 3384)
+        FOV-60: (4963, 2792)
+        FOV-50: (4007, 2254)
+
+    Verifies the result is <= source dims and >= 4K output dims (3840x2160);
+    raises ValueError on either violation (we never upscale).
+    """
+    if fov_deg not in ALLOWED_FOVS:
+        raise ValueError(
+            f"fov_deg must be one of {ALLOWED_FOVS}; got {fov_deg}"
+        )
+    ratio = (
+        math.tan(math.radians(fov_deg) / 2.0)
+        / math.tan(math.radians(SRC_NATIVE_FOV_DEG) / 2.0)
+    )
+    # Round crop_h up to the nearest even integer (encoder-friendly), then
+    # derive crop_w from crop_h to preserve the 16:9 source aspect ratio.
+    crop_h = math.ceil(SRC_6K_H * ratio / 2.0) * 2
+    crop_w = int(crop_h * SRC_6K_W / SRC_6K_H)
+    if crop_w > SRC_6K_W or crop_h > SRC_6K_H:
+        raise ValueError(
+            f"fov_deg={fov_deg} requires crop {crop_w}x{crop_h} > source "
+            f"{SRC_6K_W}x{SRC_6K_H}; refusing to upscale"
+        )
+    if crop_w < 3840 or crop_h < 2160:
+        raise ValueError(
+            f"fov_deg={fov_deg} requires crop {crop_w}x{crop_h} < 4K output "
+            f"3840x2160; refusing to upscale"
+        )
+    return crop_w, crop_h
 
 
 def run(cmd: list[str], capture: bool = False) -> subprocess.CompletedProcess:
@@ -147,7 +199,7 @@ def verify_output(output_path: Path) -> None:
 
 def _parse_fov_list(s: str) -> list[int]:
     """Parse `--emit-fov 70,60,50` -> [70, 60, 50]. Validates the FOV set."""
-    allowed = {70, 60, 50}
+    allowed = set(ALLOWED_FOVS)
     try:
         out = [int(x) for x in s.split(",") if x.strip()]
     except ValueError as e:

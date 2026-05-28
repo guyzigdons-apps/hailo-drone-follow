@@ -86,3 +86,29 @@ def test_cli_manifest_path_override(pv):
         ["clip.MP4", "--emit-fov", "70", "--manifest", "/tmp/x.json"]
     )
     assert args.manifest == Path("/tmp/x.json")
+
+
+# ---------------------------------------------------------------------------
+# Crop dimensions math (spec §8.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fov,expected",
+    [
+        (70, (6016, 3384)),  # full 6K (no crop; "FOV-70" native)
+        (60, (4963, 2792)),  # crop_ratio = tan(30°) / tan(35°) ≈ 0.8247
+        (50, (4007, 2254)),  # crop_ratio = tan(25°) / tan(35°) ≈ 0.6661
+    ],
+)
+def test_fov_to_crop_dims(pv, fov, expected):
+    """Crop dimensions match the table in spec §8.2."""
+    assert pv.fov_to_crop_dims(fov) == expected
+
+
+def test_fov_to_crop_dims_rejects_invalid(pv):
+    """Anything other than 70/60/50 raises ValueError."""
+    with pytest.raises(ValueError):
+        pv.fov_to_crop_dims(40)
+    with pytest.raises(ValueError):
+        pv.fov_to_crop_dims(80)
