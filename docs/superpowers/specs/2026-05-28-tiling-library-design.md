@@ -27,7 +27,10 @@ Secondary goal: the library should be **reusable** — both as a pure-Python sta
 - Ablation harness CLI (`hailo-tiling-bench`) — sweeps a matrix and emits per-config `frames.json`
 - GStreamer cache plugins in `hailo-apps-core`: `hailodet_record` (two modes: `tile_cache` and `full_frame`) + `hailonet_cache` (replay) + small `hailofilter` `bypass-on-cache-hit` patch + detiler metadata hooks
 - Source data prep: extension to `tiling_benchmark/prepare_video.py` to emit three FOV variants (`FOV-70` native, `FOV-60`, `FOV-50`) at 4K from each 6K DJI Mavic 4 Pro source clip
-- Visualizer / offline overlay renderer consuming the `full_frame` SQLite output (`hailo-tiling-view`, `hailo-tiling-overlay`)
+- Pi Global Shutter real-hardware variant (`RPI-GS`) recorded and warmed into the paper-reported ablation matrix alongside the emulated FOV variants
+- Geospatial telemetry capture: live `MavsdkTelemetry` persistence into a `telemetry` table; `hailo-tiling-import-ulg` for PX4 ULG files; `hailo-tiling-import-srt` for DJI SRT sidecars
+- Visualizer / offline overlay renderer consuming the `full_frame` SQLite output, with drone-path-on-map overlay (`hailo-tiling-view`, `hailo-tiling-overlay`)
+- Bonus task (best-effort, gated by data collection): DJI optical-zoom maximum-range demonstration at 1× / 2.5× / 6× hardware zoom
 - Paper-with-code release artifacts: license, reproducibility recipe, technical report, citation, public reference data
 
 **Lever implementations included in v1:** the levers already in `dynamic_tiling/scheduler.py` (decimated discovery, ROI tile, recovery grid, motion-predicted placement) plus two new ones to validate the architecture: **ASAHI adaptive slice sizing** and **altitude-gated zoom** (both small implementations that exercise different parts of the framework).
@@ -542,14 +545,80 @@ Separate physical files for each FOV variant:
 
 GT trajectories are generated **per FOV variant** using the existing `GT-12x9-25` dense-tiling flow in `tiling_benchmark/`. Three GT files total (`GT__fov70.frames.json`, `…fov60.frames.json`, `…fov50.frames.json`). The cache file gets warmed once per (FOV variant × HEF), so GT generation amortises across all ablation rows that share the FOV and the HEF.
 
-### 8.6 Real-camera experimentation (Pi Global Shutter)
+### 8.6 Real-hardware variant — `RPI-GS` (paper-reported)
 
-The Pi GS path is used for **end-to-end validation only**:
+The Pi Global Shutter Camera path is **part of the paper-reported results**, alongside the FOV-emulated variants. Its purpose is to validate that the emulation results transfer to real silicon, real optics, and real (global) shutter:
 
-- Live pipeline runs with `--input rpi`, native 1456 × 1088, no FOV emulation
-- `hailodet_record mode=full_frame` is **enabled by default** in `scripts/start_air.sh` (per Phase 12) so every flight produces a `flight_record.sqlite3` artifact
-- The visualizer (Section 7.12) reads those files for post-flight review, exactly the same way it reads the recorded research runs
-- Tile-cache mode is generally not used in production (live inference is the right call when the chip is right there), but is supported via a config flag for offline replay of recorded raw video
+| Label    | Sensor       | Resolution      | Lens (default)    | H-FOV (computed)  | Comparable emulated variant |
+|----------|--------------|-----------------|-------------------|-------------------|------------------------------|
+| `RPI-GS` | Sony IMX296  | 1456 × 1088     | 6 mm C-mount      | ~55°              | `FOV-60` (closest)           |
+
+Why this variant matters:
+- It's the only data point in the paper from real silicon, a real lens, and a global shutter. Every other variant is emulated from a rolling-shutter DJI source.
+- It uses the same `hailo_tiling` library + GStreamer pipeline as the emulated variants — the only differences are the source resolution and the cache file (one keyed on the Pi GS recording's SHA, not on a 4K MP4).
+- If the algorithm rankings on `RPI-GS` mirror those on `FOV-60`, that's strong evidence the emulated ablation transfers to deployment.
+
+**Capture flow:**
+- Live flight on the Pi (real PX4, real Hailo, real camera), `--input rpi`
+- `hailodet_record mode=full_frame` enabled by default (per Phase 14) — produces `flight_record.sqlite3`
+- For paper inclusion, the *same* flight is also recorded as raw video (via the existing GStreamer recording branch — `--record`) so the cache can be warmed offline from the recorded MP4, decoupling paper reproducibility from owning a Pi GS rig
+- The lens used and its measured H-FOV are documented as part of the experimental record (a small `lens_info.json` sibling to the cache file)
+
+**Resolution-mismatch caveat:** at 1.6 MP the Pi GS is well below 4K; the tiler's native-tile sizing picks a different grid (fewer / smaller tiles). The paper reports `RPI-GS` results as a *separate column* in the ablation table — not interpolated against the emulated set, but directly comparable on per-target recall and IoU.
+
+### 8.7 Bonus task — DJI optical-zoom maximum-range demo
+
+A separate experiment from the FOV-70/60/50 + RPI-GS ablation matrix; its purpose is a single paper-quality result demonstrating **maximum real-world detection range** for cars and people with hardware optical zoom. Recorded at the DJI Mavic 4 Pro's native resolution (no FOV emulation) using the camera's three optical-zoom stages:
+
+| Stage         | Equivalent focal length | H-FOV | Sensor used                | Use                                  |
+|---------------|-------------------------|-------|----------------------------|--------------------------------------|
+| Main (1×)     | 28 mm                   | ~70°  | Hasselblad 4/3 CMOS        | wide / baseline                      |
+| Med-tele (2.5×) | 70 mm                  | ~28°  | 1/1.3" CMOS                | mid-distance target acquisition      |
+| Tele (6×)     | 168 mm                  | ~12°  | 1/1.5" CMOS                | extreme-range headline result        |
+
+The same target (a person and a car at known GPS positions) is recorded at each zoom stage; the paper reports the maximum slant range at which the detector achieves a configurable recall threshold (e.g., 0.5 over a 5-second window). This is a single-figure-of-merit result — "with hardware zoom, this system detects person-sized targets out to N metres" — not an algorithm ablation. It demonstrates the architecture composes with optical hardware; it's not used to compare tiling levers (which is what the main ablation is for).
+
+The bonus task is gated by data collection (a pilot needs to fly the Mavic 4 with targets at measured distances). If data isn't available in time for v1, the paper ships without it; phase order keeps it last (Phase 13).
+
+### 8.8 Geospatial telemetry capture (drone position + target distance)
+
+For paper-reported runs we capture per-flight telemetry alongside the detection record. The visualizer renders the drone path on a map; the ablation harness can report "distance to detected target" alongside recall metrics. Two ingest paths:
+
+**From PX4 (Pi + real flight, or SITL):**
+- **Live: `MavsdkTelemetry` provider already in the spec.** Per-frame telemetry rows are written into a new `telemetry` table in `flight_record.sqlite3` (timestamp + lat + lon + alt_msl + alt_agl + yaw + pitch + roll + vx + vy + vz + source='mavsdk').
+- **Offline backup: the `.ulg` file** (PX4's binary flight log). Preserved as an artifact alongside the video. Parsed with `pyulog` by an importer CLI (`hailo-tiling-import-ulg`) to fill any gaps or replace the live capture if it was incomplete.
+
+**From DJI (Mavic 4 Pro research footage):**
+- **Primary: the `.SRT` sidecar file** that the drone auto-generates alongside every video clip. Plain text, one entry per second containing GPS lat/lon, height-above-takeoff, datetime, and per-frame camera params (focal length, ISO, shutter, EV, colour temp). PTS-aligned to the MP4. Parsed by `hailo-tiling-import-srt` into the same `telemetry` table.
+- **Secondary (only if needed): the `.DAT` flight log** from the drone's internal storage. Encrypted binary; parseable with community tools (`dat2csv`, DROID). Higher-rate attitude/velocity data. Not required for v1 — the SRT is sufficient for drone position on a map and rough distance-to-target estimation.
+- **Tertiary: the `.txt` export from DJI Fly app** — human-readable flight summary. Only useful for the paper's data-collection description, not for computation.
+
+**Recommended DJI capture protocol (one-line answer to "what should I save?"):**
+> Save every video clip's matching `.SRT` file. That's it for v1. The DJI app saves both into the same folder; just copy both into the research dataset.
+
+**Schema (added to `flight_record.sqlite3`):**
+
+```sql
+CREATE TABLE telemetry (
+  timestamp_s  REAL NOT NULL,        -- monotonic seconds from flight start
+  source       TEXT NOT NULL,        -- 'mavsdk' | 'ulg' | 'srt' | 'dat'
+  lat          REAL,                  -- WGS84 degrees, NULL if unknown
+  lon          REAL,                  -- WGS84 degrees
+  alt_msl      REAL,                  -- meters above mean sea level
+  alt_agl      REAL,                  -- meters above ground level (PX4 only; NULL from SRT)
+  yaw          REAL,                  -- radians; NULL from SRT
+  pitch        REAL,
+  roll         REAL,
+  vx           REAL,                  -- m/s; NED frame
+  vy           REAL,
+  vz           REAL,
+  PRIMARY KEY (timestamp_s, source)
+);
+CREATE INDEX idx_telemetry_ts ON telemetry(timestamp_s);
+```
+
+**Distance-to-target (derived; v2 in the visualizer, optional for v1 paper):**
+Computed at render time from `(drone_lat, drone_lon, alt_agl, yaw, pitch) + camera_FOV + bbox_center_in_frame` assuming flat ground at the take-off elevation. No extra capture required. The visualizer renders an estimated target ground position on a map and a slant-range readout; the ablation harness can optionally include "mean detection range over the flight" as an extra column. This is geometry, not measurement — disclosed accordingly in the paper.
 
 ## 9. Ablation Harness
 
@@ -610,14 +679,19 @@ The implementation plan (next step after this spec) will decompose into these ph
 8. **GStreamer cache plugins (`hailo-apps-core`)** — `libhailotile_cache.so` shared library, `hailodet_record` (recorder, both `tile_cache` and `full_frame` modes), `hailonet_cache` (replay). Each plugin shipped with golden-file tests and a microbench asserting lookup latency < 1 ms / crop.
 9. **`GstCropperBackend`** — Python adapter that drives the production-style GStreamer pipeline (`hailotilecropper_dynamic` → `hailonet` or `hailonet_cache` → `hailofilter` → `hailodet_record mode=tile_cache` → `hailodetiler` → `hailodet_record mode=full_frame`) from within the ablation harness. Makes the GStreamer pipeline the canonical research path.
 10. **Ablation harness** — `hailo-tiling-bench` CLI + YAML schema; defaults to `GstCropperBackend`; `--backend replay` toggles `hailonet_cache` in the pipeline string. Reports a table with one column per FOV variant.
-11. **Visualizer + overlay renderer** — `hailo-tiling-view` (interactive frame stepper) and `hailo-tiling-overlay` (offline annotated-MP4 batch renderer), both consuming `flight_record.sqlite3`. Replaces / supersedes `tiling_benchmark/overlay_viewer.py` and `tiling_benchmark/overlay_dets.py` once feature-equivalent.
-12. **`hailo-apps-core` patches** — single PR adding (a) detiler metadata hooks (per-detection CropRect provenance + ROI list pass-through), and (b) `hailofilter` `bypass-on-cache-hit` property. Both are small, backwards-compatible, and unlock the cache architecture end-to-end. Parallelisable with phases 1-11.
-13. **Paper-with-code artifacts** — license, README, citation, technical-report skeleton, reference-data + cache fetcher (downloads the three FOV variants and their warmed caches), ablation table generation, published reference cache files (Zenodo / S3).
-14. **Drone-follow migration** — switch `drone_follow/pipeline_adapter/` over to the production pipeline with `hailodet_record mode=full_frame` enabled by default for flight telemetry. Tracker subpackage stays minimal; ByteTracker keeps current behaviour.
+11. **Telemetry capture and import** — add `telemetry` table to `flight_record.sqlite3`; wire `MavsdkTelemetry` to persist live during flight; ship `hailo-tiling-import-ulg` (PX4 ULG → telemetry table) and `hailo-tiling-import-srt` (DJI SRT → telemetry table) CLIs. Distance-to-target derivation as an optional reporting column.
+12. **Visualizer + overlay renderer** — `hailo-tiling-view` (interactive frame stepper with map overlay) and `hailo-tiling-overlay` (offline annotated-MP4 batch renderer), both consuming `flight_record.sqlite3` + `telemetry` table. Replaces / supersedes `tiling_benchmark/overlay_viewer.py` and `tiling_benchmark/overlay_dets.py` once feature-equivalent.
+13. **RPI-GS data collection + cache** — capture a Pi Global Shutter flight with the chosen lens (default 6 mm); record raw video; warm a cache from the recording; ensure the paper's main ablation matrix has an `RPI-GS` column alongside the FOV variants.
+14. **`hailo-apps-core` patches** — single PR adding (a) detiler metadata hooks (per-detection CropRect provenance + ROI list pass-through), and (b) `hailofilter` `bypass-on-cache-hit` property. Both are small, backwards-compatible, and unlock the cache architecture end-to-end. Parallelisable with phases 1-13.
+15. **Paper-with-code artifacts** — license, README, citation, technical-report skeleton, reference-data + cache fetcher (downloads the three FOV variants, the RPI-GS recording, and their warmed caches), ablation table generation, published reference cache files (Zenodo / S3).
+16. **Drone-follow migration** — switch `drone_follow/pipeline_adapter/` over to the production pipeline with `hailodet_record mode=full_frame` and live telemetry persistence enabled by default. Tracker subpackage stays minimal; ByteTracker keeps current behaviour.
+17. **(Bonus, gated by data collection)** DJI optical-zoom maximum-range capture and analysis at 1× / 2.5× / 6×. Single-figure-of-merit result; ships in the paper only if data is available in time.
 
 ## 12. Open Questions
 
-- **Public reference data:** which CC-licensed aerial clip do we settle on? Resolved as part of Phase 8; doesn't block Phases 1-6.
+- **Public reference data:** which CC-licensed aerial clip do we settle on? Resolved as part of Phase 15; doesn't block Phases 1-10.
+- **Pi GS lens choice:** spec assumes a 6 mm C-mount lens (H-FOV ≈ 55°, comparable to FOV-60). Confirm with the drone build, swap if the deployed lens differs. The `RPI-GS` cache key includes the measured H-FOV so a lens swap doesn't silently invalidate prior results.
+- **DJI bonus task data collection:** when will the Mavic 4 Pro multi-zoom shoot happen? A morning's flying with targets at measured GPS positions. Coordinate with whoever's piloting. Skippable for v1 (Phase 17 is explicitly bonus).
 - **Detiler-plugin upstream timeline:** if `hailo-apps-core` maintainers are slow to take the patch, do we vendor the modified plugin temporarily? Default plan: live with the Python-pad-probe fallback until merged.
 - **YAML vs Python config for the ablation matrix:** spec assumes YAML for ease of paper reproducibility; can switch to a Python `@dataclass` matrix if it proves clunky.
 
@@ -625,7 +699,9 @@ The implementation plan (next step after this spec) will decompose into these ph
 
 - All v1 emitters and modifiers covered by unit tests.
 - `hailo-tiling-bench` produces a reproducible ablation table from one command.
-- **The table reports each ablation row at all three FOV variants** (FOV-70, FOV-60, FOV-50) so the accuracy-vs-FOV trend is visible per-lever.
+- **The table reports each ablation row at all three FOV variants** (FOV-70, FOV-60, FOV-50) **plus the real-hardware `RPI-GS` column** so the emulated-to-real-hardware transfer is verifiable per-lever.
+- **Telemetry is captured end-to-end**: every paper-reported flight produces a `telemetry` table populated from MAVSDK (PX4 path) or SRT (DJI path); the visualizer renders the drone path on a map without additional input.
+- **DJI bonus task is captured or explicitly skipped** — if data is collected, the paper reports a maximum-range figure-of-merit; if not, the bonus phase is documented as deferred (not silently dropped).
 - The table includes (at minimum): static-baseline, current `dynamic_tiling` config, +ASAHI, +altitude-zoom — measured on both the proprietary clip and the public reference clip.
 - **`prepare_video.py --emit-fov` is deterministic** — two runs of the same source produce byte-identical 4K output files (so cache keys match across runs).
 - **Visualizer + overlay renderer work without chip access** — given any `flight_record.sqlite3` + matching source video, `hailo-tiling-view` and `hailo-tiling-overlay` produce annotated views on a laptop.
