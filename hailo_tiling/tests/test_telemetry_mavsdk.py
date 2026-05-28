@@ -1,10 +1,6 @@
 """MavsdkTelemetry — lazy MAVSDK import + graceful degradation when absent."""
 from __future__ import annotations
 
-import importlib
-import sys
-import types
-
 import pytest
 
 from hailo_tiling.telemetry import MavsdkTelemetry, TelemetrySnapshot
