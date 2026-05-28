@@ -197,6 +197,56 @@ def verify_output(output_path: Path) -> None:
         print(f"  gst decode OK: {jw}x{jh}")
 
 
+def _vf_filter_for_fov(fov_deg: int) -> str:
+    """Build the -vf filter chain string for a given FOV.
+
+    - fov_deg=70 → no crop, only lanczos scale to 4K.
+    - fov_deg<70 → center crop to fov-derived dims, then lanczos scale to 4K.
+    """
+    if fov_deg == SRC_NATIVE_FOV_DEG:
+        return "scale=3840:2160:flags=lanczos"
+    crop_w, crop_h = fov_to_crop_dims(fov_deg)
+    return (
+        f"crop={crop_w}:{crop_h}:(in_w-{crop_w})/2:(in_h-{crop_h})/2,"
+        f"scale=3840:2160:flags=lanczos"
+    )
+
+
+def build_fov_ffmpeg_cmd(
+    input_path: Path,
+    output_path: Path,
+    fov_deg: int,
+    nice: int | None = None,
+    ionice: int | None = None,
+) -> list[str]:
+    """Construct the ffmpeg argv list for one FOV variant.
+
+    Encodes the canonical recipe from spec §8.3:
+        libx265 CRF 18, preset slow, no audio, lanczos scaling, center crop
+        for fov<70, no upscaling.
+
+    Optional `nice` / `ionice` prefixes are prepended in the order
+    `nice -n N ionice -c N ffmpeg …` to match the overnight prep agent.
+    """
+    if fov_deg not in ALLOWED_FOVS:
+        raise ValueError(
+            f"fov_deg must be one of {ALLOWED_FOVS}; got {fov_deg}"
+        )
+    prefix: list[str] = []
+    if nice is not None:
+        prefix += ["nice", "-n", str(nice)]
+    if ionice is not None:
+        prefix += ["ionice", "-c", str(ionice)]
+    return prefix + [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-vf", _vf_filter_for_fov(fov_deg),
+        "-c:v", "libx265", "-crf", "18", "-preset", "slow",
+        "-an",
+        str(output_path),
+    ]
+
+
 def _parse_fov_list(s: str) -> list[int]:
     """Parse `--emit-fov 70,60,50` -> [70, 60, 50]. Validates the FOV set."""
     allowed = set(ALLOWED_FOVS)

@@ -112,3 +112,94 @@ def test_fov_to_crop_dims_rejects_invalid(pv):
         pv.fov_to_crop_dims(40)
     with pytest.raises(ValueError):
         pv.fov_to_crop_dims(80)
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg command builder (spec §8.3)
+# ---------------------------------------------------------------------------
+
+
+def test_build_fov_ffmpeg_cmd_fov70(pv):
+    """FOV-70 = no crop, only scale (full 6K → 4K)."""
+    argv = pv.build_fov_ffmpeg_cmd(
+        input_path=Path("/x/clip_prepared.MP4"),
+        output_path=Path("/x/clip_prepared__fov70.mp4"),
+        fov_deg=70,
+        nice=None,
+        ionice=None,
+    )
+    assert argv == [
+        "ffmpeg", "-y",
+        "-i", "/x/clip_prepared.MP4",
+        "-vf", "scale=3840:2160:flags=lanczos",
+        "-c:v", "libx265", "-crf", "18", "-preset", "slow",
+        "-an",
+        "/x/clip_prepared__fov70.mp4",
+    ]
+
+
+def test_build_fov_ffmpeg_cmd_fov60(pv):
+    argv = pv.build_fov_ffmpeg_cmd(
+        input_path=Path("/x/clip_prepared.MP4"),
+        output_path=Path("/x/clip_prepared__fov60.mp4"),
+        fov_deg=60,
+        nice=None,
+        ionice=None,
+    )
+    assert argv == [
+        "ffmpeg", "-y",
+        "-i", "/x/clip_prepared.MP4",
+        "-vf",
+        "crop=4963:2792:(in_w-4963)/2:(in_h-2792)/2,"
+        "scale=3840:2160:flags=lanczos",
+        "-c:v", "libx265", "-crf", "18", "-preset", "slow",
+        "-an",
+        "/x/clip_prepared__fov60.mp4",
+    ]
+
+
+def test_build_fov_ffmpeg_cmd_fov50(pv):
+    argv = pv.build_fov_ffmpeg_cmd(
+        input_path=Path("/x/clip_prepared.MP4"),
+        output_path=Path("/x/clip_prepared__fov50.mp4"),
+        fov_deg=50,
+        nice=None,
+        ionice=None,
+    )
+    vf_idx = argv.index("-vf")
+    assert argv[vf_idx + 1] == (
+        "crop=4007:2254:(in_w-4007)/2:(in_h-2254)/2,"
+        "scale=3840:2160:flags=lanczos"
+    )
+    assert argv[0] == "ffmpeg"
+    assert argv[-1] == "/x/clip_prepared__fov50.mp4"
+
+
+def test_build_fov_ffmpeg_cmd_with_nice_and_ionice(pv):
+    argv = pv.build_fov_ffmpeg_cmd(
+        input_path=Path("/x/in.MP4"),
+        output_path=Path("/x/out__fov70.mp4"),
+        fov_deg=70,
+        nice=10,
+        ionice=3,
+    )
+    assert argv[:6] == ["nice", "-n", "10", "ionice", "-c", "3"]
+    assert argv[6] == "ffmpeg"
+
+
+def test_build_fov_ffmpeg_cmd_string_matches_overnight_manifest(pv):
+    argv = pv.build_fov_ffmpeg_cmd(
+        input_path=Path("/home/giladn/Videos/Drone/Training/DJI_20260528155741_0029_D_prepared.MP4"),
+        output_path=Path("/home/giladn/Videos/Drone/Training/DJI_20260528155741_0029_D_prepared__fov70.mp4"),
+        fov_deg=70,
+        nice=10,
+        ionice=3,
+    )
+    s = " ".join(argv)
+    assert s == (
+        "nice -n 10 ionice -c 3 ffmpeg -y "
+        "-i /home/giladn/Videos/Drone/Training/DJI_20260528155741_0029_D_prepared.MP4 "
+        "-vf scale=3840:2160:flags=lanczos "
+        "-c:v libx265 -crf 18 -preset slow -an "
+        "/home/giladn/Videos/Drone/Training/DJI_20260528155741_0029_D_prepared__fov70.mp4"
+    )
