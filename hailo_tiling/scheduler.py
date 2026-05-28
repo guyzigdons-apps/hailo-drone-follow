@@ -1,9 +1,8 @@
 """TileScheduler — composes TileEmitters and TileModifiers.
 
-The scheduler runs each emitter in order, concatenates the resulting CropRects,
-then runs each modifier in order, threading the working tile list through. The
-last modifier should typically be `BudgetTrimModifier`, which enforces the
-per-frame inference budget.
+Plan 2 widens the protocols by one keyword argument: `telemetry: TelemetrySnapshot`.
+Existing emitters/modifiers from Plan 1 accept-and-ignore the new arg; new
+modifiers (AltitudeZoom, AdaptiveSliceSizing) read it.
 
 This module deliberately contains no Hailo / GStreamer / OpenCV imports.
 """
@@ -11,6 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence, runtime_checkable
 
+from .telemetry import NULL_SNAPSHOT, TelemetrySnapshot
 from .types import CropRect, LockState
 
 
@@ -27,6 +27,7 @@ class TileEmitter(Protocol):
         lock: LockState,
         frame_idx: int,
         meter,
+        telemetry: TelemetrySnapshot = NULL_SNAPSHOT,
     ) -> list[CropRect]: ...
 
 
@@ -44,6 +45,7 @@ class TileModifier(Protocol):
         lock: LockState,
         frame_idx: int,
         meter,
+        telemetry: TelemetrySnapshot = NULL_SNAPSHOT,
     ) -> list[CropRect]: ...
 
 
@@ -65,10 +67,12 @@ class TileScheduler:
         lock: LockState,
         frame_idx: int,
         meter,
+        telemetry: TelemetrySnapshot | None = None,
     ) -> list[CropRect]:
+        tel = NULL_SNAPSHOT if telemetry is None else telemetry
         tiles: list[CropRect] = []
         for e in self.emitters:
-            tiles.extend(e.emit(src_w, src_h, lock, frame_idx, meter))
+            tiles.extend(e.emit(src_w, src_h, lock, frame_idx, meter, tel))
         for m in self.modifiers:
-            tiles = m.modify(tiles, src_w, src_h, lock, frame_idx, meter)
+            tiles = m.modify(tiles, src_w, src_h, lock, frame_idx, meter, tel)
         return tiles

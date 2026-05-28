@@ -41,7 +41,7 @@ class RecoveryGridEmitter:
         self.mode = mode
 
     def emit(self, src_w: int, src_h: int, lock: LockState,
-             frame_idx: int, meter) -> list[CropRect]:
+             frame_idx: int, meter, telemetry=None) -> list[CropRect]:
         if lock.status not in ("SEARCHING", "LOST"):
             return []
         if lock.track_id is None:

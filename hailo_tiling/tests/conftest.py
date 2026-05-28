@@ -46,3 +46,40 @@ def lost_lock():
         frames_since_seen=999,
         last_velocity=(0.0, 0.0),
     )
+
+
+# ----------------------------------------------------------------------
+# Telemetry fixtures (added in Plan 2)
+# ----------------------------------------------------------------------
+from hailo_tiling.telemetry import (
+    NULL_SNAPSHOT,
+    StaticTelemetry,
+    TelemetrySnapshot,
+)
+
+
+@pytest.fixture
+def null_snapshot():
+    return NULL_SNAPSHOT
+
+
+@pytest.fixture
+def low_altitude_snapshot():
+    """5 m AGL — close to subject, modifiers should widen the ROI."""
+    return TelemetrySnapshot(altitude_agl_m=5.0, timestamp=0.0)
+
+
+@pytest.fixture
+def high_altitude_snapshot():
+    """40 m AGL — far from subject, modifiers should narrow the ROI."""
+    return TelemetrySnapshot(altitude_agl_m=40.0, timestamp=0.0)
+
+
+@pytest.fixture
+def static_low_telemetry():
+    return StaticTelemetry(altitude_agl_m=5.0)
+
+
+@pytest.fixture
+def static_high_telemetry():
+    return StaticTelemetry(altitude_agl_m=40.0)

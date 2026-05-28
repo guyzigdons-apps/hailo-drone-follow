@@ -17,7 +17,7 @@ class _DummyEmitter:
     def __init__(self, crops):
         self._crops = crops
 
-    def emit(self, src_w, src_h, lock, frame_idx, meter):
+    def emit(self, src_w, src_h, lock, frame_idx, meter, telemetry=None):
         return list(self._crops)
 
 
@@ -28,7 +28,7 @@ class _DummyModifier:
     def __init__(self, tag):
         self._tag = tag
 
-    def modify(self, tiles, src_w, src_h, lock, frame_idx, meter):
+    def modify(self, tiles, src_w, src_h, lock, frame_idx, meter, telemetry=None):
         return [CropRect(x=t.x, y=t.y, w=t.w, h=t.h, mode=self._tag) for t in tiles]
 
 

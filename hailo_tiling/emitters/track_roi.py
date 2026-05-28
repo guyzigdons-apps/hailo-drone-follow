@@ -30,7 +30,7 @@ class TrackROIEmitter:
         self.roi_margin_frac = roi_margin_frac
 
     def emit(self, src_w: int, src_h: int, lock: LockState,
-             frame_idx: int, meter) -> list[CropRect]:
+             frame_idx: int, meter, telemetry=None) -> list[CropRect]:
         if lock.status != "TRACKING":
             return []
         bx, by, bw, bh = lock.bbox_norm

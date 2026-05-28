@@ -24,6 +24,7 @@ class BudgetTrimModifier:
         lock: LockState,
         frame_idx: int,
         meter,
+        telemetry=None,  # accepted for Protocol compatibility; not used
     ) -> list[CropRect]:
         budget = int(meter.available(frame_idx))
         if budget < 0:
