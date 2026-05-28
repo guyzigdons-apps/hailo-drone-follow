@@ -25,7 +25,9 @@ Secondary goal: the library should be **reusable** — both as a pure-Python sta
 - `InferenceBackend` ABC + `HefBackend` (existing), `GstCropperBackend` (new), `CachingBackend` (decorator), `ReplayBackend` (chip-free replay from cache)
 - Aggregator with composable `BoundaryStripFilter` and a `DetectionMemory` interface (no-op default in v1; functional carry-forward implementation deferred to v2)
 - Ablation harness CLI (`hailo-tiling-bench`) — sweeps a matrix and emits per-config `frames.json`
-- Detiler-plugin metadata patch (separate PR in `hailo-apps-core`): per-detection CropRect provenance + ROI list pass-through
+- GStreamer cache plugins in `hailo-apps-core`: `hailodet_record` (two modes: `tile_cache` and `full_frame`) + `hailonet_cache` (replay) + small `hailofilter` `bypass-on-cache-hit` patch + detiler metadata hooks
+- Source data prep: extension to `tiling_benchmark/prepare_video.py` to emit three FOV variants (`FOV-70` native, `FOV-60`, `FOV-50`) at 4K from each 6K DJI Mavic 4 Pro source clip
+- Visualizer / offline overlay renderer consuming the `full_frame` SQLite output (`hailo-tiling-view`, `hailo-tiling-overlay`)
 - Paper-with-code release artifacts: license, reproducibility recipe, technical report, citation, public reference data
 
 **Lever implementations included in v1:** the levers already in `dynamic_tiling/scheduler.py` (decimated discovery, ROI tile, recovery grid, motion-predicted placement) plus two new ones to validate the architecture: **ASAHI adaptive slice sizing** and **altitude-gated zoom** (both small implementations that exercise different parts of the framework).
@@ -350,23 +352,43 @@ This is a direct paper-with-code reproducibility win: the cache file is the expe
 
 ### 7.8 GStreamer recorder plugin — `hailodet_record` (production, passthrough)
 
-A production-ready, **standalone** GStreamer element released in `hailo-apps-core` (separate plugin from `hailonet_cache`; separate source file, separate `.so`). Placed in the pipeline **after** `hailofilter` (postprocess); observes the final detection objects on each buffer's `HailoROI` and writes them to SQLite in the schema of Section 7.2.
+A production-ready, **standalone** GStreamer element released in `hailo-apps-core` (separate plugin from `hailonet_cache`; separate source file, separate `.so`). Two operating modes, controlled by a `mode` property, with different pipeline placements and output schemas. The same plugin is typically instantiated **twice in a single pipeline**:
 
-**Pipeline placement (live recording):**
 ```
 ... ! hailotilecropper_dynamic ! hailonet ! hailofilter ! \
-    hailodet_record output-file=flight.sqlite3 ! hailodetiler ! ...
+    hailodet_record mode=tile_cache  output-file=cache.sqlite3        ! \
+    hailodetiler ! \
+    hailodet_record mode=full_frame  output-file=flight_record.sqlite3 ! ...
 ```
 
-Recording happens after postprocess so the cache stores **post-NMS, post-decode detections** — i.e., what a downstream consumer (drone-follow, an overlay renderer, the ablation harness) actually consumes. A cache hit on replay therefore skips both the inference and the postprocess work (Section 7.9).
+**Mode `tile_cache` (after `hailofilter`, before `hailodetiler`):**
+Records **per-crop, tile-local-coords** detections in the Section 7.2 schema. This is the file consumed by `hailonet_cache` for replay; on a cache hit, both inference and postprocess are skipped. Data shape per row: `(frame_idx, crop_x, crop_y, crop_w, crop_h, ppv, dets_json)`.
 
-**Properties:**
-- `output-file=<path>` (required) — SQLite cache file to append to (or create)
+**Mode `full_frame` (after `hailodetiler`):**
+Records **per-frame, source-frame-coord** aggregated detections plus the tile layout that was used. This is the file consumed by the visualizer and the overlay renderer; it is *the* artifact a real-world experiment (e.g., a Pi GS drone flight) leaves behind. Data shape (separate table; see Section 7.13 for the consumer side):
+
+```sql
+CREATE TABLE frame_results (
+  frame_idx     INTEGER NOT NULL,
+  ppv           INTEGER NOT NULL,
+  dets_json     TEXT    NOT NULL,   -- aggregated detections in source-frame normalized coords
+                                     -- each det carries optional "tile_idx" provenance
+  tiles_json    TEXT    NOT NULL,   -- list of CropRects used this frame: [{x,y,w,h,mode}, ...]
+  ts_epoch      REAL    NOT NULL,
+  PRIMARY KEY (frame_idx, ppv)
+) WITHOUT ROWID;
+```
+
+The full-frame file is **not** the tile cache. It cannot be replayed via `hailonet_cache` (which keys on tile-local crops). It is the record of "what the pipeline finally produced" — used for offline overlay rendering and the visualizer; it travels with the source video.
+
+**Properties (common to both modes):**
+- `mode={tile_cache,full_frame}` (required) — output schema and expected placement
+- `output-file=<path>` (required) — SQLite file to append to (or create); separate files per mode
 - `flush-interval-ms=100` — flush queued rows every N ms
 - `batch-size=64` — flush after N rows queued, whichever comes first
 - `frame-id-source={counter,pts}` (default `counter`) — frame indexing strategy (`counter` is robust; `pts` allows wall-clock correlation in live captures)
 - `record-empty=true` (default, no opt-out planned) — frames/crops with zero detections **must** be recorded as `dets_json='[]'`. Without these rows, the absence of a row would be indistinguishable from "never inferred", causing every empty frame to trigger a cache miss + re-inference on the next replay run. An empty row is the correct positive signal that "we did look here, there was nothing."
-- `record-cache-hits=false` (default) — during a replay run, if a buffer carries `hailo-cache-hit=true`, the recorder skips writing it (the data is already in the cache file). Set to `true` to copy/translate between cache files.
+- `record-cache-hits=false` (default; tile_cache mode only) — during a replay run, if a buffer carries `hailo-cache-hit=true`, the recorder skips writing it (the data is already in the cache file). In `full_frame` mode this property is ignored — full-frame recording always happens, including during replay (the visualizer needs the per-frame layout).
 - `hef-id-meta-key="hailo-hef-sha"` — buffer-meta key the upstream pipeline sets; recorder reads it and stores into the meta table on first row
 
 **Thread model:** streaming thread does only a lock-free SPSC push to a ring buffer; a background writer thread drains the queue in batches into a SQLite transaction (WAL mode). The streaming pad probe is < 5 μs in the steady state. EOS triggers a synchronous final flush before returning. Errors in the background thread are logged and surfaced via a GstMessage; the streaming pipeline is **never blocked or crashed** by the recorder.
@@ -443,13 +465,93 @@ Released as a separate `.deb` in the `hailo-apps-core` release alongside the two
 
 `GstCropperBackend` is therefore the **canonical research path**; every ablation row reported in the paper runs through it. `HefBackend` stays in the library for local iteration, unit-test fixtures, and debugging — but its output is *not* paper-quotable.
 
-### 7.12 Why not `frames.json`?
+### 7.12 Full-frame consumers (visualizer + offline overlay renderer)
+
+The `full_frame` mode (Section 7.8) produces a SQLite file with one row per frame: `(frame_idx, dets_json, tiles_json)`. Two consumers:
+
+**Offline overlay renderer (`hailo-tiling-overlay`).** Reads the source video + the `flight_record.sqlite3` file, writes an annotated MP4 with bounding boxes and (optionally) the tile-layout overlay. Same role as `tiling_benchmark/overlay_dets.py` today, but reads from SQLite and supports the tiles overlay. Pure CPU job; runs on the laptop / ground station after a flight.
+
+**Interactive visualizer (`hailo-tiling-view`).** Frame-by-frame stepper that renders source frame + tile rectangles + detections + (optionally) tracker state. Designed to be the successor to `tiling_benchmark/overlay_viewer.py`; reads from `flight_record.sqlite3` so it works without chip access for any recorded run. Drone-follow's existing web UI can adopt the same data layer for post-flight review.
+
+Both consumers operate on **per-frame source-coord data**, so they require nothing from the tile-cache SQLite — full-frame and tile-cache files are independent artifacts of the same flight.
+
+### 7.13 Why not `frames.json`?
 
 The existing per-config `frames.json` outputs are frame-level (after merge / NMS / boundary-strip). They're not reusable across configs because they bake in aggregator choices. The cache is one level deeper — tile-local, pre-aggregator — and is the *right* granularity for "compute once, ablate many."
 
 `frames.json` stays as the per-config output format consumed by `analyze_pxt.py` and `overlay_viewer.py`. The cache feeds the aggregator; the aggregator writes `frames.json`.
 
-## 8. Ablation Harness
+## 8. Experimental Setup: Source Data and FOV Emulation
+
+### 8.1 Source clips
+
+**Research / paper-reported results:** 6K footage from a **DJI Mavic 4 Pro** (Hasselblad 4/3 CMOS, 28 mm equivalent, native horizontal FOV ≈ 70°, output 6016 × 3384). Already used in `tiling_benchmark/` today for GT generation. The 6K source is **never read by the inference pipeline directly** — it is preprocessed into per-FOV 4K variants (Section 8.3) and the pipeline reads only those.
+
+**Production / real-world experiments:** **Raspberry Pi Global Shutter Camera** (Sony IMX296, 1456 × 1088, C/CS-mount lens chosen at integration time). Used on the drone in flight via the existing `--input rpi` path. Paper does **not** report numbers from this camera — the resolution, shutter type (global vs the Mavic's rolling), and lens stack differ from the research source. The paper discloses this gap explicitly; the Pi GS path is validation that the system runs end-to-end in production, not a paper-quoted benchmark.
+
+### 8.2 FOV variants for paper results
+
+All paper-reported ablation rows run at 4K output resolution (3840 × 2160) under three labelled effective horizontal FOVs:
+
+| Label    | H-FOV | Crop from 6K        | Output | Equivalent zoom | Physical interpretation                |
+|----------|-------|---------------------|--------|-----------------|----------------------------------------|
+| `FOV-70` | 70° (native) | full 6016 × 3384 | 4K     | 1.0× (baseline) | wide / "no zoom"                        |
+| `FOV-60` | 60°   | center 4963 × 2792  | 4K     | ~1.21×          | medium / mild digital zoom              |
+| `FOV-50` | 50°   | center 4007 × 2254  | 4K     | ~1.50×          | narrow / equivalent of a ~1.5× tele     |
+
+Crop dimensions derived from `crop_ratio = tan(FOV_target/2) / tan(70°/2)`. **No variant upscales** — the narrowest (FOV-50) crops to 4007 px wide and downscales by 1.04× to reach 3840. Going narrower than ~48° from this source would require interpolation, which we avoid (per the user requirement: interpolation degrades the results we are trying to measure).
+
+The three-point spread is designed to expose the predicted accuracy-vs-FOV trend: narrower FOV → larger targets in the frame → less benefit from dense tiling, more benefit from the dynamic ROI tile. FOV-70 is where the tiling system should help most; FOV-50 is where the ROI-tile / track-guided emitters earn their keep.
+
+### 8.3 Generating the variants — extension to `prepare_video.py`
+
+`tiling_benchmark/prepare_video.py` is extended to emit per-FOV files in one pass:
+
+```bash
+python tiling_benchmark/prepare_video.py clip.MP4 --emit-fov 70,60,50
+```
+
+Outputs (alongside the existing rotation-stripped output):
+
+```
+clip__fov70.mp4    # 6016x3384 → scaled to 3840x2160 (no crop)
+clip__fov60.mp4    # center crop 4963x2792 → scaled to 3840x2160
+clip__fov50.mp4    # center crop 4007x2254 → scaled to 3840x2160
+```
+
+ffmpeg invocation per variant:
+
+```
+ffmpeg -i clip.MP4 \
+    -vf "crop=W:H:(in_w-W)/2:(in_h-H)/2,scale=3840:2160:flags=lanczos" \
+    -c:v libx265 -crf 18 -preset slow -an \
+    clip__fov<N>.mp4
+```
+
+`crf 18 -preset slow` (high quality) so the emulation does not introduce codec artifacts that would confound the FOV ablation. Each output file's SHA-256 becomes part of the cache key (Section 7.2 `meta.video_sha256`), so cache entries from the three variants never collide.
+
+### 8.4 Why one file per FOV (not a runtime parameter)
+
+Separate physical files for each FOV variant:
+
+- **Force the tiler to see only the claimed resolution.** The scheduler, the `hailotilecropper_dynamic`, and the ASAHI-style native-resolution tile selection all read width/height from the source buffer; with the 4K MP4 as input there is no codepath that can accidentally peek at the underlying 6K data. Native-tile sizing therefore picks the correct grid for the *paper-reported* resolution.
+- **Make each variant independently reproducible.** A reviewer reproducing the paper downloads three files (one per FOV) plus three GT files plus one cache file. The experimental record per FOV is a single SHA-256.
+- **Avoid runtime correctness risk.** A runtime FOV-emulation element (live `videocrop` + `videoscale`) is feasible but introduces another moving part in the inference pipeline; for paper-quality results we prefer the static-file approach. A live `hailofov_emulate` element is a non-blocking nice-to-have for interactive experimentation.
+
+### 8.5 GT generation
+
+GT trajectories are generated **per FOV variant** using the existing `GT-12x9-25` dense-tiling flow in `tiling_benchmark/`. Three GT files total (`GT__fov70.frames.json`, `…fov60.frames.json`, `…fov50.frames.json`). The cache file gets warmed once per (FOV variant × HEF), so GT generation amortises across all ablation rows that share the FOV and the HEF.
+
+### 8.6 Real-camera experimentation (Pi Global Shutter)
+
+The Pi GS path is used for **end-to-end validation only**:
+
+- Live pipeline runs with `--input rpi`, native 1456 × 1088, no FOV emulation
+- `hailodet_record mode=full_frame` is **enabled by default** in `scripts/start_air.sh` (per Phase 12) so every flight produces a `flight_record.sqlite3` artifact
+- The visualizer (Section 7.12) reads those files for post-flight review, exactly the same way it reads the recorded research runs
+- Tile-cache mode is generally not used in production (live inference is the right call when the chip is right there), but is supported via a config flag for offline replay of recorded raw video
+
+## 9. Ablation Harness
 
 `hailo-tiling-bench` reads a YAML matrix:
 
@@ -471,7 +573,7 @@ For each row: runs the configured scheduler over a fixed video + telemetry trace
 
 When the cache (Section 7) is warm, the harness transparently serves all hits from disk — a full ablation matrix re-run takes seconds instead of minutes, and ablating aggregator/modifier choices on the same cropper output requires no chip access at all.
 
-## 9. Paper-with-Code Release Workflow
+## 10. Paper-with-Code Release Workflow
 
 This is a first-class deliverable in v1, not a polish step.
 
@@ -494,7 +596,7 @@ This is a first-class deliverable in v1, not a polish step.
 
 **Public-API stability:** every class exported from `hailo_tiling.__init__` is marked stable; experimental things live in `hailo_tiling.experimental`. The detiler-plugin patch is versioned independently in `hailo-apps-core`.
 
-## 10. Phases
+## 11. Phases
 
 The implementation plan (next step after this spec) will decompose into these phases:
 
@@ -503,25 +605,30 @@ The implementation plan (next step after this spec) will decompose into these ph
 3. **Telemetry layer** — `TelemetryProvider` ABC + the three implementations.
 4. **Two new modifiers** — `AdaptiveSliceSizingModifier` (ASAHI) and `AltitudeZoomModifier` (validates that telemetry flows correctly).
 5. **Backends + Aggregator extraction** — `InferenceBackend` ABC, lift `BoundaryStripFilter` into the Aggregator. `HefBackend` stays as dev-only path.
-6. **Cache schema + Python layer** — `libhailotile_cache` schema definition; Python `SqliteCacheStore` + `CachingBackend` + `ReplayBackend` + `hailo-tiling-warm-cache` CLI; determinism CI test.
-7. **GStreamer cache plugins (`hailo-apps-core`)** — `libhailotile_cache.so` shared library, `hailodet_record` (recorder), `hailonet_cache` (replay). Released alongside the detiler-plugin patch. Each plugin shipped with golden-file tests and a microbench asserting lookup latency < 1 ms / crop.
-8. **`GstCropperBackend`** — Python adapter that drives the production-style GStreamer pipeline (`hailotilecropper_dynamic` → `hailonet` or `hailonet_cache` → post-process → `hailodet_record` → detiler) from within the ablation harness. This makes the GStreamer pipeline the canonical research path.
-9. **Ablation harness** — `hailo-tiling-bench` CLI + YAML schema; defaults to `GstCropperBackend`; `--backend replay` toggles `hailonet_cache` in the pipeline string.
-10. **`hailo-apps-core` patches** — single PR adding (a) detiler metadata hooks (per-detection CropRect provenance + ROI list pass-through), and (b) `hailofilter` `bypass-on-cache-hit` property. Both are small, backwards-compatible, and unlock the cache architecture end-to-end. Parallelisable with phases 1-9.
-11. **Paper-with-code artifacts** — license, README, citation, technical-report skeleton, reference-data + cache fetcher, ablation table generation, published reference cache file (Zenodo / S3).
-12. **Drone-follow migration** — switch `drone_follow/pipeline_adapter/` over to the production pipeline with `hailodet_record` enabled by default for flight telemetry. Tracker subpackage stays minimal; ByteTracker keeps current behaviour.
+6. **Source data prep + FOV emulation** — extend `tiling_benchmark/prepare_video.py` to emit `clip__fov{70,60,50}.mp4` variants per source. Re-generate GT for each variant. Document SHA-256 of all variants in the reference-data manifest.
+7. **Cache schema + Python layer** — `libhailotile_cache` schema definition (both `detections` and `frame_results` tables); Python `SqliteCacheStore` + `CachingBackend` + `ReplayBackend` + `hailo-tiling-warm-cache` CLI; determinism CI test.
+8. **GStreamer cache plugins (`hailo-apps-core`)** — `libhailotile_cache.so` shared library, `hailodet_record` (recorder, both `tile_cache` and `full_frame` modes), `hailonet_cache` (replay). Each plugin shipped with golden-file tests and a microbench asserting lookup latency < 1 ms / crop.
+9. **`GstCropperBackend`** — Python adapter that drives the production-style GStreamer pipeline (`hailotilecropper_dynamic` → `hailonet` or `hailonet_cache` → `hailofilter` → `hailodet_record mode=tile_cache` → `hailodetiler` → `hailodet_record mode=full_frame`) from within the ablation harness. Makes the GStreamer pipeline the canonical research path.
+10. **Ablation harness** — `hailo-tiling-bench` CLI + YAML schema; defaults to `GstCropperBackend`; `--backend replay` toggles `hailonet_cache` in the pipeline string. Reports a table with one column per FOV variant.
+11. **Visualizer + overlay renderer** — `hailo-tiling-view` (interactive frame stepper) and `hailo-tiling-overlay` (offline annotated-MP4 batch renderer), both consuming `flight_record.sqlite3`. Replaces / supersedes `tiling_benchmark/overlay_viewer.py` and `tiling_benchmark/overlay_dets.py` once feature-equivalent.
+12. **`hailo-apps-core` patches** — single PR adding (a) detiler metadata hooks (per-detection CropRect provenance + ROI list pass-through), and (b) `hailofilter` `bypass-on-cache-hit` property. Both are small, backwards-compatible, and unlock the cache architecture end-to-end. Parallelisable with phases 1-11.
+13. **Paper-with-code artifacts** — license, README, citation, technical-report skeleton, reference-data + cache fetcher (downloads the three FOV variants and their warmed caches), ablation table generation, published reference cache files (Zenodo / S3).
+14. **Drone-follow migration** — switch `drone_follow/pipeline_adapter/` over to the production pipeline with `hailodet_record mode=full_frame` enabled by default for flight telemetry. Tracker subpackage stays minimal; ByteTracker keeps current behaviour.
 
-## 11. Open Questions
+## 12. Open Questions
 
 - **Public reference data:** which CC-licensed aerial clip do we settle on? Resolved as part of Phase 8; doesn't block Phases 1-6.
 - **Detiler-plugin upstream timeline:** if `hailo-apps-core` maintainers are slow to take the patch, do we vendor the modified plugin temporarily? Default plan: live with the Python-pad-probe fallback until merged.
 - **YAML vs Python config for the ablation matrix:** spec assumes YAML for ease of paper reproducibility; can switch to a Python `@dataclass` matrix if it proves clunky.
 
-## 12. Success Criteria
+## 13. Success Criteria
 
 - All v1 emitters and modifiers covered by unit tests.
 - `hailo-tiling-bench` produces a reproducible ablation table from one command.
+- **The table reports each ablation row at all three FOV variants** (FOV-70, FOV-60, FOV-50) so the accuracy-vs-FOV trend is visible per-lever.
 - The table includes (at minimum): static-baseline, current `dynamic_tiling` config, +ASAHI, +altitude-zoom — measured on both the proprietary clip and the public reference clip.
+- **`prepare_video.py --emit-fov` is deterministic** — two runs of the same source produce byte-identical 4K output files (so cache keys match across runs).
+- **Visualizer + overlay renderer work without chip access** — given any `flight_record.sqlite3` + matching source video, `hailo-tiling-view` and `hailo-tiling-overlay` produce annotated views on a laptop.
 - The library installs cleanly without MAVSDK present.
 - **Inference cache delivers what it promises:** a fully-warmed cache makes a full ablation matrix re-run complete in seconds on a chip-free laptop; cache hit-rate is > 95% on repeated runs of the same matrix.
 - **GStreamer cache plugins meet the latency bar:** `hailodet_record` adds < 100 μs to the streaming-thread pad probe in steady state; `hailonet_cache` lookups are < 1 ms / crop (vs ~30–40 ms for live `hailonet`), measured by a microbench shipped with each plugin.
