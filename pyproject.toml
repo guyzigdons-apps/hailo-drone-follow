@@ -32,3 +32,4 @@ testpaths = ["hailo_tiling/tests", "dynamic_tiling/tests"]
 
 [project.scripts]
 drone-follow = "drone_follow.drone_follow_app:main"
+hailo-tiling-warm-cache = "hailo_tiling.cli.warm:main"

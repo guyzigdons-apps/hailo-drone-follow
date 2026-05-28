@@ -45,3 +45,14 @@ def test_plan2_top_level_imports():
     assert ht.NoOpMemory is not None
     assert ht.nms is not None
     assert ht.map_to_source is not None
+
+
+def test_top_level_imports_plan4():
+    import hailo_tiling as ht
+    # Cache
+    assert ht.SqliteCacheStore is not None
+    assert ht.CacheMissError is not None
+    assert ht.CachingBackend is not None
+    assert ht.ReplayBackend is not None
+    assert callable(ht.file_sha256)
+    assert callable(ht.canonicalize_crop)

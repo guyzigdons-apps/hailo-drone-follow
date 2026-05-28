@@ -40,7 +40,7 @@ from .backends import (
     MockBackend,
     ReplayBackend,
 )
-from .cache import CacheMissError, SqliteCacheStore
+from .cache import CacheMissError, SqliteCacheStore, canonicalize_crop, file_sha256
 from .aggregator import (
     Aggregator,
     BoundaryStripFilter,
@@ -88,6 +88,8 @@ __all__ = [
     "ReplayBackend",
     "SqliteCacheStore",
     "CacheMissError",
+    "canonicalize_crop",
+    "file_sha256",
     # Plan 2 — aggregator
     "Aggregator",
     "BoundaryStripFilter",
