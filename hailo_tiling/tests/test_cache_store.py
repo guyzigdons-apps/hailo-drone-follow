@@ -87,3 +87,142 @@ def test_meta_put_upserts(tmp_path):
         assert store.meta_get("ppv") == "2"
     finally:
         store.close()
+
+
+import json
+
+from hailo_tiling.types import CropRect, Det
+
+
+def _det(cls: int, score: float, x: float, y: float, w: float, h: float) -> Det:
+    return Det(cls=cls, score=score, x=x, y=y, w=w, h=h)
+
+
+def _row(frame_idx: int, crop: CropRect, ppv: int, dets):
+    return {
+        "frame_idx": frame_idx,
+        "crop_rect": crop,
+        "ppv": ppv,
+        "dets": list(dets),
+    }
+
+
+def test_put_many_then_get_roundtrips(tmp_path):
+    store = SqliteCacheStore.open(tmp_path / "rt.sqlite3")
+    try:
+        c1 = CropRect(x=0, y=0, w=640, h=480, mode="m")
+        c2 = CropRect(x=640, y=0, w=640, h=480, mode="m")
+        dets1 = [_det(0, 0.91, 0.1, 0.2, 0.3, 0.4)]
+        dets2 = []
+        store.put_many([
+            _row(0, c1, 1, dets1),
+            _row(0, c2, 1, dets2),
+        ])
+        got1 = store.get(0, c1, ppv=1)
+        got2 = store.get(0, c2, ppv=1)
+        assert got1 == dets1
+        assert got2 == dets2
+    finally:
+        store.close()
+
+
+def test_get_miss_returns_none(tmp_path):
+    store = SqliteCacheStore.open(tmp_path / "miss.sqlite3")
+    try:
+        c = CropRect(x=10, y=10, w=640, h=480, mode="m")
+        assert store.get(0, c, ppv=1) is None
+    finally:
+        store.close()
+
+
+def test_put_many_is_one_transaction(tmp_path, monkeypatch):
+    store = SqliteCacheStore.open(tmp_path / "tx.sqlite3")
+    try:
+        c_good = CropRect(x=0, y=0, w=640, h=480, mode="m")
+        rows = [
+            _row(0, c_good, 1, [_det(0, 0.9, 0, 0, 0.1, 0.1)]),
+            _row(0, c_good, 1, [_det(0, 0.1, 0, 0, 0.1, 0.1)]),
+        ]
+        with pytest.raises(sqlite3.IntegrityError):
+            store.put_many(rows)
+        assert store.get(0, c_good, ppv=1) is None
+    finally:
+        store.close()
+
+
+def test_put_many_empty_is_noop(tmp_path):
+    store = SqliteCacheStore.open(tmp_path / "noop.sqlite3")
+    try:
+        store.put_many([])
+        assert store.stats()["n_rows"] == 0
+    finally:
+        store.close()
+
+
+def test_get_many_preserves_order(tmp_path):
+    store = SqliteCacheStore.open(tmp_path / "om.sqlite3")
+    try:
+        crops = [CropRect(x=i * 100, y=0, w=640, h=480, mode="m") for i in range(5)]
+        store.put_many([
+            _row(0, c, 1, [_det(0, 0.5 + 0.05 * i, 0, 0, 0.1, 0.1)])
+            for i, c in enumerate(crops)
+        ])
+        rev = list(reversed(crops))
+        out = store.get_many(0, rev, ppv=1)
+        assert len(out) == 5
+        for i, (c, dets) in enumerate(zip(rev, out)):
+            assert dets is not None
+            assert dets[0].score == pytest.approx(0.5 + 0.05 * (4 - i))
+    finally:
+        store.close()
+
+
+def test_get_many_mixed_hit_miss(tmp_path):
+    store = SqliteCacheStore.open(tmp_path / "mh.sqlite3")
+    try:
+        c_hit = CropRect(x=0, y=0, w=640, h=480, mode="m")
+        c_miss = CropRect(x=100, y=0, w=640, h=480, mode="m")
+        store.put_many([_row(0, c_hit, 1, [_det(0, 0.9, 0, 0, 0.1, 0.1)])])
+        out = store.get_many(0, [c_hit, c_miss, c_hit], ppv=1)
+        assert out[0] is not None and out[2] is not None
+        assert out[1] is None
+    finally:
+        store.close()
+
+
+def test_stats_reports_n_rows(tmp_path):
+    store = SqliteCacheStore.open(tmp_path / "stats.sqlite3")
+    try:
+        assert store.stats()["n_rows"] == 0
+        crops = [CropRect(x=i * 100, y=0, w=640, h=480, mode="m") for i in range(4)]
+        store.put_many([_row(0, c, 1, []) for c in crops])
+        s = store.stats()
+        assert s["n_rows"] == 4
+        assert s["schema_version"] == 1
+        assert "path" in s
+    finally:
+        store.close()
+
+
+def test_vacuum_runs(tmp_path):
+    store = SqliteCacheStore.open(tmp_path / "vac.sqlite3")
+    try:
+        c = CropRect(x=0, y=0, w=640, h=480, mode="m")
+        store.put_many([_row(0, c, 1, [])])
+        store.vacuum()
+        assert store.get(0, c, ppv=1) == []
+    finally:
+        store.close()
+
+
+def test_quantise_is_applied_at_put_time_when_enabled(tmp_path):
+    """The store is canonicalisation-agnostic — put/get round-trip on exact key."""
+    store = SqliteCacheStore.open(tmp_path / "q.sqlite3")
+    try:
+        c = CropRect(x=123, y=457, w=789, h=321, mode="m")
+        store.put_many([_row(0, c, 1, [])])
+        assert store.get(0, c, ppv=1) == []
+        c2 = CropRect(x=120, y=456, w=788, h=320, mode="m")
+        assert store.get(0, c2, ppv=1) is None
+    finally:
+        store.close()
