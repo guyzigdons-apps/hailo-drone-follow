@@ -316,6 +316,62 @@ def append_manifest_record(manifest: Path, record: dict) -> None:
     os.replace(tmp, manifest)
 
 
+def _resolve_manifest_path(output: Path, override: Path | None) -> Path:
+    """Default manifest is fov_variants_manifest.json next to the output."""
+    if override is not None:
+        return override
+    return output.parent / "fov_variants_manifest.json"
+
+
+def _emit_fov_variant(
+    src_4k_input: Path,
+    fov_deg: int,
+    manifest: Path,
+    nice: int | None,
+    ionice: int | None,
+    force: bool,
+) -> Path:
+    """Produce one FOV variant + append to the manifest. Return output path."""
+    stem = src_4k_input.stem
+    output = src_4k_input.parent / f"{stem}__fov{fov_deg}.mp4"
+
+    if output.is_file() and not force:
+        existing = _read_manifest_or_empty(manifest)
+        if any(e.get("output") == output.name for e in existing):
+            print(f"  fov{fov_deg}: cached {output.name}; manifest already records it; skipping")
+            return output
+        print(f"  fov{fov_deg}: cached {output.name}; recording into manifest")
+    else:
+        argv = build_fov_ffmpeg_cmd(
+            input_path=src_4k_input,
+            output_path=output,
+            fov_deg=fov_deg,
+            nice=nice,
+            ionice=ionice,
+        )
+        proc = run(argv)
+        if proc.returncode != 0:
+            print(
+                f"ERROR: ffmpeg exited with code {proc.returncode} "
+                f"for fov{fov_deg}", file=sys.stderr,
+            )
+            sys.exit(1)
+
+    sha = sha256_of_file(output)
+    record = {
+        "input": src_4k_input.name,
+        "variant": f"fov{fov_deg}",
+        "output": output.name,
+        "output_bytes": output.stat().st_size,
+        "sha256": sha,
+        "ffmpeg_cmd": " ".join(
+            build_fov_ffmpeg_cmd(src_4k_input, output, fov_deg, nice, ionice)
+        ),
+    }
+    append_manifest_record(manifest, record)
+    return output
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for prepare_video.
 
@@ -377,27 +433,49 @@ def main() -> None:
             shutil.copy2(args.input, output)
             if args.verify:
                 verify_output(output)
-            sys.exit(0)
-        print(f"video is already landscape-oriented; using directly: "
-              f"{args.input}")
-        if args.verify:
-            verify_output(args.input)
-        sys.exit(0)
+            if not args.emit_fov:
+                sys.exit(0)
+        else:
+            print(f"video is already landscape-oriented; using directly: "
+                  f"{args.input}")
+            if args.verify:
+                verify_output(args.input)
+            if not args.emit_fov:
+                sys.exit(0)
+    else:
+        # Rotation present — re-encode unless cache is fresh.
+        if (output.is_file() and not args.force
+                and output.stat().st_mtime > args.input.stat().st_mtime):
+            print(f"cached output up to date: {output}")
+            if args.verify:
+                verify_output(output)
+        else:
+            print(f"rotation={rot} detected; re-encoding to: {output}")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            reencode(args.input, output)
+            if args.verify:
+                verify_output(output)
+            print(f"done: {output}")
 
-    # Rotation present — re-encode unless cache is fresh.
-    if (output.is_file() and not args.force
-            and output.stat().st_mtime > args.input.stat().st_mtime):
-        print(f"cached output up to date: {output}")
-        if args.verify:
-            verify_output(output)
-        sys.exit(0)
-
-    print(f"rotation={rot} detected; re-encoding to: {output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    reencode(args.input, output)
-    if args.verify:
-        verify_output(output)
-    print(f"done: {output}")
+    # --- FOV emulation (Plan 3) ------------------------------------------
+    if args.emit_fov:
+        # The 4K source for FOV emission: rotation-stripped output if rot!=0,
+        # else the original input (no-rotation branch fell through to here).
+        src_4k = output if rot != 0 else args.input
+        manifest_path = _resolve_manifest_path(src_4k, args.manifest)
+        print(f"emitting FOV variants: {args.emit_fov}")
+        print(f"  source: {src_4k}")
+        print(f"  manifest: {manifest_path}")
+        for fov_deg in args.emit_fov:
+            _emit_fov_variant(
+                src_4k_input=src_4k,
+                fov_deg=fov_deg,
+                manifest=manifest_path,
+                nice=args.nice,
+                ionice=args.ionice,
+                force=args.force,
+            )
+        print(f"done: {len(args.emit_fov)} FOV variant(s) emitted")
     sys.exit(0)
 
 
