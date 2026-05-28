@@ -6,7 +6,6 @@ from hailo_tiling.aggregator import (
     BoundaryStripFilter,
     NoOpMemory,
 )
-from hailo_tiling.backends import MockBackend
 from hailo_tiling.types import CropRect, Det
 
 
