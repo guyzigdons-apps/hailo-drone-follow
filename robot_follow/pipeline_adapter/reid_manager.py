@@ -16,6 +16,8 @@ from typing import Optional
 
 import numpy as np
 
+from robot_follow.follow_api.event_log import log_reacquire
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -574,6 +576,9 @@ class ReIDManager:
         self._frame_counter = 0
         # Streak tracking is per-target — drop it on a switch.
         self._duplicate_streak = 0
+        # Emit a sparse-log event so the offline renderer can attribute
+        # this transition as "REID re-acquire" rather than "USER LOCKED".
+        log_reacquire(new_track_id)
         LOGGER.debug("[REID] Tracking resumed via ReID for ID %s", self._original_id)
 
     # ------------------------------------------------------------------

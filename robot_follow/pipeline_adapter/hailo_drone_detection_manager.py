@@ -16,8 +16,20 @@ from typing import Optional
 import hailo
 import numpy as np
 
+from robot_follow.follow_api.event_log import (
+    EventLog,
+    FollowCause,
+    log_follow_change,
+    log_record,
+)
 from robot_follow.follow_api.types import Detection
 from robot_follow.perf_tracker import PerfTracker
+
+# Sentinel value GStreamer stamps on buffers that don't carry a valid PTS.
+# Mirrors Gst.CLOCK_TIME_NONE (uint64 max). Defined as a plain int so the
+# module-load path doesn't need to import gi (which costs ~50ms and would
+# fail in test envs without GStreamer system libs).
+_GST_CLOCK_TIME_NONE = 0xFFFFFFFFFFFFFFFF
 
 from .tracker import MetricsTracker
 from .tracker_factory import create_tracker
@@ -69,34 +81,25 @@ def _update_ui(ui_state, persons, person_to_id, following_id, paused=False):
 
     A track id may end up attached to more than one detection in a single
     frame (multi-scale tile duplicates that the tracker associates to the
-    same track, or transient cross-actor matches around a swap). The UI
-    keys SVG bboxes by id, so duplicates collide and React leaks stale
-    elements. Keep the highest-confidence detection per id; emit the rest
-    with id=None so they render as plain (white) clickable boxes.
+    same track, or transient cross-actor matches around a swap). Emit only
+    the highest-confidence detection per track id so the UI doesn't render
+    overlapping ghost bboxes that block clicks on the real one. Untracked
+    persons (no track id) are passed through unchanged.
     """
     if ui_state is None:
         return
-    # Precompute id(p) -> p lookup once (O(n)) so the dedup loop below uses
-    # O(1) dict access instead of the previous O(n) `next((q for q in
-    # persons if id(q) == prev), None)` linear scan — CLEAN-18.
-    person_by_obj_id = {id(p): p for p in persons}
-    keep_obj_id_by_tid: dict = {}
+    best_by_tid: dict = {}
+    untracked = []
     for p in persons:
         tid = person_to_id.get(id(p))
         if tid is None:
+            untracked.append(p)
             continue
-        prev = keep_obj_id_by_tid.get(tid)
-        if prev is None:
-            keep_obj_id_by_tid[tid] = id(p)
-        else:
-            prev_p = person_by_obj_id.get(prev)
-            if prev_p is not None and p.get_confidence() > prev_p.get_confidence():
-                keep_obj_id_by_tid[tid] = id(p)
-    keep_obj_ids = set(keep_obj_id_by_tid.values())
-    all_dets = [
-        _build_det_info(p, person_to_id.get(id(p)) if id(p) in keep_obj_ids else None)
-        for p in persons
-    ]
+        prev = best_by_tid.get(tid)
+        if prev is None or p.get_confidence() > prev.get_confidence():
+            best_by_tid[tid] = p
+    all_dets = [_build_det_info(p, tid) for tid, p in best_by_tid.items()]
+    all_dets.extend(_build_det_info(p) for p in untracked)
     ui_state.update_detections(all_dets, following_id, paused=paused)
 
 
@@ -232,15 +235,40 @@ def app_callback(element, buffer, user_data):
     1. Convert detections to Nx5 array, run tracker.update() synchronously
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
+
+    If any frame-log sink is open (``test_log_file`` for --test-log, or
+    ``record_frame_log_file`` for the current recording bundle), a JSONL
+    row is written per frame containing everything needed by the offline
+    overlay renderer: ``pts_ns`` (matches clean.mkv's video timeline),
+    ``followed_id`` / ``explicit_lock`` / ``last_change_ts`` (drive the
+    cross + badge), plus ``detections`` (drive the bbox overlay).
     """
     _perf_t0 = user_data.perf.frame_start()
-    if user_data.test_log_file is not None:
+    sinks = [s for s in (user_data.test_log_file,
+                         user_data.record_frame_log_file)
+             if s is not None]
+    if sinks:
         user_data.frame_index += 1
+        # buffer.pts is the load-bearing alignment key for the offline
+        # renderer — it matches the PTS stamped onto the corresponding
+        # frame in clean.mkv (the recording branch is tapped at output_tee
+        # so both share the same upstream PTS). Fall back to ``None`` when
+        # the buffer carries no PTS (some test sources don't stamp them);
+        # the renderer treats that case as "best effort sequential".
+        pts = buffer.pts if buffer is not None else None
+        pts_ns = int(pts) if pts is not None and pts != _GST_CLOCK_TIME_NONE else None
+        # Followee state needed by the overlay (badge + cross + flash).
+        ts = user_data.target_state
+        explicit_lock = ts.is_explicit_lock() if ts is not None else False
+        last_change_ts = ts.get_last_change_ts() if ts is not None else None
         user_data._frame_log_data = {
             "t": time.time(),
+            "pts_ns": pts_ns,
             "frame": user_data.frame_index,
             "mode": "",
             "followed_id": None,
+            "explicit_lock": explicit_lock,
+            "last_change_ts": last_change_ts,
             "detections": [],
         }
     else:
@@ -249,17 +277,20 @@ def app_callback(element, buffer, user_data):
         _app_callback_inner(element, buffer, user_data)
     finally:
         user_data.perf.frame_end(_perf_t0, user_data.ui_state)
-        # Snapshot the handle: another thread may None-out test_log_file
-        # between the is-not-None check and the .write() call (e.g., shutdown
-        # racing with an in-flight frame). AttributeError joins the catch list
-        # for the same reason — None.write would raise it.
-        log_file = user_data.test_log_file
-        if log_file is not None and user_data._frame_log_data is not None:
-            try:
-                log_file.write(
-                    json.dumps(user_data._frame_log_data) + "\n")
-            except (ValueError, OSError, AttributeError):
-                pass
+        # Snapshot the handles: another thread may None-out a sink
+        # between the is-not-None check and the .write() call (e.g.,
+        # shutdown racing with an in-flight frame). AttributeError joins
+        # the catch list for the same reason — None.write would raise it.
+        if user_data._frame_log_data is not None:
+            line = json.dumps(user_data._frame_log_data) + "\n"
+            for sink in (user_data.test_log_file,
+                         user_data.record_frame_log_file):
+                if sink is None:
+                    continue
+                try:
+                    sink.write(line)
+                except (ValueError, OSError, AttributeError):
+                    pass
 
 
 def _app_callback_inner(element, buffer, user_data):
@@ -294,7 +325,9 @@ def _app_callback_inner(element, buffer, user_data):
                     LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
                                 user_data.reid_search_timeout,
                                 "auto mode" if auto_select else "IDLE (auto-select off)")
+                    prev_target = target_state.get_target()
                     target_state.enter_auto_mode()
+                    log_follow_change(prev_target, None, cause=FollowCause.TIMEOUT)
                     reid_mgr.clear()
                     if not auto_select:
                         target_state.set_paused(True)
@@ -302,7 +335,9 @@ def _app_callback_inner(element, buffer, user_data):
                     LOGGER.debug("[REID SEARCH] No persons in frame — holding target ID %s, waiting",
                                  target_state.get_target())
             else:
+                prev_target = target_state.get_target()
                 target_state.enter_auto_mode()
+                log_follow_change(prev_target, None, cause=FollowCause.AUTO)
                 if not auto_select:
                     target_state.set_paused(True)
                     LOGGER.info("[IDLE] Target lost (no persons) — auto-select off, holding position")
@@ -368,7 +403,9 @@ def _app_callback_inner(element, buffer, user_data):
                             if new_tid is not None and new_tid != target_id:
                                 # Tracker drifted onto a different person and
                                 # ReID found the right one — switch tracks.
+                                prev_target = target_id
                                 target_state.set_target(new_tid)
+                                log_follow_change(prev_target, new_tid, cause=FollowCause.REID_DRIFT)
                                 reid_manager.on_reidentified(new_tid)
                                 best = person_by_id.get(new_tid, best)
                                 target_id = new_tid
@@ -399,7 +436,9 @@ def _app_callback_inner(element, buffer, user_data):
                     LOGGER.info("[REID TIMEOUT] Search exceeded %.0fs — returning to %s",
                                 user_data.reid_search_timeout,
                                 "auto mode" if auto_select else "IDLE (auto-select off)")
+                    prev_target = target_state.get_target()
                     target_state.enter_auto_mode()
+                    log_follow_change(prev_target, None, cause=FollowCause.TIMEOUT)
                     reid_manager.clear()
                     if not auto_select:
                         target_state.set_paused(True)
@@ -414,7 +453,9 @@ def _app_callback_inner(element, buffer, user_data):
                                 user_data.video_width, user_data.video_height)
                             if new_tid is not None:
                                 # Re-identified — resume following with the new track ID
+                                prev_target = target_state.get_target()
                                 target_state.set_target(new_tid)
+                                log_follow_change(prev_target, new_tid, cause=FollowCause.REID)
                                 reid_manager.on_reidentified(new_tid)
                                 best = person_by_id[new_tid]
                                 target_state.update_last_seen()
@@ -449,7 +490,9 @@ def _app_callback_inner(element, buffer, user_data):
                 display_id = target_id
                 if reid_manager is not None and reid_manager.original_id is not None:
                     display_id = reid_manager.original_id
+                prev_target = target_id
                 target_state.enter_auto_mode()
+                log_follow_change(prev_target, None, cause=FollowCause.AUTO)
                 if not auto_select:
                     target_state.set_paused(True)
                     LOGGER.info("[IDLE] Target ID %s lost — auto-select off, holding position. Available: %s",
@@ -483,6 +526,7 @@ def _app_callback_inner(element, buffer, user_data):
         biggest_id, biggest_person = _find_biggest_person(person_by_id)
         if biggest_id is not None:
             target_state.set_target(biggest_id)
+            log_follow_change(None, biggest_id, cause=FollowCause.AUTO)
             # Match manual-selection state: AUTO acquisition is treated as an explicit lock
             # so OpenHD reports the real follow_id and the state machine is symmetric.
             target_state.set_explicit_lock(True)
@@ -564,11 +608,13 @@ def _app_callback_inner(element, buffer, user_data):
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
     LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
                 follow_status, best.get_confidence(), cx, cy, bbox_h, available_str)
-    # Log the UI follow id, not the raw tracker id: when ReID re-identifies
-    # the target onto a new tracker id, the UI keeps showing the original id
-    # so the operator sees a stable lock. Tests use this same field to verify
-    # we kept following the same person through occlusions / track swaps.
-    _log_mode(user_data, follow_status, ui_following_id)
+    # Log the raw tracker id (not the stable UI label) so frames.jsonl
+    # ``followed_id`` matches the ``id`` field on detections in the same
+    # row. The offline renderer needs them to match — it can't paint the
+    # cross on the right bbox otherwise. UI's stable-label semantics
+    # apply to ui_state only; frames.jsonl is for the renderer.
+    log_followed_id = target_state.get_target() if target_state else None
+    _log_mode(user_data, follow_status, log_followed_id)
 
 
 # ---------------------------------------------------------------------------
@@ -747,9 +793,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self.tracker = tracker
             self.reid_manager = reid_manager
             self.reid_search_timeout = reid_search_timeout
-            # controller_config is attached post-construction by robot_follow_app.py:340
-            # (kept as attribute so callback site at line 278 can read it).
+            # controller_config is attached post-construction by robot_follow_app.py
+            # (kept as attribute so the callback can read it).
             self.controller_config = None
+            # Target cross state — populated by the local-branch metadata
+            # pad probe each frame, read by the cairooverlay draw callback
+            # to render a green cross + state badge on display/record video.
+            # See vision_branches.TargetCrossState.
+            from .vision_branches import TargetCrossState
+            self.target_cross_state = TargetCrossState()
             self.perf = PerfTracker(
                 log_perf=log_perf,
                 tracker_metrics=tracker.metrics if tracker is not None else None,
@@ -757,8 +809,16 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # Set after app creation so callback can extract frames for ReID
             self.video_width = 0
             self.video_height = 0
-            # Per-frame JSONL test log (opened lazily via open_test_log())
+            # Per-frame JSONL sinks. Both default to None; either or both
+            # may be set at any time:
+            #   * ``test_log_file``        — opened by ``--test-log`` for sim tests.
+            #   * ``record_frame_log_file`` — opened by ``start_recording``,
+            #     points at ``<bundle>/frames.jsonl`` and is the
+            #     production source for the offline overlay renderer.
+            # ``app_callback`` writes the same JSON line to whichever
+            # sinks are non-None, so the two paths can coexist.
             self.test_log_file = None
+            self.record_frame_log_file = None
             self.frame_index = 0
             self._frame_log_data = None
 
@@ -774,6 +834,23 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 except OSError:
                     pass
                 self.test_log_file = None
+
+        def open_record_frame_log(self, path):
+            """Open the per-frame JSONL sink for the current recording
+            bundle. Called by ``start_recording``; the sink lives next to
+            ``clean.mkv`` and is consumed by ``scripts/render_overlay.py``.
+            """
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            self.record_frame_log_file = open(path, "w", buffering=1)
+            LOGGER.info("[record] per-frame log -> %s", path)
+
+        def close_record_frame_log(self):
+            if self.record_frame_log_file is not None:
+                try:
+                    self.record_frame_log_file.close()
+                except OSError:
+                    pass
+                self.record_frame_log_file = None
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -809,8 +886,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 os.path.dirname(os.path.abspath(__file__)), "..", "recordings")
             self._record_lock = threading.Lock()
             self._shm_rebuild_pending = False
-            # Output file path of the active recording (set on start_recording).
-            self._current_record_path = None
+            # Active recording session — a bundle directory and the two
+            # ``.mkv`` paths inside it. The clean branch (no overlay) is
+            # the source for ``scripts/render_overlay.py``; the overlay
+            # branch is what the operator saw live. Both are written
+            # for every recording session.
+            self._current_bundle_dir = None
+            self._current_clean_path = None
+            self._current_overlay_path = None
             # Path the FILE_SINK_PIPELINE was instantiated with (chosen at
             # pipeline-build time). Used as the toggle target so the file
             # name shown to operators matches what GStreamer is writing.
@@ -856,18 +939,27 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             self._connect_local_meta_probe()
 
         def _connect_mjpeg_sink(self):
-            """Connect MJPEG appsink (web UI) and splitmuxsink
-            ``format-location-full`` (recording) signal handlers. Called
-            after every pipeline construction / rebuild.
+            """Connect MJPEG appsink (web UI) and both recording splitmuxsink
+            ``format-location-full`` signal handlers. Called after every
+            pipeline construction / rebuild.
             """
             self._Gst = _get_gst()
             mjpeg_sink = self.pipeline.get_by_name("mjpeg_sink")
             if mjpeg_sink:
                 mjpeg_sink.connect("new-sample", self._on_mjpeg_sample)
-            file_sink = self.pipeline.get_by_name("file_sink")
-            if file_sink:
-                file_sink.connect("format-location-full",
-                                  self._on_record_format_location)
+            # Two recording sinks live in the pipeline when --record is set:
+            # ``file_sink_clean`` (raw, pre-overlay) and ``file_sink_overlay``
+            # (operator-visible). Each gets its own format-location callback
+            # so it can return the matching path inside the active session
+            # bundle directory.
+            clean_sink = self.pipeline.get_by_name("file_sink_clean")
+            if clean_sink:
+                clean_sink.connect("format-location-full",
+                                   self._on_record_format_location_clean)
+            overlay_sink = self.pipeline.get_by_name("file_sink_overlay")
+            if overlay_sink:
+                overlay_sink.connect("format-location-full",
+                                     self._on_record_format_location_overlay)
 
         def _on_mjpeg_sample(self, appsink):
             """appsink callback: extract pre-encoded JPEG bytes."""
@@ -1029,9 +1121,12 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             """Attach the highlight_target metadata pad probe to the
             local_meta_id identity element. The element only exists when
             --display or --record is active, so this is a no-op otherwise.
+            Also wires the cairooverlay draw callback that renders the
+            target cross + state badge on display/record video.
             """
             target_state = getattr(self.user_data, "target_state", None)
-            wire_local_meta_probe(self.pipeline, target_state)
+            cross_state = getattr(self.user_data, "target_cross_state", None)
+            wire_local_meta_probe(self.pipeline, target_state, cross_state)
 
         # ---- Recording control ----
 
@@ -1039,40 +1134,133 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         def is_recording(self):
             return self._recording
 
-        def _generate_record_path(self):
+        def _generate_bundle_paths(self):
+            """Create a session bundle directory and return its three paths.
+
+            Layout::
+
+                recordings/<YYYY-MM-DD_HH-MM-SS>/
+                ├── clean.mkv     (no overlay — feeds offline renderer)
+                ├── overlay.mkv   (operator-visible — bboxes + cross + badge)
+                ├── frames.jsonl  (per-frame metadata; PTS-aligned to clean.mkv)
+                └── manifest.json (version, args, video shape, initial config)
+
+            Returns ``(bundle_dir, clean_path, overlay_path)``.
+            """
             os.makedirs(self._record_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            return os.path.join(self._record_dir, f"rec_{ts}.mkv")
+            bundle_dir = os.path.join(self._record_dir, ts)
+            os.makedirs(bundle_dir, exist_ok=True)
+            return (bundle_dir,
+                    os.path.join(bundle_dir, "clean.mkv"),
+                    os.path.join(bundle_dir, "overlay.mkv"))
 
-        def _on_record_format_location(self, splitmux, fragment_id, *_):
-            """``format-location-full`` callback for splitmuxsink. Returns
-            the path for the current recording fragment.
+        def _write_manifest(self, bundle_dir):
+            """Capture everything an offline renderer needs to reconstruct
+            the recording context into ``<bundle_dir>/manifest.json``.
 
-            ``start_recording`` pre-generates the path and stashes it on
-            ``self._current_record_path`` so the bridge's caller has a
-            usable return value immediately. We honour that pre-set
-            value here; only fall back to generating a fresh path if it
-            wasn't pre-set (e.g. ``--record`` auto-start, where the
-            valve is opened before any explicit start_recording call).
+            Best-effort — never raises. The manifest is informational; the
+            renderer can still run from clean.mkv + frames.jsonl alone
+            (manifest just lets it pick the right ControllerConfig and
+            video dimensions without re-deriving them).
             """
-            if self._current_record_path:
-                LOGGER.info("[record] New recording fragment -> %s",
-                            self._current_record_path)
-                return self._current_record_path
-            path = self._generate_record_path()
-            self._current_record_path = path
-            LOGGER.info("[record] New recording fragment -> %s", path)
+            import subprocess
+            import sys
+
+            try:
+                from importlib.metadata import version as _pkg_version
+                df_version = _pkg_version("drone-follow")
+            except Exception:
+                df_version = "unknown"
+
+            git_sha = "unknown"
+            try:
+                here = os.path.dirname(os.path.abspath(__file__))
+                git_sha = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=here, stderr=subprocess.DEVNULL,
+                    timeout=2.0).decode().strip()
+            except (subprocess.SubprocessError, FileNotFoundError, OSError):
+                pass
+
+            cfg = getattr(self.user_data, "controller_config", None)
+            cfg_snapshot = cfg.to_dict() if cfg is not None else None
+
+            manifest = {
+                "drone_follow_version": df_version,
+                "git_sha": git_sha,
+                "argv": list(sys.argv),
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "video": {
+                    "width":  getattr(self, "video_width", None),
+                    "height": getattr(self, "video_height", None),
+                    "fps":    getattr(self, "frame_rate", None),
+                    "encoder_bitrate_kbps": getattr(
+                        self.options_menu, "record_bitrate", None),
+                },
+                "controller_config": cfg_snapshot,
+            }
+            path = os.path.join(bundle_dir, "manifest.json")
+            try:
+                with open(path, "w") as f:
+                    json.dump(manifest, f, indent=2, default=str)
+                LOGGER.info("[record] manifest -> %s", path)
+            except OSError:
+                LOGGER.exception("[record] failed to write manifest")
+
+        @property
+        def current_bundle_dir(self):
+            """The active recording session directory, or None.
+
+            Consumed by frame-log / event-log / manifest writers so they
+            land alongside ``clean.mkv`` + ``overlay.mkv`` for the same
+            session and can be ingested together by the offline renderer.
+            """
+            return self._current_bundle_dir
+
+        # Property kept for backwards compat — returns the overlay-baked
+        # path because that's what operators expect when watching playback.
+        @property
+        def _current_record_path(self):
+            return self._current_overlay_path
+
+        def _on_record_format_location_clean(self, splitmux, fragment_id, *_):
+            """``format-location-full`` for the clean (no-overlay) sink."""
+            return self._format_location("clean", self._current_clean_path)
+
+        def _on_record_format_location_overlay(self, splitmux, fragment_id, *_):
+            """``format-location-full`` for the overlay-baked sink."""
+            return self._format_location("overlay", self._current_overlay_path)
+
+        def _format_location(self, branch_name, pre_set_path):
+            """Shared body for the two format-location callbacks.
+
+            ``start_recording`` pre-generates both paths and stashes them
+            on the instance so the bridge / web UI caller gets a usable
+            return value immediately. The callbacks honour those pre-set
+            paths; only fall back to a fresh bundle when neither was set
+            (e.g. ``--record`` auto-start, where the valve opens before
+            any explicit ``start_recording`` call).
+            """
+            if pre_set_path:
+                LOGGER.info("[record] %s fragment -> %s", branch_name, pre_set_path)
+                return pre_set_path
+            bundle_dir, clean_path, overlay_path = self._generate_bundle_paths()
+            self._current_bundle_dir = bundle_dir
+            self._current_clean_path = clean_path
+            self._current_overlay_path = overlay_path
+            path = clean_path if branch_name == "clean" else overlay_path
+            LOGGER.info("[record] %s fragment -> %s (lazy bundle)",
+                        branch_name, path)
             return path
 
         def start_recording(self, path=None):
-            """Open record_valve so frames flow through the recording
-            branch. ``splitmuxsink`` lazily creates a fresh ``.mkv`` for
-            this session via the ``format-location-full`` callback.
+            """Open both recording valves so frames flow through the clean
+            and overlay sub-branches. Each ``splitmuxsink`` lazily creates
+            a fresh ``.mkv`` inside a shared session bundle directory.
 
-            ``path`` is ignored (kept for API compatibility with the
-            previous implementation). Returns the file path the recording
-            is being written to (set by the format-location callback when
-            the first buffer arrives).
+            ``path`` is ignored (kept for API compat). Returns the bundle
+            directory the recording is being written into.
             """
             with self._record_lock:
                 if not self._record_enabled:
@@ -1082,83 +1270,152 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                     return None
                 if self._recording:
                     LOGGER.info("[record] Already recording: %s",
-                                self._current_record_path)
-                    return self._current_record_path
+                                self._current_bundle_dir)
+                    return self._current_bundle_dir
 
-                valve = self.pipeline.get_by_name("record_valve")
-                if valve is None:
-                    LOGGER.error("[record] record_valve not found in pipeline")
+                # Pre-generate the bundle now so callers (web UI / OpenHD
+                # bridge) see the real paths in the return value. The
+                # format-location callbacks honour these when splitmuxsink
+                # fires shortly after the first buffer arrives.
+                (self._current_bundle_dir,
+                 self._current_clean_path,
+                 self._current_overlay_path) = self._generate_bundle_paths()
+
+                # Write the session manifest first — it captures the
+                # context (version, argv, video shape, initial config)
+                # the offline renderer needs to reconstruct overlays.
+                self._write_manifest(self._current_bundle_dir)
+
+                # Open the per-frame JSONL sink inside the bundle BEFORE
+                # the valves open. The app_callback writes to this sink
+                # on every frame from now until stop_recording, so the
+                # renderer's frames.jsonl lines up 1:1 with clean.mkv.
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "open_record_frame_log"):
+                    try:
+                        user_data.open_record_frame_log(
+                            os.path.join(self._current_bundle_dir,
+                                         "frames.jsonl"))
+                    except OSError:
+                        LOGGER.exception("[record] failed to open frames.jsonl")
+
+                # Open the sparse event log alongside frames.jsonl. The
+                # offline renderer reads this to attribute followee
+                # transitions ("USER LOCKED ID 5" vs "REID re-acquire");
+                # all the wire-in sites (follow_server, openhd_bridge,
+                # reid_manager) call log_click / log_follow_change /
+                # log_reacquire as silent no-ops until this opens.
+                try:
+                    EventLog.get().open(
+                        os.path.join(self._current_bundle_dir, "events.jsonl"))
+                    log_record("start", bundle=self._current_bundle_dir)
+                except OSError:
+                    LOGGER.exception("[record] failed to open events.jsonl")
+
+                # Open both valves under the lock so the two .mkv files
+                # start as close together as possible. Skew is bounded by
+                # the gap between the two property writes (sub-ms).
+                opened_any = False
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve is None:
+                        LOGGER.warning("[record] %s not found in pipeline",
+                                       valve_name)
+                        continue
+                    valve.set_property("drop", False)
+                    opened_any = True
+                if not opened_any:
+                    LOGGER.error("[record] no record valves found in pipeline")
+                    if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                        user_data.close_record_frame_log()
                     return None
 
-                # Pre-generate the path now so the bridge / web UI
-                # caller gets the real filename in the return value.
-                # ``_on_record_format_location`` honours this pre-set
-                # value when splitmuxsink fires its callback shortly
-                # after the first buffer arrives, so no timestamp drift.
-                self._current_record_path = self._generate_record_path()
-
-                valve.set_property("drop", False)
                 self._recording = True
-                LOGGER.info("[record] Recording started (valve open) -> %s",
-                            self._current_record_path)
-                return self._current_record_path
+                LOGGER.info("[record] Recording started -> %s",
+                            self._current_bundle_dir)
+                return self._current_bundle_dir
 
         def stop_recording(self):
-            """Close record_valve and emit ``split-now`` on splitmuxsink
-            so the current ``.mkv`` is finalised. The next call to
-            :meth:`start_recording` will produce a brand-new file rather
-            than appending to the previous one.
+            """Close both record valves and emit ``split-now`` on both
+            splitmuxsinks so each ``.mkv`` is finalised. Also closes the
+            per-frame JSONL sink for the session. The next call to
+            :meth:`start_recording` produces a brand-new bundle directory.
             """
             with self._record_lock:
                 if not self._recording:
                     return None
 
-                valve = self.pipeline.get_by_name("record_valve")
-                if valve:
-                    valve.set_property("drop", True)
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve:
+                        valve.set_property("drop", True)
 
-                file_sink = self.pipeline.get_by_name("file_sink")
-                path = self._current_record_path
-                if file_sink is not None:
-                    try:
-                        file_sink.emit("split-now")
-                    except Exception:  # noqa: BLE001
-                        LOGGER.exception("[record] split-now emission failed")
+                for sink_name in ("file_sink_clean", "file_sink_overlay"):
+                    file_sink = self.pipeline.get_by_name(sink_name)
+                    if file_sink is not None:
+                        try:
+                            file_sink.emit("split-now")
+                        except Exception:  # noqa: BLE001
+                            LOGGER.exception(
+                                "[record] split-now emission failed on %s",
+                                sink_name)
 
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                    user_data.close_record_frame_log()
+
+                # Bookend the event log and close it.
+                log_record("stop", bundle=self._current_bundle_dir)
+                EventLog.get().close()
+
+                bundle = self._current_bundle_dir
                 self._recording = False
-                self._current_record_path = None
-                LOGGER.info("[record] Recording stopped, file finalised: %s", path)
-                return path
+                self._current_bundle_dir = None
+                self._current_clean_path = None
+                self._current_overlay_path = None
+                LOGGER.info("[record] Recording stopped, bundle finalised: %s", bundle)
+                return bundle
 
         def cleanup_recording_branch(self):
-            """Send EOS to the recording branch and walk it down to NULL
-            so the current ``splitmuxsink`` fragment finalises and the
-            file closes cleanly on pipeline shutdown.
+            """Send EOS to both recording sub-branches and walk them to
+            NULL so each ``splitmuxsink`` fragment finalises and the files
+            close cleanly on pipeline shutdown.
             """
             if not self._record_enabled:
                 return
             Gst = _get_gst()
             with self._record_lock:
-                # Send EOS into the valve so the encoder + muxer flush.
-                valve = self.pipeline.get_by_name("record_valve")
-                if valve is not None:
-                    valve.set_property("drop", False)
-                    sink_pad = valve.get_static_pad("sink")
-                    if sink_pad is not None:
-                        sink_pad.send_event(Gst.Event.new_eos())
-                # Walk the record sub-branch down to NULL so the current
-                # splitmuxsink fragment (if any) finalises cleanly.
+                # Send EOS into each valve so the encoder + muxer flush.
+                for valve_name in ("record_valve_clean", "record_valve_overlay"):
+                    valve = self.pipeline.get_by_name(valve_name)
+                    if valve is not None:
+                        valve.set_property("drop", False)
+                        sink_pad = valve.get_static_pad("sink")
+                        if sink_pad is not None:
+                            sink_pad.send_event(Gst.Event.new_eos())
+                # Walk both record sub-branches down to NULL so the current
+                # splitmuxsink fragments (if any) finalise cleanly.
                 torn_down = False
-                for el_name in ("record_valve", "file_sink"):
+                for el_name in ("record_valve_clean", "record_valve_overlay",
+                                "file_sink_clean", "file_sink_overlay"):
                     el = self.pipeline.get_by_name(el_name)
                     if el is not None:
                         el.set_state(Gst.State.NULL)
                         torn_down = True
+                # Drop the per-frame JSONL sink alongside the GStreamer
+                # branch teardown so the file is flushed/closed even when
+                # an EOS-driven shutdown bypassed ``stop_recording``.
+                user_data = getattr(self, "user_data", None)
+                if user_data is not None and hasattr(user_data, "close_record_frame_log"):
+                    user_data.close_record_frame_log()
+                # Same for events.jsonl — flushing on shutdown.
+                EventLog.get().close()
+
                 if torn_down:
-                    last_file = self._current_record_path
-                    if last_file:
+                    last_bundle = self._current_bundle_dir
+                    if last_bundle:
                         LOGGER.info("[record] Recording branch torn down "
-                                    "(last file: %s)", last_file)
+                                    "(last bundle: %s)", last_bundle)
                     else:
                         LOGGER.info("[record] Recording branch torn down "
                                     "(no recording was active)")
@@ -1250,9 +1507,18 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # ---- Output stage (built in vision_branches.py) ----
             record_output = None
             if record:
+                # ``record_output`` here is the ``location`` GStreamer needs at
+                # pipeline-build time, but we don't yet know the path it should
+                # be stored in — that's chosen at recording-start (which can
+                # happen long after pipeline build, and again with a fresh
+                # timestamp on every start/stop cycle). The real path follows
+                # the pattern ``recordings/<YYYY-MM-DD_HH-MM-SS>/{clean,overlay}.mkv``
+                # and is returned per-fragment by ``_on_record_format_location_clean``
+                # / ``_on_record_format_location_overlay``. The temp string
+                # here is never actually written to disk.
                 record_output = (
                     getattr(self.options_menu, 'record_output', None)
-                    or self._generate_record_path()
+                    or os.path.join(self._record_dir, "video_output_temp.mkv")
                 )
                 self._initial_record_path = record_output
 
@@ -1274,7 +1540,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             if record:
                 LOGGER.info("[record] Recording branch ready "
                             "(bitrate %d kbps; click Record on the web UI / "
-                            "OpenHD to start writing a fresh .mkv into %s)",
+                            "OpenHD to start a session bundle under %s — "
+                            "each session writes clean.mkv + overlay.mkv)",
                             getattr(self.options_menu, 'record_bitrate', 5000),
                             self._record_dir)
 

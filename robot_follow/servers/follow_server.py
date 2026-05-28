@@ -25,6 +25,11 @@ import math
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from robot_follow.follow_api.event_log import (
+    FollowCause,
+    log_click,
+    log_follow_change,
+)
 from robot_follow.follow_api.state import FollowTargetState
 
 LOGGER = logging.getLogger(__name__)
@@ -138,9 +143,11 @@ class FollowServerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path in ("/follow/clear", "/follow/"):
+            prev = self.target_state.get_target()
             self.target_state.enter_auto_mode()
             if self.reid_manager is not None:
                 self.reid_manager.clear()
+            log_follow_change(prev, None, cause=FollowCause.CLEAR)
             self._send_json({
                 "status": "success",
                 "following_id": None,
@@ -168,6 +175,9 @@ class FollowServerHandler(BaseHTTPRequestHandler):
                     # snapshot — this is the operator's visual identification,
                     # principled (geometric), and does NOT widen the strict id
                     # contract for headless callers (curl etc. with no body).
+                    # Supersedes the older ReID-original_id no-op fallback —
+                    # bbox geometry is more general and catches non-ReID stale
+                    # ids too.
                     recovered_id = None
                     recovered_iou = 0.0
                     if body_bbox is not None:
@@ -198,9 +208,12 @@ class FollowServerHandler(BaseHTTPRequestHandler):
                         )
                         return
 
+            prev = self.target_state.get_target()
             self.target_state.set_paused(False)
             self.target_state.set_target(detection_id)
             self.target_state.set_explicit_lock(True)
+            log_click(source="webui", det_id=detection_id)
+            log_follow_change(prev, detection_id, cause=FollowCause.USER)
             # Capture the clicked person's current bbox as the distance setpoint so
             # the drone holds its current distance instead of converging on a fixed value.
             body_h = body_bbox["h"] if body_bbox is not None else None

@@ -544,7 +544,9 @@ async def _telemetry_log_task(drone, altitude_cache: dict, telemetry_cache: dict
         if lat is not None:
             parts.append(f"pos=({lat:.6f},{lon:.6f})")
         msg = "[TELEM] " + " | ".join(parts)
-        telem_logger.info(msg)
+        # DEBUG-level — per-tick telemetry spams default INFO. Operators
+        # opt in via `--log-verbosity debug` when they actually want it.
+        telem_logger.debug(msg)
         if ui_state is not None:
             ui_state.push_log(msg)
 

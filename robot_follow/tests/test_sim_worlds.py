@@ -170,11 +170,15 @@ def sim_run(tmp_path, request):
         sim_log = open(sim_log_path, "wb")
         app_log = open(app_log_path, "wb")
 
-        # Snapshot existing recordings so we can identify the new mp4 created
-        # by --record after the run.
+        # Snapshot existing recording bundles so we can identify the one
+        # created by --record after the run. Each session writes a bundle
+        # directory containing clean.mkv + overlay.mkv (see
+        # vision_branches._record_subbranch); pre-bundle layout was a
+        # single rec_<ts>.mkv at the top level.
         state["world"] = world
         state["recordings_before"] = (
-            set(RECORDINGS_DIR.glob("*.mp4")) if RECORDINGS_DIR.exists() else set()
+            set(p for p in RECORDINGS_DIR.iterdir() if p.is_dir())
+            if RECORDINGS_DIR.exists() else set()
         )
 
         _log(f"artifacts  {tmp_path}")
@@ -252,21 +256,26 @@ def sim_run(tmp_path, request):
     for p in reversed(procs):
         _kill_group(p)
 
-    # Tag any newly-produced recording with the world name so the user can
-    # find it after the run. SIGTERM to the app's process group should have
-    # let ffmpeg finalize the mp4 cleanly.
+    # Tag any newly-produced recording bundle with the world name so the
+    # user can find it after the run. SIGTERM to the app's process group
+    # should have let matroskamux finalize the .mkv files cleanly. Each
+    # bundle is a directory (clean.mkv + overlay.mkv + JSONL sidecars);
+    # we rename the directory itself to embed the world name.
     if state.get("world") and RECORDINGS_DIR.exists():
         before = state.get("recordings_before", set())
-        new_files = sorted(set(RECORDINGS_DIR.glob("*.mp4")) - before)
-        for src in new_files:
-            dst = src.with_name(f"{src.stem}_{state['world']}.mp4")
+        now = set(p for p in RECORDINGS_DIR.iterdir() if p.is_dir())
+        new_bundles = sorted(now - before)
+        for src in new_bundles:
+            dst = src.with_name(f"{src.name}_{state['world']}")
             try:
                 src.rename(dst)
-                _log(f"recording  {dst}   ({_fmt_size(dst).strip()})")
+                overlay = dst / "overlay.mkv"
+                size = _fmt_size(overlay).strip() if overlay.exists() else "?"
+                _log(f"recording  {dst}   (overlay.mkv {size})")
             except OSError as e:
-                _log(f"recording  rename failed: {e} (file at {src})")
-        if not new_files:
-            _log("recording  (no new mp4 produced — recording may not have started)")
+                _log(f"recording  rename failed: {e} (bundle at {src})")
+        if not new_bundles:
+            _log("recording  (no new bundle produced — recording may not have started)")
 
 
 # ---------------------------------------------------------------------------

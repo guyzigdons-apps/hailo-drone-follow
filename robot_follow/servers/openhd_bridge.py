@@ -33,6 +33,12 @@ import threading
 import time
 
 from robot_follow.follow_api.config import ControllerConfig
+from robot_follow.follow_api.event_log import (
+    FollowCause,
+    log_click,
+    log_follow_change,
+)
+from robot_follow.follow_api.follow_mode import FollowMode
 
 LOGGER = logging.getLogger(__name__)
 
@@ -180,19 +186,28 @@ class OpenHDBridge:
         if self._target_state is None:
             LOGGER.warning("[openhd_bridge] follow_id received but no target_state")
             return
+
+        prev = self._target_state.get_target()
         self._explicit_follow_id = value
         if value < 0:
             self._target_state.set_paused(True)
             self._target_state.set_target(None)
             self._target_state.set_explicit_lock(False)
+            log_follow_change(prev, None, cause=FollowCause.USER)
             LOGGER.info("[openhd_bridge] IDLE mode (drone holding position)")
         elif value == 0:
             self._target_state.enter_auto_mode()
+            log_follow_change(prev, None, cause=FollowCause.CLEAR)
             LOGGER.info("[openhd_bridge] AUTO mode (follow largest person)")
         else:
             self._target_state.set_paused(False)
             self._target_state.set_target(value)
             self._target_state.set_explicit_lock(True)
+            # Operator picked this id explicitly — log both the click
+            # source and the resulting transition so the offline renderer
+            # can show "USER LOCKED ID N" attribution.
+            log_click(source="openhd", det_id=value)
+            log_follow_change(prev, value, cause=FollowCause.USER)
             LOGGER.info("[openhd_bridge] LOCKED to ID %d", value)
         # Immediately push state back so QOpenHD badge updates without waiting
         # for the next periodic report cycle.
@@ -418,6 +433,31 @@ class OpenHDBridge:
                     "tracked": det_id is not None and det_id == active_id,
                 })
             payload["bboxes"] = bboxes
+            # Follow-state hint so QOpenHD can render the same SEARCH /
+            # LOCKED / AUTO badge + target cross the air-side display
+            # already paints. The local display/record overlay derives
+            # these from the same target_state — this is the wire copy.
+            #
+            # The OpenHD bridge today does NOT forward mode through the
+            # binary v3 payload — QOpenHD ignores unknown JSON fields,
+            # so adding it here is a no-op until HailoFollowBridge +
+            # QOpenHD are patched in the OpenHD repo. Sibling change
+            # lives outside this repo. Until then this is informational
+            # for any other consumer of the JSON report.
+            if active_id is None:
+                mode = FollowMode.AUTO
+            else:
+                visible = any(b["id"] == active_id for b in bboxes)
+                if visible:
+                    if self._target_state is not None and \
+                            self._target_state.is_explicit_lock():
+                        mode = FollowMode.LOCKED
+                    else:
+                        mode = FollowMode.AUTO
+                else:
+                    mode = FollowMode.SEARCH
+            payload["mode"] = mode.value
+            payload["active_id"] = active_id if active_id is not None else 0
 
         msg = json.dumps(payload).encode("utf-8")
         try:

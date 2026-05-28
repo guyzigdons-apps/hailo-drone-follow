@@ -161,7 +161,7 @@ robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 | `--display` | auto-on when no UI flag | Local X11 window with overlay (tile rectangles stripped, target person's bbox highlighted via class-id remap). |
 | `--webui` | off | Web UI with live MJPEG video and click-to-follow (port 5001). Mutually exclusive with `--openhd`. |
 | `--openhd` | off | Send overlay video to OpenHD via UDP RTP. Mutually exclusive with `--webui`. |
-| `--record` | off | Record post-overlay video to `recordings/rec_<ts>.mkv` (pure-GStreamer x264enc + matroskamux + filesink). |
+| `--record` | off | Record a session bundle to `recordings/<ts>/` containing `clean.mkv` (no overlay — for the offline renderer) and `overlay.mkv` (operator-visible). See [Recording & Offline Overlay Rendering](#recording--offline-overlay-rendering). |
 | `--target-bbox-height` | `0.25` | Desired person size in frame (0-0.25). Drives forward/backward distance. Adjustable mid-flight via UI. |
 | `--target-altitude` | `3.0` | Target altitude in metres. Also used as takeoff height. |
 | `--yaw-only` / `--no-yaw-only` | on | Yaw only: no forward/backward movement. Use `--no-yaw-only` for full follow. |
@@ -364,6 +364,58 @@ robot-follow --config configs/outdoor_follow.json --input rpi --serial --webui
 The status bar displays real-time metrics: FPS, callback latency, host CPU%, RSS memory, Hailo chip temperature, and NN core utilization.
 
 NN core utilization is read from HailoRT's monitor data (`/tmp/hmon_files/`), enabled automatically by the app. To also view per-model utilization in a separate terminal:
+
+## Flight Logs (`.ulg`)
+
+PX4 writes a fresh `.ulg` log for every armed run — useful for post-flight debugging and rendering 3D flight paths.
+
+- **Sim:** `sim/PX4-Autopilot/build/px4_sitl_default/rootfs/log/<YYYY-MM-DD>/<HH_MM_SS>.ulg`
+- **Real drone (Cube Orange+):** stored on the FC's microSD at `/fs/microsd/log/<YYYY-MM-DD>/<HH_MM_SS>.ulg`. Three ways to pull them off:
+  - Pop the microSD out — fastest, requires disarmed access.
+  - QGroundControl → *Analyze Tools → Log Download* (uses MAVLink FTP over the existing `/dev/ttyACM0` link — slow at 57600 baud).
+  - MAVSDK's `LogFiles.download_log_file` over the same connection (programmatic equivalent of the QGC option).
+
+**Viewing:** drag the `.ulg` onto https://logs.px4.io (PX4 Flight Review) — free 3D flight path, altitude, modes, GPS quality, etc. For local inspection, use `pyulog` (`pip install pyulog` → `ulog_info`, `ulog2csv`).
+
+## Recording & Offline Overlay Rendering
+
+`--record` writes a self-describing **session bundle**, not a single file. Each run produces a directory under `drone_follow/recordings/<YYYY-MM-DD_HH-MM-SS>/` containing both videos plus the metadata you need to re-render the overlay later from a machine that doesn't even have Hailo installed.
+
+```
+drone_follow/recordings/<timestamp>/
+├── clean.mkv             # raw video, NO overlay — input to the renderer
+├── overlay.mkv           # operator's-eye view, bboxes + cross + badge baked in
+├── frames.jsonl          # per-frame metadata, PTS-aligned to clean.mkv
+├── events.jsonl          # operator actions: clicks, mode switches, REID acquires
+└── manifest.json         # drone-follow version, git sha, argv, video dims, initial config
+```
+
+`clean.mkv` is tapped upstream of every overlay element, so it's exactly what the camera saw — re-render the overlay any number of times with different styling. `overlay.mkv` is what the operator saw live (handy for quick playback without running the renderer).
+
+### Rendering the overlay offline
+
+```bash
+source setup_env.sh
+python scripts/render_overlay.py drone_follow/recordings/<timestamp>
+#   → drone_follow/recordings/<timestamp>/overlay.rendered.mkv
+```
+
+The renderer uses ffmpeg + cairo and reuses the production `draw_target_cross` function from the live pipeline, so visual parity tracks the live overlay automatically. The toast attribution is *richer* than the live overlay because events.jsonl preserves the cause of every transition:
+
+| Live overlay | Offline render (reads `events.jsonl`)       |
+|---|---|
+| `TARGET CHANGED` | `USER LOCKED ID 5` (operator click)         |
+|                  | `REID RE-ACQUIRED ID 5` (post-occlusion)    |
+|                  | `REID-DRIFT → ID 5` (drift correction)      |
+|                  | `AUTO → ID 5` (auto-acquired largest)       |
+|                  | `TARGET CLEARED` / `REID TIMEOUT` / `TARGET LOST` |
+
+### Use cases
+
+- **Post-flight review from a non-Hailo machine.** Copy the bundle off the Pi, run the renderer on a laptop. No Hailo runtime, no driver, no submodule install needed — just `ffmpeg`, `pycairo`, and a Python venv with the drone-follow package.
+- **Re-render with different overlay styling.** Want thicker bboxes? Different colors? Different toast text? Tweak `vision_branches.draw_target_cross` (or `_draw_bboxes` in `scripts/render_overlay.py` for the bbox style), re-render — `clean.mkv` doesn't change.
+
+Skip `--record` if you only want live playback via the web UI — recording is opt-in and costs ~5 Mbps of disk write × 2 (clean + overlay), plus an x264 encode per branch.
 
 ## Yaw-Only Mode
 

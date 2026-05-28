@@ -36,12 +36,73 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import hailo
 
+from robot_follow.follow_api.follow_mode import FollowMode
+
 LOGGER = logging.getLogger(__name__)
+
+
+class TargetCrossState:
+    """Thread-safe holder for the target's bbox center + mode.
+
+    Populated by the ``highlight_target`` pad probe on each buffer (running
+    on the GStreamer streaming thread). Read by the ``cairooverlay`` draw
+    callback (running on the same thread, but the lock keeps it correct
+    if rendering ever moves off-thread).
+
+    ``cx``/``cy`` are normalized [0..1] image coords (matching the UI's
+    convention). ``mode`` is one of ``"LOCKED"`` / ``"AUTO"`` / ``None``
+    so the cairo overlay can draw a small state badge alongside the cross.
+    ``None`` everywhere ⇒ no target visible this frame ⇒ no cross drawn.
+
+    ``toast`` is optional flashable text. Live highlight_target leaves it
+    ``None`` so the cairo callback renders the default "TARGET CHANGED"
+    banner. The offline renderer resolves cause (USER / REID / AUTO / …)
+    from ``events.jsonl`` and sets a specific string so post-flight
+    review can attribute switches at a glance.
+    """
+
+    __slots__ = ("_lock", "_cx", "_cy", "_mode", "_toast")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cx: Optional[float] = None
+        self._cy: Optional[float] = None
+        self._mode: Optional[str] = None
+        self._toast: Optional[str] = None
+
+    def set(self, cx: Optional[float], cy: Optional[float],
+            mode: Optional[str]) -> None:
+        with self._lock:
+            self._cx, self._cy, self._mode = cx, cy, mode
+
+    def set_toast(self, text: Optional[str]) -> None:
+        """Override the change-toast text for the next draw. ``None``
+        restores the default ("TARGET CHANGED").
+        """
+        with self._lock:
+            self._toast = text
+
+    def clear(self) -> None:
+        # ``_toast`` is intentionally NOT reset: it has its own lifecycle
+        # via the cairo draw callback's flash window. Resetting it here
+        # would suppress the "target cleared / lost" toast on transitions
+        # to None — exactly the moment the operator most needs to see why.
+        with self._lock:
+            self._cx = self._cy = self._mode = None
+
+    def get(self) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+        with self._lock:
+            return self._cx, self._cy, self._mode
+
+    def get_toast(self) -> Optional[str]:
+        with self._lock:
+            return self._toast
 
 
 # ---------------------------------------------------------------------------
@@ -241,36 +302,69 @@ def _display_subbranch(video_sink: str, sync: str, show_fps: str) -> str:
     )
 
 
-def _record_subbranch(record_output: str, record_bitrate_kbps: int) -> str:
+def _record_subbranch(record_output: str, record_bitrate_kbps: int,
+                       valve_name: str = "record_valve_overlay",
+                       sink_name: str = "file_sink_overlay",
+                       queue_name: str = "record_branch_q") -> str:
+    """One half of the recording stage — a queue + valve + x264 + splitmuxsink.
+
+    Two instances run in parallel inside :func:`assemble_output_stage`:
+
+    * **overlay** (this default) — tapped *downstream* of
+      ``hailooverlay_community`` + ``cairooverlay`` inside
+      :func:`local_branch`, so bboxes + cross + badge are baked in.
+    * **clean** — tapped at ``output_tee`` via
+      :func:`clean_record_branch`, so frames are pristine and the
+      offline renderer (``scripts/render_overlay.py``) can paint a
+      fresh overlay from ``frames.jsonl``.
+
+    Both subbranches share the same recording lifecycle: the operator
+    opens/closes valves together (see ``start_recording`` /
+    ``stop_recording`` in the recording manager). The valves and
+    splitmuxsink instances are uniquely named per branch so the
+    manager can target each independently.
+
+    The ``location`` here is a placeholder — the real per-fragment path
+    is returned by the ``format-location-full`` signal handler (see
+    ``DroneFollowTilingApp._on_record_format_location_overlay`` /
+    ``..._clean``). The handlers route output into a bundle directory:
+    ``recordings/<YYYY-MM-DD_HH-MM-SS>/{clean,overlay}.mkv``.
+
+    async-handling/async-finalize=true and the inner sink-properties
+    (``async=false sync=false``) keep splitmuxsink out of pipeline
+    preroll synchronisation — required because the valve is closed at
+    launch, so no buffer would reach the file sink to preroll, which
+    would otherwise stall the entire pipeline including the webui
+    branch.
+    """
     bitrate_bps = record_bitrate_kbps * 1000
     encoder = select_h264_encoder(bitrate_bps, record_bitrate_kbps)
-    # splitmuxsink writes a fresh .mkv per recording session: the
-    # ``valve`` gates frames, and ``split-now`` is emitted on stop to
-    # finalise the current file. ``max-size-time=0 max-size-bytes=0``
-    # disables automatic splitting, so file rotation is purely operator
-    # driven via the start/stop callbacks. The ``location`` here is just
-    # the template default; the actual per-fragment path is generated by
-    # the ``format-location-full`` signal handler (see
-    # ``DroneFollowTilingApp._on_record_format_location``).
-    #
-    # async-handling/async-finalize=true and the inner sink-properties
-    # (``async=false sync=false``) keep splitmuxsink out of pipeline
-    # preroll synchronisation — required because the valve is closed at
-    # launch, so no buffer would reach the file sink to preroll, which
-    # would otherwise stall the entire pipeline including the webui
-    # branch.
     return (
-        "queue name=record_branch_q leaky=downstream max-size-buffers=3 ! "
-        "valve name=record_valve drop=true ! "
+        f"queue name={queue_name} leaky=downstream max-size-buffers=3 ! "
+        f"valve name={valve_name} drop=true ! "
         "videoconvert n-threads=2 ! "
         f"{encoder} ! "
         "h264parse config-interval=1 ! "
-        "splitmuxsink name=file_sink "
+        f"splitmuxsink name={sink_name} "
         f'location="{record_output}" '
         "max-size-time=0 max-size-bytes=0 "
         "async-handling=true async-finalize=true "
         "muxer-factory=matroskamux "
         'sink-properties="sink,async=false,sync=false"'
+    )
+
+
+def clean_record_branch(record_output: str, record_bitrate_kbps: int) -> str:
+    """Top-level recording branch taps at ``output_tee``, *before* any
+    overlay element runs. Pair with the overlay-baked branch inside
+    :func:`local_branch` to record both ``clean.mkv`` and ``overlay.mkv``
+    for the same session — clean.mkv feeds the offline overlay renderer.
+    """
+    return _record_subbranch(
+        record_output, record_bitrate_kbps,
+        valve_name="record_valve_clean",
+        sink_name="file_sink_clean",
+        queue_name="record_clean_branch_q",
     )
 
 
@@ -293,11 +387,16 @@ def local_branch(*, display: bool, record: bool, record_output: Optional[str],
     )
     if DEFAULT_OVERLAY_STYLE_CONFIG:
         overlay_props += f' style-config="{DEFAULT_OVERLAY_STYLE_CONFIG}"'
+    # cairooverlay draws the target cross + state badge on top of the bbox
+    # overlay. videoconvert wrappers around it because cairooverlay needs
+    # BGRA/ARGB (it can't write into Hailo's NV12 native format).
     head = (
         "queue name=local_branch_q leaky=downstream max-size-buffers=3 ! "
         "identity name=local_meta_id ! "
         "queue name=hailo_overlay_q ! "
-        f"hailooverlay_community name=hailo_overlay {overlay_props}"
+        f"hailooverlay_community name=hailo_overlay {overlay_props} ! "
+        "videoconvert n-threads=2 ! video/x-raw,format=BGRA ! "
+        "cairooverlay name=target_cross_overlay"
     )
 
     subs = []
@@ -328,13 +427,29 @@ def assemble_output_stage(*, display: bool, record: bool, openhd: bool,
     returns just that branch. If multiple, wraps them in a top-level
     ``tee output_tee``. If none, returns a fakesink so the pipeline is
     still well-formed.
+
+    When ``record=True`` the recording stage *splits in two*: an
+    overlay-baked branch (built inside :func:`local_branch`) and a clean
+    branch (built by :func:`clean_record_branch`) tapped directly at
+    ``output_tee``. Both share a single recording lifecycle but write
+    separate ``.mkv`` files inside one session bundle directory; see
+    :func:`_record_subbranch`.
     """
     branches = []
     if webui:
         branches.append(webui_branch(ui_fps))
     if openhd:
         branches.append(openhd_branch(openhd_port, openhd_bitrate_kbps))
+    if record:
+        # Clean (pre-overlay) recording branch — tapped at output_tee so
+        # it never sees hailooverlay_community or cairooverlay. Used by
+        # the offline renderer to repaint overlays from frames.jsonl.
+        branches.append(clean_record_branch(record_output or "clean.mkv",
+                                            record_bitrate_kbps))
     if display or record:
+        # The overlay-baked recording branch lives inside local_branch
+        # so it shares the cairooverlay head with --display. Records
+        # what the operator saw in the moment.
         branches.append(local_branch(
             display=display, record=record,
             record_output=record_output,
@@ -369,22 +484,23 @@ def _tag_white(det):
     ))
 
 
-def highlight_target(pad, info, target_state):
+def highlight_target(pad, info, target_state, cross_state=None):
     """Style the local-branch detections so the operator can tell the
     locked/auto target apart from everyone else at a glance:
 
-    * **Target**: retagged with ``class_id = TARGET_OVERLAY_CLASS_ID`` so
-      the YAML style-config rule applies — thicker, green bbox.
+    * **Target**: bbox center captured into ``cross_state`` for the
+      downstream cairo overlay to draw a target cross at, and the target's
+      HailoDetection is REMOVED from the ROI so ``hailooverlay_community``
+      doesn't draw a bbox over the cross.
     * **Non-target detections**: an ``overlay_color`` classification of
       :data:`NON_TARGET_BBOX_COLOR_RGB` (white) is attached so they render
       in white at the element-level (thin) line thickness.
 
     Pure metadata work — no pixel buffers are mapped.
 
-    HailoDetection has no ``set_class_id`` setter in the Python binding,
-    so the target detection is replaced with a copy carrying the new
-    class_id; sub-objects (HailoUniqueID, classifications, …) are
-    re-attached so downstream metadata survives.
+    Backwards compat: ``cross_state`` is optional. With ``cross_state=None``
+    the probe falls back to the previous behaviour (retag target with
+    :data:`TARGET_OVERLAY_CLASS_ID` so the YAML green-bbox rule fires).
     """
     import gi  # noqa: F401 — local import keeps gi out of module-load time
     gi.require_version("Gst", "1.0")
@@ -396,7 +512,7 @@ def highlight_target(pad, info, target_state):
 
     target_id = target_state.get_target() if target_state is not None else None
     roi = hailo.get_roi_from_buffer(buffer)
-    target_orig = None
+    target_det = None
     others = []
 
     for det in roi.get_objects_typed(hailo.HAILO_DETECTION):
@@ -407,41 +523,76 @@ def highlight_target(pad, info, target_state):
                     is_target = True
                     break
         if is_target and det.get_class_id() != TARGET_OVERLAY_CLASS_ID:
-            target_orig = det
-        elif not is_target:
+            target_det = det
+        elif is_target:  # already retagged on a previous pass
+            target_det = det
+        else:
             others.append(det)
 
     # Tag every non-target detection white so it stands apart from the
-    # target's green bbox. Idempotent across probe re-runs.
+    # target's marker. Idempotent across probe re-runs.
     for det in others:
         _tag_white(det)
 
-    # Retag the target detection so the YAML rule for class_id 99 fires.
-    if target_orig is not None:
-        bbox = target_orig.get_bbox()
-        new_det = hailo.HailoDetection(
-            bbox, TARGET_OVERLAY_CLASS_ID, target_orig.get_label(),
-            target_orig.get_confidence(),
-        )
-        for child in list(target_orig.get_objects()):
-            # Skip any pre-existing overlay_color classification —
-            # otherwise the metadata would override the YAML green.
-            if (isinstance(child, hailo.HailoClassification)
-                    and child.get_classification_type() == "overlay_color"):
-                continue
+    if target_det is not None:
+        bbox = target_det.get_bbox()
+        cx = bbox.xmin() + bbox.width() / 2.0
+        cy = bbox.ymin() + bbox.height() / 2.0
+
+        if cross_state is not None:
+            # Capture target center for the downstream cairooverlay draw
+            # callback. Mode hint follows whether this is an explicit lock
+            # vs the auto-acquired largest person.
             try:
-                new_det.add_object(child)
-            except Exception:  # noqa: BLE001 — child re-attach is best-effort
-                pass
-        roi.remove_object(target_orig)
-        roi.add_object(new_det)
+                is_locked = bool(target_state.is_explicit_lock())
+            except Exception:  # noqa: BLE001 — older FollowTargetState shapes
+                is_locked = False
+            cross_state.set(cx, cy, FollowMode.LOCKED if is_locked else FollowMode.AUTO)
+            # Drop the target detection so hailooverlay doesn't draw a bbox
+            # over the cross. The other branches' shared metadata is fine —
+            # the orchestrator's view of state was populated upstream in
+            # user_callback, before the output_tee.
+            roi.remove_object(target_det)
+        else:
+            # Legacy path: retag with class_id 99 so the YAML thick-green
+            # rule applies (preserves callers that don't pass cross_state).
+            new_det = hailo.HailoDetection(
+                bbox, TARGET_OVERLAY_CLASS_ID, target_det.get_label(),
+                target_det.get_confidence(),
+            )
+            for child in list(target_det.get_objects()):
+                if (isinstance(child, hailo.HailoClassification)
+                        and child.get_classification_type() == "overlay_color"):
+                    continue
+                try:
+                    new_det.add_object(child)
+                except Exception:  # noqa: BLE001 — best-effort re-attach
+                    pass
+            roi.remove_object(target_det)
+            roi.add_object(new_det)
+    elif cross_state is not None:
+        if target_id is not None and target_id > 0:
+            # Followee is set but not visible this frame → the operator
+            # should see *something* on screen telling them the drone is
+            # searching, even though there's no center to draw the cross
+            # at. The downstream cairo callback renders just the badge
+            # ("SEARCH") when cx/cy are None.
+            cross_state.set(None, None, FollowMode.SEARCH)
+        else:
+            # No target at all (cleared / boot-up before AUTO acquires).
+            cross_state.clear()
 
     return Gst.PadProbeReturn.OK
 
 
-def wire_local_meta_probe(pipeline, target_state) -> bool:
+def wire_local_meta_probe(pipeline, target_state, cross_state=None) -> bool:
     """Attach :func:`highlight_target` to the ``local_meta_id`` identity
     element if it exists in the pipeline.
+
+    With ``cross_state`` provided, also connects the ``target_cross_overlay``
+    ``cairooverlay``'s ``draw`` signal to :func:`draw_target_cross` so the
+    captured target center renders as a cross + small state badge on the
+    display/record video.
 
     Returns True if a probe was attached; False if the element is absent
     (no display/record branch was built). Safe to call after every
@@ -460,5 +611,214 @@ def wire_local_meta_probe(pipeline, target_state) -> bool:
         Gst.PadProbeType.BUFFER,
         highlight_target,
         target_state,
+        cross_state,
     )
+
+    if cross_state is not None:
+        overlay = pipeline.get_by_name("target_cross_overlay")
+        if overlay is not None:
+            # target_state is forwarded so the draw callback can read
+            # get_last_change_ts() and briefly flash the badge whenever
+            # someone changes the followee.
+            overlay.connect("draw", draw_target_cross, cross_state, target_state)
+        else:
+            LOGGER.warning(
+                "[overlay] target_cross_overlay element not found in pipeline "
+                "— cross will not be drawn on display/record video."
+            )
     return True
+
+
+# Cross geometry — matched to the UI's SVG cross in App.jsx for visual
+# parity. Arm length scales loosely with video size so it stays readable
+# at any resolution; floor + ceiling keep it visible at 480p and
+# unobtrusive at 4K.
+_CROSS_ARM_FRACTION = 0.025      # 2.5 % of min(width, height) per arm half
+_CROSS_ARM_MIN_PX = 12
+_CROSS_ARM_MAX_PX = 32
+_CROSS_HALO_WIDTH_PX = 6
+_CROSS_LINE_WIDTH_PX = 3
+
+# Brand colours — match the SVG cross in the React UI (App.jsx).
+_CROSS_GREEN = (0x80 / 255, 0xF0 / 255, 0x60 / 255, 1.0)  # locked / auto
+_CROSS_HALO = (0.0, 0.0, 0.0, 0.75)                      # behind every stroke
+_BADGE_BG = (0.0, 0.0, 0.0, 0.55)                        # default badge bg
+_BADGE_FLASH_BG = (0xE2 / 255, 0x8B / 255, 0x4A / 255, 0.85)  # followee-changed accent
+_BADGE_SEARCH_TEXT = (0xFF / 255, 0xC4 / 255, 0x6B / 255, 1.0)  # warm amber
+_FOLLOWEE_FLASH_SECS = 2.0   # badge tints + "TARGET CHANGED" text for this long
+
+
+def draw_target_cross(overlay, context, timestamp, duration,
+                      cross_state, target_state=None, dims=None):
+    """``cairooverlay::draw`` handler — renders the target cross + a small
+    state badge.
+
+    Reads ``cross_state`` (populated upstream by :func:`highlight_target`)
+    and (when supplied) reads ``target_state.get_last_change_ts()`` so the
+    badge briefly flashes whenever someone changes the followee.
+
+    Three render modes from one path:
+
+      * ``cx`` / ``cy`` set — full draw: cross at target center + badge.
+      * ``cx`` / ``cy`` ``None`` but ``mode`` set — badge-only (SEARCH).
+      * everything ``None`` — early-return; frame passes through clean.
+
+    ``dims`` is an offline-render escape hatch: when provided as
+    ``(width, height)`` the function uses it directly instead of reading
+    sink-pad caps off ``overlay``. The live cairo callback path leaves
+    it ``None`` and ``overlay`` is resolved via :func:`_cached_overlay_dims`.
+    The offline renderer (``scripts/render_overlay.py``) passes a stub
+    overlay and supplies ``dims`` so the same draw code runs over a raw
+    cairo surface.
+    """
+    cx_norm, cy_norm, mode = cross_state.get()
+    toast_override = cross_state.get_toast()
+
+    # Optional followee-changed flash. Only when target_state is wired.
+    flash_active = False
+    if target_state is not None:
+        try:
+            change_ts = target_state.get_last_change_ts()
+        except Exception:  # noqa: BLE001 — older FollowTargetState shapes
+            change_ts = None
+        if change_ts is not None:
+            import time as _time
+            flash_active = (_time.monotonic() - change_ts) < _FOLLOWEE_FLASH_SECS
+
+    # Skip early only if there's truly nothing to draw — including no
+    # active flash carrying a toast over from a recent transition.
+    if (cx_norm is None and cy_norm is None and not mode
+            and not (flash_active and toast_override)):
+        return
+
+    # cairooverlay::draw doesn't supply width/height directly; read them
+    # off the element's sink pad caps. Cached on the element on first draw.
+    if dims is not None:
+        width, height = dims
+    else:
+        width, height = _cached_overlay_dims(overlay)
+    if width is None or height is None:
+        return
+
+    if cx_norm is not None and cy_norm is not None:
+        cx = cx_norm * width
+        cy = cy_norm * height
+        arm = max(
+            _CROSS_ARM_MIN_PX,
+            min(_CROSS_ARM_MAX_PX,
+                int(_CROSS_ARM_FRACTION * min(width, height))),
+        )
+
+        context.set_line_cap(2)  # cairo.LINE_CAP_ROUND
+        # Black halo so the cross stays readable on any background.
+        context.set_source_rgba(*_CROSS_HALO)
+        context.set_line_width(_CROSS_HALO_WIDTH_PX)
+        context.move_to(cx - arm, cy)
+        context.line_to(cx + arm, cy)
+        context.stroke()
+        context.move_to(cx, cy - arm)
+        context.line_to(cx, cy + arm)
+        context.stroke()
+        # Green cross on top.
+        context.set_source_rgba(*_CROSS_GREEN)
+        context.set_line_width(_CROSS_LINE_WIDTH_PX)
+        context.move_to(cx - arm, cy)
+        context.line_to(cx + arm, cy)
+        context.stroke()
+        context.move_to(cx, cy - arm)
+        context.line_to(cx, cy + arm)
+        context.stroke()
+
+    # Badge — always drawn when there's any mode to report, including the
+    # SEARCH state where we have no center to draw a cross at.
+    if mode:
+        _draw_state_badge(context, mode, width, height, flash_active)
+
+    # When the followee just changed, also draw a centered toast so the
+    # operator sees the transition even if they weren't watching the
+    # badge. Live path leaves toast_override as None → default text.
+    # Offline renderer resolves cause from events.jsonl and supplies
+    # specific text (e.g. "USER LOCKED ID 5" / "REID RE-ACQUIRED ID 5").
+    if flash_active:
+        toast_text = toast_override or "TARGET CHANGED"
+        _draw_followee_changed_toast(context, mode, width, height, toast_text)
+
+
+def _draw_state_badge(context, mode, width, height, flash_active=False) -> None:
+    """Top-left badge: dark pill with mode text. Flashes accent-coloured
+    background for a couple of seconds after a followee change."""
+    text = mode.upper()
+    pad_x = 8
+    pad_y = 4
+    font_size = max(12, int(height * 0.022))
+    context.select_font_face("sans-serif", 0, 1)  # NORMAL, BOLD
+    context.set_font_size(font_size)
+    _, _, text_w, text_h, _, _ = context.text_extents(text)
+    box_w = int(text_w + 2 * pad_x)
+    box_h = int(text_h + 2 * pad_y)
+    box_x = 16
+    box_y = 16
+    # Background pill — accent during the followee-change flash, dark otherwise.
+    context.set_source_rgba(*(_BADGE_FLASH_BG if flash_active else _BADGE_BG))
+    context.rectangle(box_x, box_y, box_w, box_h)
+    context.fill()
+    # Text colour: white on accent, green on dark for cross/AUTO/LOCKED,
+    # warm amber on dark for SEARCH so the state stands out from tracking.
+    if flash_active:
+        text_color = (1.0, 1.0, 1.0, 1.0)
+    elif str(mode).upper() == FollowMode.SEARCH.value:
+        text_color = _BADGE_SEARCH_TEXT
+    else:
+        text_color = _CROSS_GREEN
+    context.set_source_rgba(*text_color)
+    context.move_to(box_x + pad_x, box_y + pad_y + text_h)
+    context.show_text(text)
+
+
+def _draw_followee_changed_toast(context, mode, width, height,
+                                 text="TARGET CHANGED") -> None:
+    """Centred banner shown for _FOLLOWEE_FLASH_SECS after the followee
+    changes. Visible whether the operator was watching the corner or not.
+
+    ``text`` defaults to ``"TARGET CHANGED"`` for live recordings; the
+    offline renderer passes a cause-specific string ("USER LOCKED ID 5",
+    "REID RE-ACQUIRED ID 5", …) sourced from ``events.jsonl``.
+    """
+    pad_x = 14
+    pad_y = 8
+    font_size = max(16, int(height * 0.034))
+    context.select_font_face("sans-serif", 0, 1)
+    context.set_font_size(font_size)
+    _, _, text_w, text_h, _, _ = context.text_extents(text)
+    box_w = int(text_w + 2 * pad_x)
+    box_h = int(text_h + 2 * pad_y)
+    box_x = int((width - box_w) / 2)
+    box_y = int(height * 0.08)
+    context.set_source_rgba(*_BADGE_FLASH_BG)
+    context.rectangle(box_x, box_y, box_w, box_h)
+    context.fill()
+    context.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+    context.move_to(box_x + pad_x, box_y + pad_y + text_h)
+    context.show_text(text)
+
+
+def _cached_overlay_dims(overlay):
+    """Read width/height off the cairooverlay's negotiated sink caps once
+    and cache on the element. Returns ``(None, None)`` until caps are set.
+    """
+    cached = getattr(overlay, "_cached_dims", None)
+    if cached is not None:
+        return cached
+    pad = overlay.get_static_pad("sink")
+    if pad is None:
+        return None, None
+    caps = pad.get_current_caps()
+    if caps is None:
+        return None, None
+    s = caps.get_structure(0)
+    ok_w, w = s.get_int("width")
+    ok_h, h = s.get_int("height")
+    if not (ok_w and ok_h):
+        return None, None
+    overlay._cached_dims = (w, h)
+    return overlay._cached_dims
