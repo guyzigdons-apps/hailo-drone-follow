@@ -40,6 +40,11 @@ class DiscoveryGridEmitter:
 
     def emit(self, src_w: int, src_h: int, lock: LockState,
              frame_idx: int, meter) -> list[CropRect]:
+        # Legacy parity: when recovery is active (SEARCHING/LOST with a known
+        # track), the legacy scheduler emits only the recovery grid. Mirror
+        # that here by suppressing discovery in the same condition.
+        if lock.status in ("SEARCHING", "LOST") and lock.track_id is not None:
+            return []
         if frame_idx % self.period != 0:
             return []
         return _grid_full(src_w, src_h, self.gx, self.gy, self.mode)
