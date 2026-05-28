@@ -27,10 +27,10 @@ Secondary goal: the library should be **reusable** — both as a pure-Python sta
 - Ablation harness CLI (`hailo-tiling-bench`) — sweeps a matrix and emits per-config `frames.json`
 - GStreamer cache plugins in `hailo-apps-core`: `hailodet_record` (two modes: `tile_cache` and `full_frame`) + `hailonet_cache` (replay) + small `hailofilter` `bypass-on-cache-hit` patch + detiler metadata hooks
 - Source data prep: extension to `tiling_benchmark/prepare_video.py` to emit three FOV variants (`FOV-70` native, `FOV-60`, `FOV-50`) at 4K from each 6K DJI Mavic 4 Pro source clip
-- Pi Global Shutter real-hardware variant (`RPI-GS`) recorded and warmed into the paper-reported ablation matrix alongside the emulated FOV variants
+- Pi Global Shutter real-hardware variant (`RPI-GS`) and DJI 6× tele variant (`DJI-TELE-12`) recorded and warmed into the paper-reported ablation matrix alongside the emulated FOV variants — five columns total: `FOV-70 / FOV-60 / FOV-50 / RPI-GS / DJI-TELE-12`
 - Geospatial telemetry capture: live `MavsdkTelemetry` persistence into a `telemetry` table; `hailo-tiling-import-ulg` for PX4 ULG files; `hailo-tiling-import-srt` for DJI SRT sidecars
 - Visualizer / offline overlay renderer consuming the `full_frame` SQLite output, with drone-path-on-map overlay (`hailo-tiling-view`, `hailo-tiling-overlay`)
-- Bonus task (best-effort, gated by data collection): DJI optical-zoom maximum-range demonstration at 1× / 2.5× / 6× hardware zoom
+- Bonus task (best-effort, gated by data collection): DJI optical-zoom **maximum-range** demonstration with targets at measured slant distances at 1× / 2.5× / 6× hardware zoom. Independent of the `DJI-TELE-12` main-matrix column above (which uses everyday research footage)
 - Paper-with-code release artifacts: license, reproducibility recipe, technical report, citation, public reference data
 
 **Lever implementations included in v1:** the levers already in `dynamic_tiling/scheduler.py` (decimated discovery, ROI tile, recovery grid, motion-predicted placement) plus two new ones to validate the architecture: **ASAHI adaptive slice sizing** and **altitude-gated zoom** (both small implementations that exercise different parts of the framework).
@@ -547,38 +547,48 @@ GT trajectories are generated **per FOV variant** using the existing `GT-12x9-25
 
 ### 8.6 Real-hardware variant — `RPI-GS` (paper-reported)
 
-The Pi Global Shutter Camera path is **part of the paper-reported results**, alongside the FOV-emulated variants. Its purpose is to validate that the emulation results transfer to real silicon, real optics, and real (global) shutter:
+The Pi Global Shutter Camera path is **part of the paper-reported results**. Its purpose is to validate that the algorithm transfers to real silicon, a real lens, and a real (global) shutter:
 
-| Label    | Sensor       | Resolution      | Lens (default)    | H-FOV (computed)  | Comparable emulated variant |
-|----------|--------------|-----------------|-------------------|-------------------|------------------------------|
-| `RPI-GS` | Sony IMX296  | 1456 × 1088     | 6 mm C-mount      | ~55°              | `FOV-60` (closest)           |
+| Label    | Sensor                       | Resolution    | Lens                                                | Focal length | H-FOV (computed) |
+|----------|------------------------------|---------------|-----------------------------------------------------|--------------|------------------|
+| `RPI-GS` | Sony IMX296 (5.02 × 3.76 mm) | 1456 × 1088   | Arducam M12 telephoto, 20° rated for 1/2.3" sensor  | ~21.7 mm     | **~13°**         |
 
-Why this variant matters:
-- It's the only data point in the paper from real silicon, a real lens, and a global shutter. Every other variant is emulated from a rolling-shutter DJI source.
-- It uses the same `hailo_tiling` library + GStreamer pipeline as the emulated variants — the only differences are the source resolution and the cache file (one keyed on the Pi GS recording's SHA, not on a 4K MP4).
-- If the algorithm rankings on `RPI-GS` mirror those on `FOV-60`, that's strong evidence the emulated ablation transfers to deployment.
+**Focal-length and FOV derivation.** The lens is rated 20° diagonal on a 1/2.3" sensor (~7.66 mm diagonal), giving focal length `f ≈ 7.66 / (2 · tan 10°) = 21.7 mm`. Applied to the smaller IMX296 sensor: H-FOV = `2 · atan(5.02 / (2 · 21.7)) ≈ 13.2°`. The lens has an M12 mount and ships with a C/CS-mount adapter that fits the Pi GS native C/CS mount. Measured H-FOV (single-checkerboard calibration in `scripts/measure_fov.py`) is recorded alongside the cache file in a sibling `lens_info.json` and stored in the cache `meta` table so a lens swap on the drone is impossible to silently miss in the published results.
+
+**Comparability with the emulated variants.** This lens is **substantially narrower** than any of FOV-70/60/50 — it sits in a different region of the FOV/object-size trade-off. The paper does *not* claim direct equivalence to any emulated variant. Instead, `RPI-GS` extends the FOV axis of the ablation table beyond what the emulated set can reach (Section 8.2 floor was ~48° without upscaling); the trend "tiling helps less as FOV narrows" is the headline claim and `RPI-GS` is the strongest evidence point for the narrow-FOV end.
+
+**Cross-validation with DJI 6× tele.** The Mavic 4 Pro's 168 mm tele camera has H-FOV ≈ 12° on its 1/1.5" sensor — almost the same FOV as the deployed Pi GS rig but with a completely different sensor and lens stack (rolling shutter, larger sensor, ~4K resolution). The DJI 6× tele was previously in the Phase 17 bonus task; the spec promotes it to the main ablation matrix (see Section 8.7 below) precisely because it gives a paired "same FOV, different hardware" data point to `RPI-GS` — much stronger paper evidence than either alone.
 
 **Capture flow:**
 - Live flight on the Pi (real PX4, real Hailo, real camera), `--input rpi`
-- `hailodet_record mode=full_frame` enabled by default (per Phase 14) — produces `flight_record.sqlite3`
-- For paper inclusion, the *same* flight is also recorded as raw video (via the existing GStreamer recording branch — `--record`) so the cache can be warmed offline from the recorded MP4, decoupling paper reproducibility from owning a Pi GS rig
-- The lens used and its measured H-FOV are documented as part of the experimental record (a small `lens_info.json` sibling to the cache file)
+- `hailodet_record mode=full_frame` enabled by default (Phase 16) — produces `flight_record.sqlite3`
+- The same flight is also recorded as raw video (`--record`) so the cache can be warmed offline from the recorded MP4, decoupling paper reproducibility from owning a Pi GS rig
+- The recorded lens H-FOV, focal length, and sensor format are written into the cache `meta` table and the sibling `lens_info.json`
 
-**Resolution-mismatch caveat:** at 1.6 MP the Pi GS is well below 4K; the tiler's native-tile sizing picks a different grid (fewer / smaller tiles). The paper reports `RPI-GS` results as a *separate column* in the ablation table — not interpolated against the emulated set, but directly comparable on per-target recall and IoU.
+**Resolution caveat.** At 1.6 MP the Pi GS is well below 4K; the tiler's native-tile sizing picks a different grid (fewer, smaller tiles). The paper reports `RPI-GS` results in its own column — directly comparable on per-target recall and IoU, but not pixel-equivalent to the 4K emulated variants.
 
-### 8.7 Bonus task — DJI optical-zoom maximum-range demo
+### 8.7 DJI optical-zoom variants and maximum-range demo
 
-A separate experiment from the FOV-70/60/50 + RPI-GS ablation matrix; its purpose is a single paper-quality result demonstrating **maximum real-world detection range** for cars and people with hardware optical zoom. Recorded at the DJI Mavic 4 Pro's native resolution (no FOV emulation) using the camera's three optical-zoom stages:
+The DJI Mavic 4 Pro's three-camera optical-zoom system provides two distinct kinds of data for the paper:
 
-| Stage         | Equivalent focal length | H-FOV | Sensor used                | Use                                  |
-|---------------|-------------------------|-------|----------------------------|--------------------------------------|
-| Main (1×)     | 28 mm                   | ~70°  | Hasselblad 4/3 CMOS        | wide / baseline                      |
-| Med-tele (2.5×) | 70 mm                  | ~28°  | 1/1.3" CMOS                | mid-distance target acquisition      |
-| Tele (6×)     | 168 mm                  | ~12°  | 1/1.5" CMOS                | extreme-range headline result        |
+| Stage           | Equivalent focal length | H-FOV  | Sensor              | Use in paper                                       |
+|-----------------|-------------------------|--------|---------------------|----------------------------------------------------|
+| Main (1×)       | 28 mm                   | ~70°   | Hasselblad 4/3 CMOS | Source for `FOV-70/60/50` emulation (Section 8.2)  |
+| Med-tele (2.5×) | 70 mm                   | ~28°   | 1/1.3" CMOS         | **Bonus: optical-zoom range demo** (Phase 17)      |
+| Tele (6×)       | 168 mm                  | ~12°   | 1/1.5" CMOS         | **Main ablation matrix: `DJI-TELE-12` variant**    |
 
-The same target (a person and a car at known GPS positions) is recorded at each zoom stage; the paper reports the maximum slant range at which the detector achieves a configurable recall threshold (e.g., 0.5 over a 5-second window). This is a single-figure-of-merit result — "with hardware zoom, this system detects person-sized targets out to N metres" — not an algorithm ablation. It demonstrates the architecture composes with optical hardware; it's not used to compare tiling levers (which is what the main ablation is for).
+**Main matrix — `DJI-TELE-12` (promoted from bonus).**
+The 6× tele camera's ~12° H-FOV is the natural FOV-comparable cross-validation point for the deployed `RPI-GS` rig (~13°). Capturing it alongside `RPI-GS` gives the paper a paired "same FOV, different hardware" data point that is much stronger evidence than either platform alone: it isolates the algorithm from the platform when reading the narrow-FOV column.
 
-The bonus task is gated by data collection (a pilot needs to fly the Mavic 4 with targets at measured distances). If data isn't available in time for v1, the paper ships without it; phase order keeps it last (Phase 13).
+`DJI-TELE-12` is captured at the tele camera's native resolution (no FOV emulation — the optical zoom *is* the FOV change). Same recording protocol as the other DJI clips: MP4 + SRT sidecar.
+
+**Bonus — optical-zoom maximum-range demo (Phase 17).**
+Separate experiment, single figure-of-merit, kept as bonus because it requires a coordinated outdoor shoot with targets at measured distances. Records the **same scene at all three optical stages** (1×, 2.5×, 6×) with a person + a car at progressively longer slant ranges. Reports "maximum slant range at which the detector achieves ≥ 0.5 per-target recall over a 5-second window" per zoom stage. Headline result: "with optical zoom, this system detects person-sized targets out to N metres."
+
+The bonus is independent of the main matrix's `DJI-TELE-12` column: even if the bonus shoot doesn't happen in time, `DJI-TELE-12` already lives in the main matrix from the everyday research footage. If the bonus shoot does happen, its 6× footage *also* feeds the `DJI-TELE-12` column, just with the controlled distance metadata.
+
+**Updated main ablation matrix columns (final):**
+`FOV-70` · `FOV-60` · `FOV-50` (emulated, 4K) · `RPI-GS` (~13°, real Pi GS) · `DJI-TELE-12` (~12°, real DJI tele). Five columns total; the `RPI-GS` + `DJI-TELE-12` pair anchors the narrow-FOV end and lets the paper claim platform-independence at the narrow end.
 
 ### 8.8 Geospatial telemetry capture (drone position + target distance)
 
@@ -650,7 +660,7 @@ This is a first-class deliverable in v1, not a polish step.
 
 **Reproducibility recipe:**
 - One reference video + one reference HEF + one reference telemetry trace + one pre-computed **inference cache** (Section 7), all referenced by SHA-256 in the repo (downloaded by `scripts/fetch_reference_data.sh`).
-- Public reference video: a clip from a CC-licensed aerial dataset (candidates: VisDrone-MOT, SeaDronesSee). The proprietary DJI footage we use today stays internal; the public ablation table uses the public clip so anyone can reproduce.
+- Public reference video: one clip from **VisDrone-MOT** (CC-BY-NC; the de-facto aerial-detection research dataset; specific clip ID picked in Phase 15). The proprietary DJI footage we use today stays internal; the public ablation table uses the VisDrone clip so anyone can reproduce the recipe without our footage.
 - `make ablation` runs the full matrix on the reference data and regenerates `runs/ablation_table.md`. With the published cache + `ReplayBackend`, this runs on any laptop in minutes — no Hailo hardware needed. With `HefBackend` + an empty cache, expected runtime is < 30 min on a Hailo-8L RPi5.
 - All randomness seeded; tile-order deterministic; cache file SHA published alongside the table so anyone can verify their replay matches the paper.
 
@@ -689,9 +699,9 @@ The implementation plan (next step after this spec) will decompose into these ph
 
 ## 12. Open Questions
 
-- **Public reference data:** which CC-licensed aerial clip do we settle on? Resolved as part of Phase 15; doesn't block Phases 1-10.
-- **Pi GS lens choice:** spec assumes a 6 mm C-mount lens (H-FOV ≈ 55°, comparable to FOV-60). Confirm with the drone build, swap if the deployed lens differs. The `RPI-GS` cache key includes the measured H-FOV so a lens swap doesn't silently invalidate prior results.
-- **DJI bonus task data collection:** when will the Mavic 4 Pro multi-zoom shoot happen? A morning's flying with targets at measured GPS positions. Coordinate with whoever's piloting. Skippable for v1 (Phase 17 is explicitly bonus).
+- **Public reference clip:** chosen — one clip from **VisDrone-MOT** (CC-BY-NC, accepted standard for aerial-detection research). Specific clip ID to be picked in Phase 15. Used purely as the reproduction-recipe anchor; all internal results use the proprietary DJI footage.
+- **Pi GS lens (resolved):** Arducam M12 telephoto, 20° on 1/2.3" → **H-FOV ≈ 13° on the IMX296** (Section 8.6). Lens parameters stored in the cache `meta` table and `lens_info.json` sibling, so any future lens swap is impossible to silently miss.
+- **DJI bonus shoot (Phase 17):** when does the controlled-distance shoot happen? Independent of `DJI-TELE-12` main-matrix data (which comes from regular research footage); the bonus shoot only adds the *measured-distance* metadata needed for the maximum-range figure-of-merit.
 - **Detiler-plugin upstream timeline:** if `hailo-apps-core` maintainers are slow to take the patch, do we vendor the modified plugin temporarily? Default plan: live with the Python-pad-probe fallback until merged.
 - **YAML vs Python config for the ablation matrix:** spec assumes YAML for ease of paper reproducibility; can switch to a Python `@dataclass` matrix if it proves clunky.
 
@@ -699,7 +709,7 @@ The implementation plan (next step after this spec) will decompose into these ph
 
 - All v1 emitters and modifiers covered by unit tests.
 - `hailo-tiling-bench` produces a reproducible ablation table from one command.
-- **The table reports each ablation row at all three FOV variants** (FOV-70, FOV-60, FOV-50) **plus the real-hardware `RPI-GS` column** so the emulated-to-real-hardware transfer is verifiable per-lever.
+- **The table reports each ablation row at all five variants** — FOV-70, FOV-60, FOV-50, `RPI-GS`, `DJI-TELE-12` — so both the emulated FOV trend and the platform-independence claim at narrow FOV (Pi GS vs DJI tele at ~12–13°) are verifiable per-lever.
 - **Telemetry is captured end-to-end**: every paper-reported flight produces a `telemetry` table populated from MAVSDK (PX4 path) or SRT (DJI path); the visualizer renders the drone path on a map without additional input.
 - **DJI bonus task is captured or explicitly skipped** — if data is collected, the paper reports a maximum-range figure-of-merit; if not, the bonus phase is documented as deferred (not silently dropped).
 - The table includes (at minimum): static-baseline, current `dynamic_tiling` config, +ASAHI, +altitude-zoom — measured on both the proprietary clip and the public reference clip.
