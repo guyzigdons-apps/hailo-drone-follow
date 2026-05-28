@@ -372,6 +372,66 @@ def _emit_fov_variant(
     return output
 
 
+_OVERNIGHT_REQUIRED_KEYS = {
+    "input", "variant", "output", "output_bytes", "sha256", "ffmpeg_cmd",
+}
+_OVERNIGHT_ALLOWED_VARIANTS = {"fov70", "fov60", "fov50"}
+
+
+def import_overnight_manifest(manifest: Path, verify_sha: bool = True) -> list[dict]:
+    """Load and validate the overnight FOV manifest at `manifest`.
+
+    Raises ValueError on:
+      - file not a JSON list at top level
+      - missing required keys in any record
+      - variant value not in {fov70, fov60, fov50}
+      - (when verify_sha=True) recomputed SHA-256 doesn't match the recorded one
+      - (when verify_sha=True) output file missing or wrong byte count
+
+    Returns the parsed list of records on success.
+    """
+    if not manifest.is_file():
+        raise FileNotFoundError(f"manifest not found: {manifest}")
+    data = json.loads(manifest.read_text())
+    if not isinstance(data, list):
+        raise ValueError(f"manifest at {manifest} is not a JSON array")
+    for i, rec in enumerate(data):
+        if not isinstance(rec, dict):
+            raise ValueError(f"manifest[{i}] is not an object: {rec!r}")
+        missing = _OVERNIGHT_REQUIRED_KEYS - rec.keys()
+        if missing:
+            raise ValueError(
+                f"manifest[{i}] missing keys {sorted(missing)}; got {sorted(rec.keys())}"
+            )
+        if rec["variant"] not in _OVERNIGHT_ALLOWED_VARIANTS:
+            raise ValueError(
+                f"manifest[{i}] variant {rec['variant']!r} not in "
+                f"{sorted(_OVERNIGHT_ALLOWED_VARIANTS)}"
+            )
+        if not isinstance(rec["sha256"], str) or len(rec["sha256"]) != 64:
+            raise ValueError(
+                f"manifest[{i}] sha256 must be a 64-char hex string; got {rec['sha256']!r}"
+            )
+    if verify_sha:
+        for rec in data:
+            out = manifest.parent / rec["output"]
+            if not out.is_file():
+                raise ValueError(f"output file not found: {out}")
+            actual_bytes = out.stat().st_size
+            if actual_bytes != rec["output_bytes"]:
+                raise ValueError(
+                    f"{out.name}: output_bytes mismatch (recorded "
+                    f"{rec['output_bytes']}, actual {actual_bytes})"
+                )
+            actual_sha = sha256_of_file(out)
+            if actual_sha != rec["sha256"]:
+                raise ValueError(
+                    f"{out.name}: sha256 mismatch (recorded {rec['sha256']}, "
+                    f"actual {actual_sha})"
+                )
+    return data
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for prepare_video.
 

@@ -290,3 +290,60 @@ def test_append_manifest_record_rejects_non_list_existing(pv, tmp_path):
         pv.append_manifest_record(
             manifest, _record("a.MP4", "fov70", "a__fov70.mp4", "aa" * 32)
         )
+
+
+# ---------------------------------------------------------------------------
+# Overnight-manifest schema importer
+# ---------------------------------------------------------------------------
+
+
+REQUIRED_KEYS = {"input", "variant", "output", "output_bytes", "sha256", "ffmpeg_cmd"}
+ALLOWED_VARIANTS = {"fov70", "fov60", "fov50"}
+
+
+def test_import_overnight_manifest_validates_required_keys(pv, tmp_path):
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps([{"input": "a.MP4", "variant": "fov70"}]))
+    with pytest.raises(ValueError, match="missing keys"):
+        pv.import_overnight_manifest(manifest, verify_sha=False)
+
+
+def test_import_overnight_manifest_validates_variant_value(pv, tmp_path):
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps([{
+        "input": "a.MP4", "variant": "fov40", "output": "a__fov40.mp4",
+        "output_bytes": 1, "sha256": "00" * 32, "ffmpeg_cmd": "x",
+    }]))
+    with pytest.raises(ValueError, match="variant"):
+        pv.import_overnight_manifest(manifest, verify_sha=False)
+
+
+def test_import_overnight_manifest_accepts_good_records(pv, tmp_path):
+    manifest = tmp_path / "m.json"
+    good = [{
+        "input": "a.MP4", "variant": "fov70", "output": "a__fov70.mp4",
+        "output_bytes": 100, "sha256": "a" * 64, "ffmpeg_cmd": "x",
+    }]
+    manifest.write_text(json.dumps(good))
+    out = pv.import_overnight_manifest(manifest, verify_sha=False)
+    assert out == good
+
+
+def test_import_overnight_manifest_verifies_sha_when_requested(pv, tmp_path):
+    blob = b"some bytes\n"
+    sha = hashlib.sha256(blob).hexdigest()
+    out_file = tmp_path / "a__fov70.mp4"
+    out_file.write_bytes(blob)
+    manifest = tmp_path / "fov_variants_manifest.json"
+    manifest.write_text(json.dumps([{
+        "input": "a.MP4", "variant": "fov70", "output": "a__fov70.mp4",
+        "output_bytes": len(blob), "sha256": sha, "ffmpeg_cmd": "x",
+    }]))
+    pv.import_overnight_manifest(manifest, verify_sha=True)
+
+    manifest.write_text(json.dumps([{
+        "input": "a.MP4", "variant": "fov70", "output": "a__fov70.mp4",
+        "output_bytes": len(blob), "sha256": "ff" * 32, "ffmpeg_cmd": "x",
+    }]))
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        pv.import_overnight_manifest(manifest, verify_sha=True)
