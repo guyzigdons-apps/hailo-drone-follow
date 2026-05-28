@@ -350,20 +350,23 @@ This is a direct paper-with-code reproducibility win: the cache file is the expe
 
 ### 7.8 GStreamer recorder plugin — `hailodet_record` (production, passthrough)
 
-A production-ready element released in `hailo-apps-core`. Placed in the live pipeline after `hailonet` + post-process; observes detection metadata on each passing buffer and writes it to SQLite in the same schema (Section 7.2).
+A production-ready, **standalone** GStreamer element released in `hailo-apps-core` (separate plugin from `hailonet_cache`; separate source file, separate `.so`). Placed in the pipeline **after** `hailofilter` (postprocess); observes the final detection objects on each buffer's `HailoROI` and writes them to SQLite in the schema of Section 7.2.
 
-**Pipeline placement:**
+**Pipeline placement (live recording):**
 ```
-... ! hailotilecropper_dynamic ! hailonet ! hailofilter (post-proc) !
+... ! hailotilecropper_dynamic ! hailonet ! hailofilter ! \
     hailodet_record output-file=flight.sqlite3 ! hailodetiler ! ...
 ```
+
+Recording happens after postprocess so the cache stores **post-NMS, post-decode detections** — i.e., what a downstream consumer (drone-follow, an overlay renderer, the ablation harness) actually consumes. A cache hit on replay therefore skips both the inference and the postprocess work (Section 7.9).
 
 **Properties:**
 - `output-file=<path>` (required) — SQLite cache file to append to (or create)
 - `flush-interval-ms=100` — flush queued rows every N ms
 - `batch-size=64` — flush after N rows queued, whichever comes first
 - `frame-id-source={counter,pts}` (default `counter`) — frame indexing strategy (`counter` is robust; `pts` allows wall-clock correlation in live captures)
-- `record-on-empty=false` — by default, frames with zero detections are still recorded (so the cache is "complete"); off if size matters
+- `record-empty=true` (default, no opt-out planned) — frames/crops with zero detections **must** be recorded as `dets_json='[]'`. Without these rows, the absence of a row would be indistinguishable from "never inferred", causing every empty frame to trigger a cache miss + re-inference on the next replay run. An empty row is the correct positive signal that "we did look here, there was nothing."
+- `record-cache-hits=false` (default) — during a replay run, if a buffer carries `hailo-cache-hit=true`, the recorder skips writing it (the data is already in the cache file). Set to `true` to copy/translate between cache files.
 - `hef-id-meta-key="hailo-hef-sha"` — buffer-meta key the upstream pipeline sets; recorder reads it and stores into the meta table on first row
 
 **Thread model:** streaming thread does only a lock-free SPSC push to a ring buffer; a background writer thread drains the queue in batches into a SQLite transaction (WAL mode). The streaming pad probe is < 5 μs in the steady state. EOS triggers a synchronous final flush before returning. Errors in the background thread are logged and surfaced via a GstMessage; the streaming pipeline is **never blocked or crashed** by the recorder.
@@ -377,28 +380,40 @@ This is the closure-of-the-loop: production telemetry generates research dataset
 
 ### 7.9 GStreamer replay plugin — `hailonet_cache` (research, hailonet drop-in)
 
-A drop-in replacement for `hailonet` with identical sink/source caps and the same property surface. Pipeline string change is `s/hailonet/hailonet_cache/`. Released in `hailo-apps-core` (initially as "experimental"; promoted to stable once paper artifacts ship).
+A drop-in replacement for `hailonet` with identical sink/source caps and the same property surface. Pipeline string change is `s/hailonet/hailonet_cache/`. Released in `hailo-apps-core` (initially as "experimental"; promoted to stable once paper artifacts ship). **Research use only**; not intended for realtime / production pipelines.
 
 **Pipeline placement:**
 ```
-... ! hailotilecropper_dynamic ! hailonet_cache cache-file=flight.sqlite3 hef-path=...hef !
-    hailofilter (post-proc) ! ...
+... ! hailotilecropper_dynamic ! hailonet_cache cache-file=flight.sqlite3 hef-path=...hef ! \
+    hailofilter bypass-on-cache-hit=true ! hailodet_record record-cache-hits=false ! ...
 ```
 
-**Properties (superset of hailonet):**
+**Cache-hit semantics (critical):**
+1. Look up `(frame_idx, crop_rect, hef_sha)` in the cache.
+2. **On hit:**
+   - Attach the cached detection objects directly to the buffer's `HailoROI` (matching the format `hailofilter` would have produced)
+   - Set buffer meta `hailo-cache-hit=true`
+   - **Emit no raw tensors.** No `HailoTensor` meta is attached to the buffer; the network output payload does not exist on a cache hit.
+   - Push the buffer downstream.
+3. **On miss:** behaviour controlled by `on-miss` property (see below). Strict-by-default; this is research-only, so misses are loud errors.
+
+**Required collaborator — `hailofilter` patch:** the downstream `hailofilter` (postprocess) element gains a new property `bypass-on-cache-hit=true` (default `false`, fully backwards compatible). When set, `hailofilter` checks for the `hailo-cache-hit` buffer meta and, if present, **passes the buffer through unchanged** — no `.so` invocation, no NMS, no decode. The detections are already attached upstream. This is the single-property patch that makes the post-postprocess cache architecture work; it lives in the same `hailo-apps-core` PR as the detiler metadata hooks (Phase 10).
+
+**Properties:**
 - All of `hailonet`'s public properties (so existing pipelines compose unchanged)
 - `cache-file=<path>` (required) — SQLite cache to read
 - `hef-path=<path>` — same property name as hailonet; used to compute `hef_sha` for cache key matching
 - `video-id=<sha or label>` — identifies the video; auto-derived from source URI if a `hailosource-meta` is present
-- `on-miss={error,fallback,drop}` (default `error`)
-  - `error` — paper-strict; missing cache entry → bus error (production research). Catches stale caches early.
-  - `fallback` — chain to a real `hailonet` instance to compute the missing entry; write it back to the cache. Useful for incremental cache warming during a long ablation session.
+- `on-miss={error,drop}` (default `error`)
+  - `error` — strict research mode; missing cache entry → bus error. Catches stale caches early. Default.
   - `drop` — emit a zero-detection result and continue; useful for noisy datasets where some frames are intentionally absent.
 - `quantise=0` — crop-rect quantisation (Section 7.3) for hit-rate vs fidelity tradeoff
 
-**Performance:** SQLite point query on the `WITHOUT ROWID` composite key is ~10–100 μs. `hailonet` itself is ~30–40 ms per inference (YOLOv8m on Hailo-8L). The cache path is **~300× faster** — well past the user-required "faster than the actual inference" bar. Multi-tile pipelines that issue dozens of lookups per frame still complete in well under 1 ms total cache time.
+**Note:** no `fallback` mode. Cache warming is an explicit step via the production recorder (`hailodet_record`) or `hailo-tiling-warm-cache`. Mixing live inference into a replay path would muddy paper results; if the cache is incomplete, the user re-runs warming, not the ablation harness.
 
-**Backwards compatibility:** because `hailonet_cache` mirrors `hailonet`'s properties and caps, any existing pipeline can swap one for the other with no other changes — so the same ablation matrix runs against both live inference and replayed cache by toggling a single element name. This is what makes "the GStreamer pipeline is the canonical research flow" actually workable: we don't need a separate Python-only fast-replay loop.
+**Performance:** SQLite point query on the `WITHOUT ROWID` composite key is ~10–100 μs. `hailonet` itself is ~30–40 ms per inference (YOLOv8m on Hailo-8L). The cache path is **~300× faster** — well past the user-required "faster than the actual inference" bar. Skipping postprocess saves additional milliseconds on top. Multi-tile pipelines that issue dozens of lookups per frame still complete in well under 1 ms total cache time.
+
+**Backwards compatibility:** because `hailonet_cache` mirrors `hailonet`'s properties and caps, any existing pipeline can swap one for the other with no other changes (modulo the `bypass-on-cache-hit=true` on the downstream `hailofilter`) — so the same ablation matrix runs against both live inference and replayed cache by toggling element names. This is what makes "the GStreamer pipeline is the canonical research flow" actually workable: we don't need a separate Python-only fast-replay loop.
 
 ### 7.10 Shared C library — `libhailotile_cache.so`
 
@@ -492,7 +507,7 @@ The implementation plan (next step after this spec) will decompose into these ph
 7. **GStreamer cache plugins (`hailo-apps-core`)** — `libhailotile_cache.so` shared library, `hailodet_record` (recorder), `hailonet_cache` (replay). Released alongside the detiler-plugin patch. Each plugin shipped with golden-file tests and a microbench asserting lookup latency < 1 ms / crop.
 8. **`GstCropperBackend`** — Python adapter that drives the production-style GStreamer pipeline (`hailotilecropper_dynamic` → `hailonet` or `hailonet_cache` → post-process → `hailodet_record` → detiler) from within the ablation harness. This makes the GStreamer pipeline the canonical research path.
 9. **Ablation harness** — `hailo-tiling-bench` CLI + YAML schema; defaults to `GstCropperBackend`; `--backend replay` toggles `hailonet_cache` in the pipeline string.
-10. **Detiler-plugin patch** — separate PR to `hailo-apps-core` adding metadata hooks (parallelisable with phases 1-9).
+10. **`hailo-apps-core` patches** — single PR adding (a) detiler metadata hooks (per-detection CropRect provenance + ROI list pass-through), and (b) `hailofilter` `bypass-on-cache-hit` property. Both are small, backwards-compatible, and unlock the cache architecture end-to-end. Parallelisable with phases 1-9.
 11. **Paper-with-code artifacts** — license, README, citation, technical-report skeleton, reference-data + cache fetcher, ablation table generation, published reference cache file (Zenodo / S3).
 12. **Drone-follow migration** — switch `drone_follow/pipeline_adapter/` over to the production pipeline with `hailodet_record` enabled by default for flight telemetry. Tracker subpackage stays minimal; ByteTracker keeps current behaviour.
 
@@ -510,6 +525,8 @@ The implementation plan (next step after this spec) will decompose into these ph
 - The library installs cleanly without MAVSDK present.
 - **Inference cache delivers what it promises:** a fully-warmed cache makes a full ablation matrix re-run complete in seconds on a chip-free laptop; cache hit-rate is > 95% on repeated runs of the same matrix.
 - **GStreamer cache plugins meet the latency bar:** `hailodet_record` adds < 100 μs to the streaming-thread pad probe in steady state; `hailonet_cache` lookups are < 1 ms / crop (vs ~30–40 ms for live `hailonet`), measured by a microbench shipped with each plugin.
+- **Cache hits bypass postprocess:** on a cache hit, `hailofilter` is a verified no-op (no `.so` invocation, no NMS, no decode). A test asserts that the `.so`'s entry point is not called when `bypass-on-cache-hit=true` and the buffer carries `hailo-cache-hit`.
+- **Empty-frame recording works:** a frame with zero detections is recorded with `dets_json='[]'`; the next replay run hits cache for that frame instead of re-running inference. A regression test covers this.
 - **Canonical research path is GStreamer:** every paper-reported ablation row runs through `GstCropperBackend`. `HefBackend` results are explicitly marked "dev-only" wherever they appear.
 - **Production telemetry feeds research:** at least one drone flight produces a cache file via `hailodet_record`, and the ablation harness successfully replays it via `hailonet_cache` to demonstrate the end-to-end loop.
 - `drone-follow` runs on the RPi using `GstCropperBackend` with at least parity on the existing per-target recall metric.
