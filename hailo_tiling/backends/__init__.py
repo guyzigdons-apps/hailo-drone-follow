@@ -2,3 +2,4 @@
 from .backend import InferenceBackend, MockBackend  # noqa: F401
 from .caching import CachingBackend  # noqa: F401
 from .hef import HefBackend  # noqa: F401
+from .replay import CacheMissError, ReplayBackend  # noqa: F401

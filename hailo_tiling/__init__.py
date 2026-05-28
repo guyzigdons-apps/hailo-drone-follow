@@ -33,7 +33,14 @@ from .telemetry import (
     TelemetryProvider,
     TelemetrySnapshot,
 )
-from .backends import HefBackend, InferenceBackend, MockBackend
+from .backends import (
+    CachingBackend,
+    HefBackend,
+    InferenceBackend,
+    MockBackend,
+    ReplayBackend,
+)
+from .cache import CacheMissError, SqliteCacheStore
 from .aggregator import (
     Aggregator,
     BoundaryStripFilter,
@@ -76,6 +83,11 @@ __all__ = [
     "InferenceBackend",
     "MockBackend",
     "HefBackend",
+    # Plan 4 — cache + decorator/replay backends
+    "CachingBackend",
+    "ReplayBackend",
+    "SqliteCacheStore",
+    "CacheMissError",
     # Plan 2 — aggregator
     "Aggregator",
     "BoundaryStripFilter",
