@@ -660,7 +660,7 @@ This is a first-class deliverable in v1, not a polish step.
 
 **Reproducibility recipe:**
 - One reference video + one reference HEF + one reference telemetry trace + one pre-computed **inference cache** (Section 7), all referenced by SHA-256 in the repo (downloaded by `scripts/fetch_reference_data.sh`).
-- Public reference video: one clip from **VisDrone-MOT** (CC-BY-NC; the de-facto aerial-detection research dataset; specific clip ID picked in Phase 15). The proprietary DJI footage we use today stays internal; the public ablation table uses the VisDrone clip so anyone can reproduce the recipe without our footage.
+- Public reference video: one of the captured DJI Mavic 4 Pro clips, released by the project under a permissive license (CC-BY-SA recommended) and uploaded to Zenodo alongside the published cache. The same clip used internally — no second-source variability between internal and public results.
 - `make ablation` runs the full matrix on the reference data and regenerates `runs/ablation_table.md`. With the published cache + `ReplayBackend`, this runs on any laptop in minutes — no Hailo hardware needed. With `HefBackend` + an empty cache, expected runtime is < 30 min on a Hailo-8L RPi5.
 - All randomness seeded; tile-order deterministic; cache file SHA published alongside the table so anyone can verify their replay matches the paper.
 
@@ -699,7 +699,7 @@ The implementation plan (next step after this spec) will decompose into these ph
 
 ## 12. Open Questions
 
-- **Public reference clip:** chosen — one clip from **VisDrone-MOT** (CC-BY-NC, accepted standard for aerial-detection research). Specific clip ID to be picked in Phase 15. Used purely as the reproduction-recipe anchor; all internal results use the proprietary DJI footage.
+- **Public reference clip:** resolved — one of the project's captured DJI Mavic 4 Pro clips will be released under a permissive license (CC-BY-SA) and uploaded to Zenodo. Same clip used internally, so the public and internal results are byte-identical. Specific clip ID picked in Phase 15 from the day's shoot.
 - **Pi GS lens (resolved):** Arducam M12 telephoto, 20° on 1/2.3" → **H-FOV ≈ 13° on the IMX296** (Section 8.6). Lens parameters stored in the cache `meta` table and `lens_info.json` sibling, so any future lens swap is impossible to silently miss.
 - **DJI bonus shoot (Phase 17):** when does the controlled-distance shoot happen? Independent of `DJI-TELE-12` main-matrix data (which comes from regular research footage); the bonus shoot only adds the *measured-distance* metadata needed for the maximum-range figure-of-merit.
 - **Detiler-plugin upstream timeline:** if `hailo-apps-core` maintainers are slow to take the patch, do we vendor the modified plugin temporarily? Default plan: live with the Python-pad-probe fallback until merged.
