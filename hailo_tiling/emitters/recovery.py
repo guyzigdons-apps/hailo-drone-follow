@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from ..types import CropRect, LockState, MODEL_ASPECT
-from .discovery_grid import _grid_full as _full_frame_grid_unused  # noqa: F401
 
 
 def _grid_region(src_w: int, src_h: int, gx: int, gy: int,

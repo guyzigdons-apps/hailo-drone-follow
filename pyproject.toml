@@ -28,7 +28,7 @@ include = ["drone_follow*", "reid_analysis*", "hailo_tiling*"]
 exclude = ["configs", "configs.*", "hailo_tiling.tests*"]
 
 [tool.pytest.ini_options]
-testpaths = ["hailo_tiling/tests"]
+testpaths = ["hailo_tiling/tests", "dynamic_tiling/tests"]
 
 [project.scripts]
 drone-follow = "drone_follow.drone_follow_app:main"
