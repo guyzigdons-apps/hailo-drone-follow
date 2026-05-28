@@ -4,9 +4,14 @@ Replaces the RPi/x86 hailo_apps tiling pipeline for Hailo15H/15L SoCs.
 
 Pipeline architecture:
   hailofrontendbinsrc (ISP camera) →
-    sink0 (4K)        → fakesink (unused)
-    sink1 (720p@30fps) → hailoencodebin → H264 → UDP (for viewing on PC)
+    sink0 (4K@30fps)   → hailoencodebin → H264 → matroskamux → file (when --record)
+                       → fakesink                                  (otherwise)
+    sink1 (720p)       → fakesink (unused)
     sink2 (FHD@15fps)  → appsink → pyhailort inference → detections → SharedDetectionState
+                                 → JPEG (640x360, 15fps) → web UI MJPEG stream
+
+The web UI (port 5001) is the live monitoring surface. There's no UDP H264
+stream out anymore — the VPU encoder budget is reserved for the 4K recording.
 """
 
 import json
@@ -47,8 +52,6 @@ YOLO_HEF_CANDIDATES = [
     "/home/root/apps/ai_example_app/resources/hailo_yolov8s_384_640.hef",
     "/home/root/apps/ai_example_app/resources/hailo_yolov8n_384_640.hef",
 ]
-UDP_HOST = "10.0.0.2"
-UDP_PORT = 5002
 DETECTION_CONFIDENCE_THRESHOLD = 0.4
 
 # Defaults for frontend config fields that hailofrontendbinsrc requires
@@ -142,10 +145,10 @@ def _resolve_frontend_config():
     with open(app_settings_path) as f:
         app_settings = json.load(f)
 
-    # Find encoder config for sink1
+    # Find encoder config for sink0 (4K recording)
     encoder_config_path = None
     for es in profile_config.get("encoded_output_streams", []):
-        if es.get("stream_id") == "sink1":
+        if es.get("stream_id") == "sink0":
             encoder_config_path = es.get("encoding")
             break
 
@@ -193,13 +196,17 @@ class Hailo15PipelineApp:
 
     def __init__(self, shared_state, target_state=None, ui_state=None,
                  eos_reached=None, options_menu=None, record_path=None,
-                 replay_path=None):
+                 replay_path=None, replay_loop=False):
         self.shared_state = shared_state
         self.target_state = target_state
         self._record_path = record_path
         self._replay_path = replay_path  # if set, use file source instead of ISP
+        self._replay_loop = replay_loop  # seek back to start on EOS
         self._rec_first_pts = None  # for PTS normalization on recording branch
         self._det_log = None         # detections sidecar file (jsonl)
+        # Diagnostic: track which source PTS each branch processed
+        self._last_inference_pts = None
+        self._last_jpeg_pts = None
         self._det_log_t0 = None      # wall-clock time of first detection write
         self.ui_state = ui_state
         self._eos_reached = eos_reached
@@ -217,15 +224,19 @@ class Hailo15PipelineApp:
             self._byte_tracker = ByteTracker(
                 track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=15,
             )
+            # ByteTracker hardcodes det_thresh = track_thresh + 0.1 internally,
+            # so new tracks need confidence ≥ 0.5 to be created. On replay (H264
+            # decoded source) confidences run lower than live ISP frames, leaving
+            # the tracker unable to re-establish a lost track from raw NMS hits
+            # in the 0.4–0.5 range. Drop the +0.1 buffer so new tracks can be
+            # created at the same threshold we accept for NMS.
+            self._byte_tracker.det_thresh = 0.4
 
 
         # pyhailort inference objects (initialized in _setup_inference)
         self._vdevice = None
         self._configured_model = None
         self._infer_model = None
-
-        # UDP socket for sending detection data to PC viewer
-        self._det_sock = None
 
         # Persistent JPEG encoder pipeline for web UI
         self._jpeg_enc = None
@@ -282,49 +293,31 @@ class Hailo15PipelineApp:
 
         sink_parts = []
         for i in range(n_streams):
-            if i == 1 and encoder_path:
-                # 720p → H264 encode → tee: UDP (for live viewing) + optional file recording
-                record_branch = ""
-                if self._record_path:
-                    # Name h264parse so we can attach a pad probe to normalize PTS.
-                    # hailoencodebin emits buffers with absolute system PTS; if we
-                    # write that to the container, players see invalid durations.
-                    record_branch = (
-                        f" enc_tee. ! queue leaky=downstream max-size-buffers=200 ! "
-                        f"h264parse name=rec_h264parse config-interval=1 ! "
-                        f"matroskamux ! "
-                        f"filesink location={self._record_path} sync=false"
-                    )
-                    LOGGER.info("[h15] Recording H264 to %s", self._record_path)
+            if i == 0 and self._record_path and encoder_path:
+                # 4K → H264 encode → matroskamux → file. The h264parse is named
+                # so we can attach a pad probe to normalize PTS; hailoencodebin
+                # emits buffers with absolute system PTS and players would see
+                # invalid durations if we wrote that to the container directly.
                 sink_parts.append(
                     f"src.src_{i} ! queue leaky=downstream max-size-buffers=3 ! "
                     f"hailoencodebin name=enc config-file-path={encoder_path} ! "
-                    f"tee name=enc_tee "
-                    f"enc_tee. ! queue leaky=downstream max-size-buffers=3 ! "
-                    f"h264parse config-interval=-1 ! "
-                    f"rtph264pay ! "
-                    f"udpsink host={UDP_HOST} port={UDP_PORT} sync=false"
-                    + record_branch
+                    f"queue leaky=downstream max-size-buffers=200 ! "
+                    f"h264parse name=rec_h264parse config-interval=1 ! "
+                    f"matroskamux ! "
+                    f"filesink location={self._record_path} sync=false"
                 )
+                LOGGER.info("[h15] Recording 4K H264 to %s", self._record_path)
             elif i == 2:
-                if self.ui_state is not None:
-                    # FHD@15fps → tee: inference + raw NV12 for web UI (boxes drawn in Python)
-                    sink_parts.append(
-                        f"src.src_{i} ! queue leaky=downstream max-size-buffers=3 ! "
-                        f"tee name=t "
-                        f"t. ! queue leaky=downstream max-size-buffers=3 ! "
-                        f"appsink name=frame_sink emit-signals=true sync=false drop=true "
-                        f"t. ! queue leaky=downstream max-size-buffers=1 ! "
-                        f"videoscale ! video/x-raw,width=640,height=360 ! "
-                        f"appsink name=raw_sink emit-signals=true sync=false drop=true max-buffers=1"
-                    )
-                else:
-                    # FHD@15fps → appsink for detection only
-                    sink_parts.append(
-                        f"src.src_{i} ! queue leaky=downstream max-size-buffers=3 ! "
-                        f"appsink name=frame_sink emit-signals=true sync=false drop=true"
-                    )
+                # FHD@15fps → appsink for detection. JPEG for web UI is encoded
+                # inside the inference callback so the JPEG and detections come
+                # from the same frame (atomic pairing).
+                sink_parts.append(
+                    f"src.src_{i} ! queue leaky=downstream max-size-buffers=3 ! "
+                    f"appsink name=frame_sink emit-signals=true sync=false drop=true"
+                )
             else:
+                # Unused streams (sink_0 when not recording, sink_1 always) still
+                # need a downstream sink because the ISP frontend emits them.
                 sink_parts.append(
                     f"src.src_{i} ! queue leaky=downstream max-size-buffers=1 ! "
                     f"fakesink sync=false"
@@ -343,10 +336,9 @@ class Hailo15PipelineApp:
         if appsink:
             appsink.connect("new-sample", self._on_new_sample)
 
-        # Connect raw NV12 appsink for web UI (box drawing + JPEG encode in Python)
-        raw_sink = self.pipeline.get_by_name("raw_sink")
-        if raw_sink:
-            raw_sink.connect("new-sample", self._on_raw_web_sample)
+        # Note: web UI JPEG is now encoded inside the inference callback,
+        # not in a separate raw_sink branch, to keep JPEG and detections
+        # atomically paired (same source frame).
 
         # Attach PTS-normalization pad probe to the recording branch
         if self._record_path:
@@ -367,23 +359,18 @@ class Hailo15PipelineApp:
             raise FileNotFoundError(f"Replay file not found: {self._replay_path}")
         LOGGER.info("[h15] Replay mode: %s", self._replay_path)
 
-        # decodebin pipes into a tee → inference appsink + (optionally) web UI raw appsink
-        ui_branch = ""
-        if self.ui_state is not None:
-            ui_branch = (
-                " t. ! queue leaky=downstream max-size-buffers=1 ! "
-                "videoscale ! video/x-raw,format=NV12,width=640,height=360 ! "
-                "appsink name=raw_sink emit-signals=true sync=false drop=true max-buffers=1"
-            )
-
+        # Single sink — inference. JPEG for web UI is encoded inside the
+        # inference callback (atomic pairing with detections).
+        # An `identity sync=true` element throttles the pipeline to the
+        # source PTS rate so replay runs at native speed instead of as
+        # fast as the decoder can pump.
         pipeline_str = (
             f"filesrc location={self._replay_path} ! "
             f"matroskademux ! h264parse ! avdec_h264 ! "
             f"videoconvert ! video/x-raw,format=NV12 ! "
-            f"tee name=t "
-            f"t. ! queue leaky=downstream max-size-buffers=3 ! "
+            f"identity sync=true ! "
+            f"queue leaky=downstream max-size-buffers=3 ! "
             f"appsink name=frame_sink emit-signals=true sync=false drop=true"
-            + ui_branch
         )
         LOGGER.info("[h15] Replay pipeline: %s", pipeline_str)
         self.pipeline = Gst.parse_launch(pipeline_str)
@@ -391,11 +378,8 @@ class Hailo15PipelineApp:
         appsink = self.pipeline.get_by_name("frame_sink")
         if appsink:
             appsink.connect("new-sample", self._on_new_sample)
-        raw_sink = self.pipeline.get_by_name("raw_sink")
-        if raw_sink:
-            raw_sink.connect("new-sample", self._on_raw_web_sample)
 
-    def _write_detection_log(self, detections, following_id):
+    def _write_detection_log(self, detections, following_id, raw_count=None, raw_max_conf=None):
         """Append a detection record (JSONL) with timestamp relative to record start."""
         import json as _json
         if self._det_log is None:
@@ -405,6 +389,10 @@ class Hailo15PipelineApp:
             LOGGER.info("[h15] Detection log: %s", log_path)
         t_rel = time.monotonic() - self._det_log_t0
         rec = {"t": round(t_rel, 4), "following_id": following_id, "detections": detections}
+        if raw_count is not None:
+            rec["raw_count"] = raw_count  # how many NMS detections before tracker
+        if raw_max_conf is not None:
+            rec["raw_max_conf"] = round(raw_max_conf, 3)  # peak pre-tracker confidence
         self._det_log.write(_json.dumps(rec) + "\n")
 
     def _on_record_probe(self, pad, info):
@@ -437,6 +425,45 @@ class Hailo15PipelineApp:
             buf.dts = max(0, dts - base)
         return Gst.PadProbeReturn.OK
 
+    _UI_JPEG_W = 640
+    _UI_JPEG_H = 360
+
+    def _encode_jpeg_for_ui(self, frame_data, src_w, src_h):
+        """Downscale source NV12 to 640x360 and JPEG-encode it.
+
+        Called from the inference callback so the JPEG is from the same frame
+        as the detections we just computed — pairs them atomically.
+        """
+        y_plane = frame_data[:src_h * src_w].reshape(src_h, src_w)
+        uv_plane = frame_data[src_h * src_w:src_h * src_w + (src_h // 2) * src_w].reshape(src_h // 2, src_w)
+
+        dst_w, dst_h = self._UI_JPEG_W, self._UI_JPEG_H
+        # Nearest-neighbor NV12 resize (same approach as model-input resize)
+        row_idx_y = (np.arange(dst_h) * src_h // dst_h).astype(int)
+        col_idx_y = (np.arange(dst_w) * src_w // dst_w).astype(int)
+        y_resized = y_plane[row_idx_y][:, col_idx_y]
+        uv_target_h = dst_h // 2
+        row_idx_uv = (np.arange(uv_target_h) * (src_h // 2) // uv_target_h).astype(int)
+        col_idx_uv = (np.arange(dst_w) * src_w // dst_w).astype(int)
+        uv_resized = uv_plane[row_idx_uv][:, col_idx_uv]
+        nv12_resized = np.concatenate([y_resized.ravel(), uv_resized.ravel()])
+
+        self._ensure_jpeg_encoder(dst_w, dst_h)
+        enc_buf = Gst.Buffer.new_allocate(None, len(nv12_resized), None)
+        enc_buf.fill(0, nv12_resized.tobytes())
+        self._jpeg_src.emit("push-buffer", enc_buf)
+        out_sample = self._jpeg_out.emit("try-pull-sample", int(200 * 1e6))
+        if out_sample is None:
+            return None
+        out_buf = out_sample.get_buffer()
+        ok, out_map = out_buf.map(Gst.MapFlags.READ)
+        if not ok:
+            return None
+        try:
+            return bytes(out_map.data)
+        finally:
+            out_buf.unmap(out_map)
+
     def _ensure_jpeg_encoder(self, width, height):
         """Create a persistent GStreamer pipeline for NV12→JPEG encoding."""
         if self._jpeg_enc is not None:
@@ -460,6 +487,9 @@ class Hailo15PipelineApp:
 
         buf = sample.get_buffer()
         caps = sample.get_caps()
+        # Diagnostic: record the source PTS of this frame
+        if buf.pts != Gst.CLOCK_TIME_NONE:
+            self._last_jpeg_pts = buf.pts
         struct = caps.get_structure(0)
         w = struct.get_int("width")[1]
         h = struct.get_int("height")[1]
@@ -472,20 +502,8 @@ class Hailo15PipelineApp:
         finally:
             buf.unmap(map_info)
 
-        # Draw detection boxes on Y plane
-        det, _ = self.shared_state.get_latest()
-        if det is not None:
-            y_plane = frame[:w * h].reshape(h, w)
-            bw = int(det.bbox_width * w) if det.bbox_width > 0 else int(det.bbox_height * w * 0.5)
-            bh = int(det.bbox_height * h)
-            cx, cy = int(det.center_x * w), int(det.center_y * h)
-            x1, y1 = max(0, cx - bw // 2), max(0, cy - bh // 2)
-            x2, y2 = min(w - 1, cx + bw // 2), min(h - 1, cy + bh // 2)
-            t = 2
-            y_plane[y1:y1 + t, x1:x2] = 235
-            y_plane[max(0, y2 - t):y2, x1:x2] = 235
-            y_plane[y1:y2, x1:x1 + t] = 235
-            y_plane[y1:y2, max(0, x2 - t):x2] = 235
+        # Note: no server-side box drawing — the React SVG overlay handles
+        # all detection boxes/crosses. Drawing here would duplicate them.
 
         # Encode to JPEG via persistent pipeline
         self._ensure_jpeg_encoder(w, h)
@@ -502,22 +520,6 @@ class Hailo15PipelineApp:
                 out_buf.unmap(out_map)
 
         return Gst.FlowReturn.OK
-
-    def _send_detections_udp(self, detections):
-        """Send detection data to PC viewer via UDP (port UDP_PORT + 1)."""
-        import json as _json
-        import socket
-        if self._det_sock is None:
-            self._det_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        payload = _json.dumps([{
-            "cx": d.center_x, "cy": d.center_y,
-            "bh": d.bbox_height, "bw": d.bbox_width,
-            "conf": d.confidence,
-        } for d in detections]).encode()
-        try:
-            self._det_sock.sendto(payload, (UDP_HOST, UDP_PORT + 1))
-        except OSError:
-            pass
 
     def _on_new_sample(self, appsink):
         """Appsink callback: grab frame, run inference, update detections."""
@@ -542,6 +544,9 @@ class Hailo15PipelineApp:
 
     def _run_inference(self, gst_buf, caps):
         """Run YOLOv8 inference on a GStreamer buffer."""
+        # Diagnostic: record the source PTS of this frame
+        if gst_buf.pts != Gst.CLOCK_TIME_NONE:
+            self._last_inference_pts = gst_buf.pts
         # Extract frame data
         success, map_info = gst_buf.map(Gst.MapFlags.READ)
         if not success:
@@ -639,9 +644,6 @@ class Hailo15PipelineApp:
             else:
                 LOGGER.debug("[h15] Non-NMS output %s — skipping", name)
 
-        # Send detections to PC viewer overlay
-        self._send_detections_udp(all_detections)
-
         # Run tracker for stable IDs
         ui_dets = []
         tracked_ids = set()
@@ -657,22 +659,52 @@ class Hailo15PipelineApp:
                 (1, 1),
             )
             for t in tracks:
-                x1, y1, x2, y2 = t.tlbr
+                # Tracker's tlbr is a Kalman-filtered (predicted) position.
+                # For UI display we use the raw NMS detection bbox (matches
+                # the video pixels exactly), but keep the tracker's stable ID.
+                # Match by best IoU between the tracker's tlbr and raw detections.
+                tx1, ty1, tx2, ty2 = t.tlbr
+                best_iou, best_det = 0.0, None
+                for d in all_detections:
+                    dx1 = d.center_x - d.bbox_width / 2
+                    dy1 = d.center_y - d.bbox_height / 2
+                    dx2 = d.center_x + d.bbox_width / 2
+                    dy2 = d.center_y + d.bbox_height / 2
+                    ix1 = max(tx1, dx1); iy1 = max(ty1, dy1)
+                    ix2 = min(tx2, dx2); iy2 = min(ty2, dy2)
+                    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                    union = ((tx2 - tx1) * (ty2 - ty1) +
+                             (dx2 - dx1) * (dy2 - dy1) - inter)
+                    iou = inter / union if union > 0 else 0.0
+                    if iou > best_iou:
+                        best_iou, best_det = iou, d
                 tid = int(t.track_id)
                 tracked_ids.add(tid)
+                # Use the matched raw detection bbox if IoU is reasonable;
+                # otherwise fall back to the tracker's predicted bbox (the
+                # observation was lost this frame, prediction is all we have).
+                if best_det is not None and best_iou > 0.2:
+                    raw_d = best_det
+                    x1 = raw_d.center_x - raw_d.bbox_width / 2
+                    y1 = raw_d.center_y - raw_d.bbox_height / 2
+                    bw = raw_d.bbox_width
+                    bh = raw_d.bbox_height
+                else:
+                    x1, y1 = tx1, ty1
+                    bw, bh = tx2 - tx1, ty2 - ty1
                 det = Detection(
                     label="person",
                     confidence=float(t.score),
-                    center_x=(x1 + x2) / 2,
-                    center_y=(y1 + y2) / 2,
-                    bbox_height=y2 - y1,
-                    bbox_width=x2 - x1,
+                    center_x=x1 + bw / 2,
+                    center_y=y1 + bh / 2,
+                    bbox_height=bh,
+                    bbox_width=bw,
                     timestamp=time.monotonic(),
                 )
                 track_by_id[tid] = det
                 ui_dets.append({
                     "id": tid,
-                    "bbox": {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1},
+                    "bbox": {"x": x1, "y": y1, "w": bw, "h": bh},
                     "confidence": float(t.score),
                     "label": "person",
                 })
@@ -707,15 +739,37 @@ class Hailo15PipelineApp:
         # Push to web UI
         if self.ui_state is not None:
             following_id = self.target_state.get_target() if self.target_state else None
+            # Encode JPEG from THIS frame and push atomically with detections,
+            # so the bbox always matches the displayed video frame.
+            jpeg = self._encode_jpeg_for_ui(frame_data, frame_w, frame_h)
+            # Diagnostic: tag detections with the PTS of both branches
+            self._last_jpeg_pts = self._last_inference_pts  # now same frame
+            ui_dets.append({
+                "_diag": True,
+                "inference_pts_ns": self._last_inference_pts,
+                "jpeg_pts_ns": self._last_jpeg_pts,
+            })
             self.ui_state.update_detections(ui_dets, following_id=following_id)
+            if jpeg is not None:
+                self.ui_state.update_frame(jpeg)
 
-        # Write detections to sidecar file for post-flight overlay
+        # Write detections to sidecar file for post-flight overlay.
+        # Strip the _diag entry — it has no bbox and would crash overlay scripts.
+        # Include the raw-NMS detection count so we can tell whether a missing
+        # entry is "model didn't detect" vs "tracker dropped it".
         if self._record_path:
-            self._write_detection_log(ui_dets,
-                                      self.target_state.get_target() if self.target_state else None)
+            real_dets = [d for d in ui_dets if not d.get("_diag")]
+            raw_max_conf = max((d.confidence for d in all_detections), default=0.0)
+            self._write_detection_log(
+                real_dets,
+                self.target_state.get_target() if self.target_state else None,
+                raw_count=len(all_detections),
+                raw_max_conf=raw_max_conf,
+            )
 
         if self._frame_count % 30 == 0:
-            LOGGER.info("[h15] frame=%d detections=%d", self._frame_count, len(all_detections))
+            LOGGER.info("[h15] frame=%d raw=%d tracked=%d", self._frame_count,
+                        len(all_detections), len(tracked_ids))
 
     # -- Run --
 
@@ -730,7 +784,7 @@ class Hailo15PipelineApp:
         bus.add_signal_watch()
         bus.connect("message", self._on_bus_message)
 
-        LOGGER.info("[h15] Starting pipeline (UDP stream to %s:%d)", UDP_HOST, UDP_PORT)
+        LOGGER.info("[h15] Starting pipeline")
         ret = self.pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError("Failed to start H15 pipeline")
@@ -741,6 +795,18 @@ class Hailo15PipelineApp:
     def _on_bus_message(self, bus, msg):
         t = msg.type
         if t == Gst.MessageType.EOS:
+            if self._replay_path and self._replay_loop:
+                LOGGER.info("[h15] End of replay — rebuilding pipeline for loop")
+                # Full rebuild — seek/state-cycle approaches don't reliably
+                # recover avdec_h264 from EOS state. A fresh pipeline always
+                # works.
+                self.pipeline.set_state(Gst.State.NULL)
+                self._build_replay_pipeline()
+                bus = self.pipeline.get_bus()
+                bus.add_signal_watch()
+                bus.connect("message", self._on_bus_message)
+                self.pipeline.set_state(Gst.State.PLAYING)
+                return
             LOGGER.info("[h15] End of stream")
             if self._eos_reached:
                 self._eos_reached.set()
@@ -800,7 +866,7 @@ class Hailo15PipelineApp:
 
 def create_h15_app(shared_state, target_state=None, eos_reached=None,
                    ui_state=None, parser=None, record_path=None,
-                   replay_path=None, **kwargs):
+                   replay_path=None, replay_loop=False, **kwargs):
     """Create a Hailo15 pipeline app.
 
     Provides the same interface as pipeline_adapter.create_app() so
@@ -820,6 +886,7 @@ def create_h15_app(shared_state, target_state=None, eos_reached=None,
         eos_reached=eos_reached,
         record_path=record_path,
         replay_path=replay_path,
+        replay_loop=replay_loop,
         options_menu=args,
     )
     return app

@@ -7,7 +7,7 @@ const DEBOUNCE_MS = 250;
 // position, rendering doesn't move — kills frame-to-frame jitter.
 const OVERLAY_DEAD_ZONE = 0.01;
 // Per-RAF lerp factor pulling the rendered position toward the target.
-const OVERLAY_SMOOTH_ALPHA = 0.25;
+const OVERLAY_SMOOTH_ALPHA = 0.5;
 const CROSS_HALF_SIZE = 10; // pixels, half the arm length of the cross
 const CROSS_STROKE = 3;
 const CROSS_HALO_STROKE = 6;
@@ -23,6 +23,7 @@ export default function App() {
   const [recording, setRecording] = useState(false);
   const [perf, setPerf] = useState(null);
   const [paused, setPaused] = useState(false);
+  const [diag, setDiag] = useState(null);
   const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -40,7 +41,14 @@ export default function App() {
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        setDetections(data.detections || []);
+        // Extract diagnostic entry (if present) from detections list
+        const rawDets = data.detections || [];
+        const diagIdx = rawDets.findIndex((d) => d._diag);
+        if (diagIdx >= 0) {
+          setDiag(rawDets[diagIdx]);
+          rawDets.splice(diagIdx, 1);
+        }
+        setDetections(rawDets);
         setFollowingId(data.following_id);
         setVelocity(data.velocity || null);
         setPerf(data.perf || null);
@@ -408,6 +416,17 @@ export default function App() {
             | Mem {perf.memory_mb} MB
             {perf.hailo_util_percent > 0 ? ` | NN ${perf.hailo_util_percent}%` : ""}
             {perf.hailo_temp_c > 0 ? ` | ${perf.hailo_temp_c}\u00b0C` : ""}
+          </span>
+        )}
+        {diag && (
+          <span className="perf-text">
+            {(() => {
+              const j = diag.jpeg_pts_ns;
+              const i = diag.inference_pts_ns;
+              if (j == null || i == null) return "PTS: ?";
+              const deltaMs = ((j - i) / 1e6).toFixed(1);
+              return `JPEG=${(j / 1e9).toFixed(3)}s INF=${(i / 1e9).toFixed(3)}s \u0394=${deltaMs}ms`;
+            })()}
           </span>
         )}
       </div>

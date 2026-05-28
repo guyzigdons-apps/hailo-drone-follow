@@ -70,7 +70,9 @@ def draw_overlay(frame, record, w, h):
         return
     following_id = record.get("following_id")
     for det in record.get("detections", []):
-        bb = det["bbox"]
+        bb = det.get("bbox")
+        if not bb:
+            continue  # skip diagnostic / malformed entries
         x1 = int(bb["x"] * w)
         y1 = int(bb["y"] * h)
         x2 = int((bb["x"] + bb["w"]) * w)

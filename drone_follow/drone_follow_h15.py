@@ -129,10 +129,14 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument("--record", nargs="?", const="auto", default=None,
                        metavar="PATH",
                        help="Record H264 video locally (Matroska container). "
-                            "Optional PATH; if omitted uses /home/root/recordings/drone_<timestamp>.mkv")
-    group.add_argument("--replay", metavar="FILE",
+                            "PATH may be a .mkv file, a directory (file auto-named "
+                            "drone_<timestamp>.mkv inside it), or omitted "
+                            "(defaults to /home/root/recordings/).")
+    group.add_argument("-i", "--input", dest="replay", metavar="FILE",
                        help="Replay a recorded .mkv through inference + tracker instead of "
                             "the live camera. No recording, no UDP output. Implies --dry-run.")
+    group.add_argument("--loop", action="store_true",
+                       help="Loop the replay when it reaches EOS (only with -i/--input).")
 
     return parser
 
@@ -173,22 +177,41 @@ def main():
         args.dry_run = True
         LOGGER.info("[app] Replay mode (%s) — drone control disabled", replay_path)
 
-    # Resolve record path (not used in replay mode)
+    # Resolve record path. In replay mode, only the .jsonl detection log is
+    # written (no encoder branch is built, so no .mkv video).
     record_path = None
-    if not replay_path and getattr(args, "record", None) is not None:
+    if getattr(args, "record", None) is not None:
+        import datetime
+        import shutil
         record_path = args.record
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = "_replay" if replay_path else ""
+        filename = f"drone_{ts}{suffix}.mkv"
         if record_path == "auto":
-            import datetime
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            record_path = f"/home/root/recordings/drone_{ts}.mkv"
+            record_path = f"/home/root/recordings/{filename}"
+        elif os.path.isdir(record_path) or record_path.endswith(os.sep) or not record_path.endswith(".mkv"):
+            # Treat as a directory; auto-name the file inside it
+            record_path = os.path.join(record_path, filename)
         os.makedirs(os.path.dirname(record_path), exist_ok=True)
-        LOGGER.info("[app] Recording video to %s", record_path)
+        # Warn (don't fail) if the target volume looks too small.
+        free_gb = shutil.disk_usage(os.path.dirname(record_path)).free / (1024**3)
+        if free_gb < 1.0:
+            LOGGER.warning("[app] Only %.2f GB free at %s — recording may be truncated",
+                           free_gb, os.path.dirname(record_path))
+        else:
+            LOGGER.info("[app] Recording target has %.1f GB free", free_gb)
+        if replay_path:
+            LOGGER.info("[app] Recording detections to %s (video not re-encoded in replay mode)",
+                        record_path.rsplit(".", 1)[0] + ".jsonl")
+        else:
+            LOGGER.info("[app] Recording video to %s", record_path)
 
     from drone_follow.pipeline_adapter.hailo15_pipeline import create_h15_app
 
     app = create_h15_app(
         shared_state, target_state=target_state, eos_reached=eos_reached,
-        ui_state=ui_state, record_path=record_path, replay_path=replay_path)
+        ui_state=ui_state, record_path=record_path, replay_path=replay_path,
+        replay_loop=getattr(args, "loop", False))
 
     # Start follow server
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)

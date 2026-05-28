@@ -29,6 +29,7 @@ TARGET=root@<ip> ./install.sh         # via env var
 ./install_app.sh                      # just sync drone_follow/ code (assumes UI already built)
 ./install_service.sh                  # just install/refresh init service
 ./uninstall.sh                        # remove service files (keeps log)
+./install_usb_automount.sh            # one-time setup of USB auto-mount at /mnt/usb
 ```
 
 The full `install.sh` runs `build_ui.sh`, then `install_app.sh`, then `install_service.sh`.
@@ -84,8 +85,11 @@ DRONE_FOLLOW_ARGS="--dry-run"
 # Add local recording:
 DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0 --record"
 
-# Custom recording path:
+# Custom recording path (specific file):
 DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0 --record /home/root/recordings/test.mkv"
+
+# Recording to USB (directory — drone_<ts>.mkv auto-named inside it):
+DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0 --record /mnt/usb"
 
 # Load a saved config:
 DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0 --config /home/root/df_config.json"
@@ -110,13 +114,10 @@ PYTHONPATH=/home/root python3 -m drone_follow.drone_follow_h15 --serial /dev/tty
 | `http://10.0.0.1:5001/` | Web UI (React) — video + detection overlay + config sliders |
 | `http://10.0.0.1:5001/api/video` | Raw MJPEG stream (works without React build) |
 | `http://10.0.0.1:5001/api/config` | Current config as JSON |
-| `udp://10.0.0.2:5002` | Raw H264 stream (from H15 to PC) |
 
-H264 stream via gst-launch on the PC:
-```bash
-gst-launch-1.0 udpsrc port=5002 ! "application/x-rtp,encoding-name=H264" \
-    ! rtph264depay ! decodebin ! autovideosink
-```
+The web UI shows the FHD-inference branch downscaled to 640×360 MJPEG at 15fps.
+There is no UDP H264 stream — the VPU encoder budget is reserved for the 4K
+on-device recording (see Recordings below).
 
 ## SSH tunnel (browser on a different host)
 
@@ -131,8 +132,37 @@ Then open `http://localhost:5001` in the browser.
 **Location on target:** `/home/root/recordings/`
 
 When `--record` is set, the service writes two files per run:
-- `drone_<YYYYMMDD_HHMMSS>.mkv` — H264 video (no overlays)
-- `drone_<YYYYMMDD_HHMMSS>.jsonl` — detection data per inference frame
+- `drone_<YYYYMMDD_HHMMSS>.mkv` — 4K (3840×2160) H264 video, no overlays, ~16 Mbps
+- `drone_<YYYYMMDD_HHMMSS>.jsonl` — detection data per inference frame (normalized coords, resolution-independent)
+
+At 4K@30 ~16 Mbps the recording is roughly **120 MB/minute** — check `df -h /home/root` before long flights. The `.jsonl` overlay script works regardless of video resolution since detection coordinates are normalized [0, 1].
+
+### Recording to USB
+
+Internal storage is 8 GB total — about an hour of 4K. For longer sessions, record to a USB stick.
+
+**One-time setup** (installs udev rule + mount helper):
+```bash
+cd hailo-drone-follow/scripts/h15_boot
+./install_usb_automount.sh
+```
+
+After that, plug any USB stick in and it auto-mounts at `/mnt/usb`. Confirm with:
+```bash
+ssh root@10.0.0.1 "df -h /mnt/usb"
+tail /var/log/drone-usb-mount.log    # on the target, for diagnostics
+```
+
+**Direct the app to record there.** `--record` accepts a directory and auto-names the file inside it:
+```bash
+# In /etc/default/drone-follow on the target:
+DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0 --record /mnt/usb"
+# Then: /etc/init.d/drone-follow restart
+```
+
+Each run writes `/mnt/usb/drone_<YYYYMMDD_HHMMSS>.mkv` + matching `.jsonl`.
+
+**vfat (FAT32) caveat:** single file capped at 4 GB. At 4K@16 Mbps that's about **33 minutes per file** — fine for typical flights but plan around it for longer ones. Reformat the stick as exFAT or ext4 to remove the cap (note: ext4 sticks can't be read by Windows without extra drivers).
 
 **List recordings on target:**
 ```bash
@@ -181,6 +211,34 @@ scp root@10.0.0.1:/home/root/recordings/drone_xxx.{mkv,jsonl} .
 
 Output: green boxes around the followed target, white boxes around the rest, with `ID N XX%` labels.
 
+## Replay mode (re-run inference on a recorded video)
+
+Run a recorded `.mkv` back through the H15's live inference + tracker pipeline. Useful for testing tracker changes against real flight footage, or generating an updated detection log without flying again.
+
+**Run replay:**
+```bash
+PYTHONPATH=/home/root python3 -m drone_follow.drone_follow_h15 \
+    -i /home/root/recordings/drone_xxx.mkv
+
+# Loop the file continuously
+PYTHONPATH=/home/root python3 -m drone_follow.drone_follow_h15 \
+    -i /home/root/recordings/drone_xxx.mkv --loop
+```
+
+The replay runs at native source speed (throttled by an `identity sync=true` element), feeds frames through the inference path, and exposes the new detections on the web UI (`http://10.0.0.1:5001/`). `--record` is auto-disabled for video output (no encoder branch), and drone control is forced to dry-run.
+
+**Save the new detections to a `.jsonl` sidecar:**
+```bash
+# Auto-named: /home/root/recordings/drone_<ts>_replay.jsonl
+PYTHONPATH=/home/root python3 -m drone_follow.drone_follow_h15 \
+    -i /home/root/recordings/drone_xxx.mkv --record
+
+# Then overlay the new detections on the ORIGINAL video (on PC w/ OpenCV):
+./scripts/post_process/overlay_detections.py drone_xxx.mkv drone_<ts>_replay.jsonl
+```
+
+This is useful for comparing tracker output between code versions — run the same flight twice with different tracker settings, get two `.jsonl` files, and produce two annotated videos to diff.
+
 ## Logs
 
 ```bash
@@ -196,6 +254,6 @@ tail -200 /var/log/drone-follow.log
 ```bash
 /etc/init.d/drone-follow status
 ps aux | grep drone_follow
-netstat -tln | grep -E "5001|5002"        # WebServer + H264 UDP
+netstat -tln | grep 5001                  # WebServer
 tail /var/log/drone-follow.log
 ```
