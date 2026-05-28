@@ -145,7 +145,33 @@ def verify_output(output_path: Path) -> None:
         print(f"  gst decode OK: {jw}x{jh}")
 
 
-def main() -> None:
+def _parse_fov_list(s: str) -> list[int]:
+    """Parse `--emit-fov 70,60,50` -> [70, 60, 50]. Validates the FOV set."""
+    allowed = {70, 60, 50}
+    try:
+        out = [int(x) for x in s.split(",") if x.strip()]
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"--emit-fov must be comma-separated integers; got {s!r}"
+        ) from e
+    if not out:
+        raise argparse.ArgumentTypeError(
+            f"--emit-fov requires at least one value; got {s!r}"
+        )
+    bad = [v for v in out if v not in allowed]
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"--emit-fov values must be in {sorted(allowed)}; got {bad}"
+        )
+    return out
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for prepare_video.
+
+    Factored out of `main()` so unit tests can exercise the CLI surface
+    without invoking ffmpeg.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("input", type=Path, help="Source video file.")
     ap.add_argument("--output", type=Path, default=None,
@@ -159,7 +185,24 @@ def main() -> None:
     ap.add_argument("--verify", action="store_true",
                     help="After the operation, verify output is landscape "
                          "via ffprobe + a one-frame gst decode.")
-    args = ap.parse_args()
+    ap.add_argument("--emit-fov", type=_parse_fov_list, default=None,
+                    metavar="LIST",
+                    help="Comma-separated list of FOV variants to emit "
+                         "from the rotation-stripped output. Valid values: "
+                         "70, 60, 50. Example: --emit-fov 70,60,50")
+    ap.add_argument("--nice", type=int, default=None,
+                    help="If set, prefix ffmpeg with 'nice -n <N>'.")
+    ap.add_argument("--ionice", type=int, default=None,
+                    help="If set, prefix ffmpeg with 'ionice -c <N>'.")
+    ap.add_argument("--manifest", type=Path, default=None,
+                    help="Path to the FOV-variants manifest JSON. "
+                         "Default: fov_variants_manifest.json in the "
+                         "output's parent directory.")
+    return ap
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
 
     if not args.input.is_file():
         print(f"ERROR: input not found: {args.input}", file=sys.stderr)
