@@ -38,7 +38,8 @@ class DiscoveryGridEmitter:
         self.period = period
         self.mode = mode
 
-    def emit(self, src_w, src_h, lock, frame_idx, meter) -> list[CropRect]:
+    def emit(self, src_w: int, src_h: int, lock: LockState,
+             frame_idx: int, meter) -> list[CropRect]:
         if frame_idx % self.period != 0:
             return []
         return _grid_full(src_w, src_h, self.gx, self.gy, self.mode)
