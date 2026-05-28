@@ -203,3 +203,90 @@ def test_build_fov_ffmpeg_cmd_string_matches_overnight_manifest(pv):
         "-c:v libx265 -crf 18 -preset slow -an "
         "/home/giladn/Videos/Drone/Training/DJI_20260528155741_0029_D_prepared__fov70.mp4"
     )
+
+
+import hashlib
+import json
+import os
+
+
+# ---------------------------------------------------------------------------
+# SHA-256 helper
+# ---------------------------------------------------------------------------
+
+
+def test_sha256_of_file_matches_hashlib(pv, tmp_path):
+    p = tmp_path / "x.bin"
+    p.write_bytes(b"hello world\n")
+    expected = hashlib.sha256(b"hello world\n").hexdigest()
+    assert pv.sha256_of_file(p) == expected
+
+
+def test_sha256_of_file_chunks_large_file(pv, tmp_path):
+    p = tmp_path / "big.bin"
+    data = b"A" * (5 * 1024 * 1024 + 17)
+    p.write_bytes(data)
+    assert pv.sha256_of_file(p) == hashlib.sha256(data).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Atomic manifest writer
+# ---------------------------------------------------------------------------
+
+
+def _record(input_name: str, variant: str, output_name: str, sha: str) -> dict:
+    return {
+        "input": input_name,
+        "variant": variant,
+        "output": output_name,
+        "output_bytes": 12345,
+        "sha256": sha,
+        "ffmpeg_cmd": f"ffmpeg -y -i {input_name} … {output_name}",
+    }
+
+
+def test_append_manifest_record_creates_new_file(pv, tmp_path):
+    manifest = tmp_path / "fov_variants_manifest.json"
+    rec = _record("a.MP4", "fov70", "a__fov70.mp4", "aa" * 32)
+    pv.append_manifest_record(manifest, rec)
+    data = json.loads(manifest.read_text())
+    assert data == [rec]
+
+
+def test_append_manifest_record_appends_to_existing(pv, tmp_path):
+    manifest = tmp_path / "fov_variants_manifest.json"
+    r1 = _record("a.MP4", "fov70", "a__fov70.mp4", "aa" * 32)
+    r2 = _record("a.MP4", "fov60", "a__fov60.mp4", "bb" * 32)
+    pv.append_manifest_record(manifest, r1)
+    pv.append_manifest_record(manifest, r2)
+    data = json.loads(manifest.read_text())
+    assert data == [r1, r2]
+
+
+def test_append_manifest_record_is_atomic_via_temp_file(pv, tmp_path, monkeypatch):
+    manifest = tmp_path / "fov_variants_manifest.json"
+    replace_calls: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def fake_replace(src, dst):
+        replace_calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(pv.os, "replace", fake_replace)
+    pv.append_manifest_record(
+        manifest, _record("a.MP4", "fov70", "a__fov70.mp4", "aa" * 32)
+    )
+    assert len(replace_calls) == 1
+    src, dst = replace_calls[0]
+    assert Path(src).parent == manifest.parent
+    assert Path(src).name != manifest.name
+    assert dst == str(manifest)
+
+
+def test_append_manifest_record_rejects_non_list_existing(pv, tmp_path):
+    manifest = tmp_path / "fov_variants_manifest.json"
+    manifest.write_text(json.dumps({"not": "a list"}))
+    with pytest.raises(ValueError):
+        pv.append_manifest_record(
+            manifest, _record("a.MP4", "fov70", "a__fov70.mp4", "aa" * 32)
+        )

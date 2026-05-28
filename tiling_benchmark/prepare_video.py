@@ -19,8 +19,10 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -266,6 +268,52 @@ def _parse_fov_list(s: str) -> list[int]:
             f"--emit-fov values must be in {sorted(allowed)}; got {bad}"
         )
     return out
+
+
+_SHA_CHUNK = 1024 * 1024  # 1 MiB
+
+
+def sha256_of_file(path: Path) -> str:
+    """Return the SHA-256 hex digest of `path`'s bytes (read in 1 MiB chunks)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(_SHA_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _read_manifest_or_empty(manifest: Path) -> list[dict]:
+    """Load the manifest JSON or return []. Raises if the file isn't a list."""
+    if not manifest.is_file():
+        return []
+    raw = manifest.read_text()
+    if not raw.strip():
+        return []
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValueError(
+            f"manifest at {manifest} is not a JSON array; refusing to overwrite"
+        )
+    return data
+
+
+def append_manifest_record(manifest: Path, record: dict) -> None:
+    """Append `record` to the manifest list, writing atomically.
+
+    Atomicity: write the full updated list to a sibling temp file, fsync,
+    then os.replace() it onto the manifest path. Any crash mid-run leaves
+    the old manifest intact.
+    """
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    entries = _read_manifest_or_empty(manifest)
+    entries.append(record)
+    tmp = manifest.with_name(f".{manifest.name}.tmp.{os.getpid()}")
+    serialized = json.dumps(entries, indent=2)
+    with open(tmp, "w") as f:
+        f.write(serialized)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, manifest)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
