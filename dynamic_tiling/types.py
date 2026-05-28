@@ -1,80 +1,17 @@
-from __future__ import annotations
+# dynamic_tiling/types.py
+"""Compatibility shim: types live in hailo_tiling.types.
 
-from dataclasses import dataclass
-
-MODEL_W = 640
-MODEL_H = 480
-MODEL_ASPECT = MODEL_W / MODEL_H  # 4:3
-
-
-@dataclass(frozen=True)
-class CropRect:
-    """A source-pixel crop fed to the cropper/HEF. 4:3, height derived from w."""
-    x: int
-    y: int
-    w: int
-    h: int
-    mode: str = "s"  # cropper per-tile mode tag ("s" single-scale, "m" multi)
-
-    @property
-    def scale(self) -> float:
-        return MODEL_W / self.w
-
-    @classmethod
-    def from_center_width(cls, cx: float, cy: float, crop_w: int,
-                          mode: str = "s") -> "CropRect":
-        w = int(round(crop_w))
-        h = int(round(w / MODEL_ASPECT))
-        return cls(x=int(round(cx - w / 2)), y=int(round(cy - h / 2)),
-                   w=w, h=h, mode=mode)
-
-    def clamp(self, src_w: int, src_h: int) -> "CropRect":
-        w = min(self.w, src_w)
-        h = min(self.h, src_h)
-        x = max(0, min(src_w - w, self.x))
-        y = max(0, min(src_h - h, self.y))
-        return CropRect(x=x, y=y, w=w, h=h, mode=self.mode)
-
-
-@dataclass(frozen=True)
-class Det:
-    """A detection in NORMALIZED source-frame coords. bbox = (x, y, w, h)."""
-    cls: int
-    score: float
-    x: float
-    y: float
-    w: float
-    h: float
-
-    @property
-    def xyxy(self) -> tuple:
-        return (self.x, self.y, self.x + self.w, self.y + self.h)
-
-
-@dataclass
-class LockState:
-    track_id: int | None = None
-    bbox_norm: tuple = (0.0, 0.0, 0.0, 0.0)  # (x,y,w,h) normalized
-    status: str = "LOST"                     # TRACKING | SEARCHING | LOST
-    frames_since_seen: int = 0
-    last_velocity: tuple = (0.0, 0.0)        # (dvx, dvy) of bbox centre, normalized/frame
-
-
-@dataclass
-class TargetState:
-    """Per-track state for multi-target tracking."""
-    key: tuple                                   # (cls, track_id) composite lock id
-    cls: int
-    bbox_norm: tuple = (0.0, 0.0, 0.0, 0.0)     # (x,y,w,h) normalized
-    status: str = "LOST"                          # TRACKING | SEARCHING | LOST
-    frames_since_seen: int = 0
-    last_velocity: tuple = (0.0, 0.0)
-    selected: bool = False                        # True if this is the user-selected target
-
-
-@dataclass
-class ScheduledTile:
-    """One tile emitted by the scheduler, with metadata for the viewer and budget logic."""
-    crop: CropRect
-    category: str        # "dynamic" | "dynamic-merged" | "multi-scale" | "single-scale"
-    target_keys: tuple   # ((cls, track_id), ...) — empty tuple for discovery/recovery tiles
+This module re-exports the public API so legacy `from dynamic_tiling.types import …`
+imports keep working during the migration. Remove this shim in Plan 8
+(drone-follow migration) once all callers move to hailo_tiling.
+"""
+from hailo_tiling.types import (  # noqa: F401
+    MODEL_W,
+    MODEL_H,
+    MODEL_ASPECT,
+    CropRect,
+    Det,
+    LockState,
+    TargetState,
+    ScheduledTile,
+)
