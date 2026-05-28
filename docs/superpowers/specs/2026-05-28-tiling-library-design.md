@@ -22,7 +22,7 @@ Secondary goal: the library should be **reusable** — both as a pure-Python sta
 - Library scaffold (`hailo_tiling/` top-level package in this repo)
 - Emitter+Modifier scheduler architecture (Variant B)
 - `TelemetryProvider` ABC + `MavsdkTelemetry` + `StaticTelemetry` + `RecordedTelemetry`
-- `InferenceBackend` ABC + `HefBackend` (existing), `GstCropperBackend` (new), `MockBackend` (replay)
+- `InferenceBackend` ABC + `HefBackend` (existing), `GstCropperBackend` (new), `CachingBackend` (decorator), `ReplayBackend` (chip-free replay from cache)
 - Aggregator with composable `BoundaryStripFilter` and a `DetectionMemory` interface (no-op default in v1; functional carry-forward implementation deferred to v2)
 - Ablation harness CLI (`hailo-tiling-bench`) — sweeps a matrix and emits per-config `frames.json`
 - Detiler-plugin metadata patch (separate PR in `hailo-apps-core`): per-detection CropRect provenance + ROI list pass-through
@@ -74,7 +74,13 @@ hailo_tiling/
     backend.py         # InferenceBackend ABC
     hef.py             # HefBackend (direct HailoRT; lifted from dynamic_tiling/inference.py)
     gst_cropper.py     # GstCropperBackend (drives hailotilecropper_dynamic)
-    mock.py            # MockBackend (replays frames.json; fast ablation, no chip needed)
+    caching.py         # CachingBackend (decorator; SQLite-backed tile-level cache)
+    replay.py          # ReplayBackend (cache-only; raises on miss; for chip-free runs)
+  cache/
+    __init__.py
+    store.py           # SqliteCacheStore (open, get, put_many, vacuum, stats)
+    schema.sql         # CREATE TABLE statements, schema_version constant
+    hashing.py         # file SHA-256, crop-rect canonicalisation
   tracking/
     __init__.py
     tracker.py         # Tracker ABC, TrackState
@@ -140,7 +146,7 @@ Each field is `Optional` so consumers can gracefully degrade when a stream is mi
 
 ### 3.4 Inference backend boundary
 
-`InferenceBackend.infer(frame, crops) → list[list[Det]]` is the seam between policy (scheduler) and mechanism (HailoRT call / GStreamer plugin). `MockBackend` lets the ablation harness replay a previously-recorded `frames.json` against new aggregator/modifier combinations *without re-running the chip* — important for fast lever-by-lever ablation.
+`InferenceBackend.infer(frame, crops) → list[list[Det]]` is the seam between policy (scheduler) and mechanism (HailoRT call / GStreamer plugin). The cache (Section 7) is a `CachingBackend` decorator over any concrete backend: it transparently serves cached crops and forwards misses to the wrapped backend, so the same scheduler code runs cache-only, cache-warming, or live without changes. `ReplayBackend` is the chip-free path used in CI and by external reviewers downloading the published cache.
 
 ### 3.5 GStreamer integration
 
@@ -203,10 +209,134 @@ The Python `Aggregator` consumes that metadata and runs NMS / boundary-strip / m
 Three layers:
 
 1. **Unit tests** (`tests/`) for every emitter, modifier, aggregator stage, and telemetry implementation. Each emitter has a "no telemetry" test (degraded mode) and a "happy path" test. The current `dynamic_tiling/tests/` is the seed.
-2. **Replay-based integration tests** using `MockBackend` over a fixed `frames.json` and a fixed `TrackState` trace. Fast (< 5 s for a full ablation matrix), no chip required, runs in CI.
+2. **Replay-based integration tests** using `ReplayBackend` against a small committed reference cache (covers a handful of frames + crops). Fast (< 5 s for a full ablation matrix), no chip required, runs in CI.
 3. **Hardware acceptance test** — one canonical config + one ablation row run end-to-end against a known HEF + video, asserting per-target recall lands within a tolerance of the recorded reference. Not in CI; runs on the dev RPi via a separate `make accept` target.
 
-## 7. Ablation Harness
+## 7. Inference Cache
+
+Re-running inference for every ablation row is wasteful: most tiles (especially the discovery-grid full-frame tiles) are deterministic functions of `(video, frame_idx, crop_rect, hef)` and produce byte-identical detections every run. A tile-level cache lets us pay the inference cost once per unique `(video, hef, crop)` tuple and then ablate aggregator/modifier/policy choices for free.
+
+### 7.1 Goals
+
+- **Hit the chip at most once per unique crop, per HEF, per video.** Re-runs of the same matrix are free; new matrices that share tiles with old ones inherit the hits.
+- **Be the same code path whether or not the cache exists.** No `if cache: ... else: ...` branches in policy code — `CachingBackend` wraps any `InferenceBackend` and is invisible to the scheduler.
+- **Be distributable.** A single file (per video × HEF) we can upload to Zenodo / S3 alongside the paper, so reviewers without a Hailo chip can reproduce every ablation row by running `ReplayBackend` over the published cache.
+- **Be inspectable.** A regular SQLite file. `sqlite3 cache.db "SELECT COUNT(*) FROM detections;"` should just work.
+
+### 7.2 Storage format — SQLite (one file per (video, HEF) pair)
+
+```
+.tile_cache/
+  <video_sha256[:16]>__<hef_sha256[:16]>.sqlite3
+  index.json          # human-readable: filename → {video_path, hef_path, video_info, hef_info, schema_version, n_rows}
+```
+
+Schema (single table, `WITHOUT ROWID` for fast point lookups; composite primary key):
+
+```sql
+PRAGMA user_version = 1;        -- schema_version; bump on breaking change
+PRAGMA journal_mode = WAL;       -- safe concurrent reads while a row is warming the cache
+
+CREATE TABLE detections (
+  frame_idx    INTEGER NOT NULL,
+  crop_x       INTEGER NOT NULL,
+  crop_y       INTEGER NOT NULL,
+  crop_w       INTEGER NOT NULL,
+  crop_h       INTEGER NOT NULL,
+  ppv          INTEGER NOT NULL,        -- post-process version (incremented when post-proc changes)
+  dets_json    TEXT    NOT NULL,        -- JSON array of {cls, score, x, y, w, h} (tile-local normalized)
+  ts_epoch     REAL    NOT NULL,        -- when this row was written (debugging / cache age)
+  PRIMARY KEY (frame_idx, crop_x, crop_y, crop_w, crop_h, ppv)
+) WITHOUT ROWID;
+
+CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- meta keys: schema_version, video_sha256, video_path, video_fps, video_w, video_h,
+--            hef_sha256, hef_path, hef_input_shape, score_floor, created_at, hailort_version
+```
+
+**Key decisions:**
+
+- **One DB per (video, HEF) pair.** `video_sha` and `hef_sha` are *implicit* in the filename, not columns, which keeps rows small and lookups index-only. A single cache directory can hold many files.
+- **`dets_json` is TEXT.** Human-inspectable, gzip-compresses well at the SQLite page level, and a typical entry is < 1 KB. We can switch to MessagePack BLOB if size becomes a problem (estimated < 3 GB for a 30-min 30 fps video × 10 crops/frame; acceptable).
+- **`ppv` (post-process version) in the key.** When we change post-processing (e.g., a different on-chip NMS variant or score-floor threshold), bump `ppv`; old entries coexist and we re-compute new ones.
+- **Score floor, not score threshold.** Cache at a low floor (default 0.01) so threshold ablations are served from cache. The aggregator applies the operating threshold at retrieval time.
+
+### 7.3 Crop-rect canonicalisation
+
+Cache hits require *exact* equality of `(crop_x, crop_y, crop_w, crop_h)` — a 1-pixel shift would change the input image and the detections. Two safeguards:
+
+- **Deterministic emitters.** Every emitter must produce integer-clamped CropRects given the same inputs (this is already true of `dynamic_tiling/scheduler.py:_grid` and `_roi`). The `CropRect.from_center_width` constructor already rounds.
+- **Optional quantisation (off by default).** `CachingBackend(quantise=4)` rounds `(x, y, w, h)` to multiples of 4 px before key lookup. Increases hit rate when an emitter's float→int rounding is unstable across runs. Documented as a "slightly fuzzy" mode; the unquantised default is the paper-correct one.
+
+### 7.4 Flow
+
+```
+                       ┌─────────────────────────────┐
+  Scheduler emits ───▶ │ CachingBackend.infer        │
+  list[CropRect]       │   crops → split into        │
+                       │     hits (from SQLite)      │
+                       │     misses (forward)        │
+                       └────┬───────────────┬────────┘
+                            │ hits          │ misses
+                            ▼               ▼
+                       (cached dets)   wrapped.infer(frame, misses)
+                                            │
+                                            ▼
+                                       store new (crop, dets)
+                                            │
+                            ┌───────────────┘
+                            ▼
+                       merge in original order ─▶ list[list[Det]]
+```
+
+A single SQLite transaction commits all new rows per `infer()` call. The cache layer is a < 200-line `SqliteCacheStore` plus the `CachingBackend` wrapper.
+
+### 7.5 Cache warming (`hailo-tiling-warm-cache`)
+
+A standalone CLI pre-computes a cache for a fixed crop set. Typical use:
+
+```bash
+# Warm dense-grid baselines for one video + HEF (run once, ~6 min for a 30-min clip):
+hailo-tiling-warm-cache --video v.mp4 --hef yolov8n.hef \
+    --grid 1x1 --grid 2x2 --grid 3x2 --grid 4x3 --grid 6x4 \
+    --cache .tile_cache/
+
+# Now any ablation row that uses any of those discovery grids hits the cache:
+hailo-tiling-bench --matrix matrix.yaml --video v.mp4 --hef yolov8n.hef \
+    --cache .tile_cache/  # transparent; CachingBackend is wired automatically
+```
+
+For dynamic ROI tiles (whose CropRect varies with track state), the cache fills opportunistically — first run pays the inference cost, subsequent ablation rows over the same matrix benefit.
+
+### 7.6 Replay-only mode (chip-free reproducibility)
+
+`ReplayBackend` raises on cache miss. Used in CI (where the runner has no Hailo) and by external reviewers reproducing the paper:
+
+```bash
+# Download the published cache (single tar, ~100 MB after gzip on the reference clip):
+scripts/fetch_reference_cache.sh
+# Reproduce the ablation table without any Hailo hardware:
+hailo-tiling-bench --matrix matrix.yaml --video reference.mp4 --hef reference.hef \
+    --cache .tile_cache/ --backend replay
+```
+
+This is a direct paper-with-code reproducibility win: the cache file is the experimental record.
+
+### 7.7 Cache lifecycle
+
+- **No automatic eviction.** Cache grows until `rm -rf .tile_cache/`. Document size (< 100 MB / 5-min clip / 4 grids is the working budget).
+- **HEF or video change → new file.** Old caches stay on disk until manually pruned; `hailo-tiling-cache prune --older-than 30d` is a v2 nicety.
+- **Schema migration.** `user_version` is checked on open; mismatched schema → reject the file with a clear error message. We don't auto-migrate in v1.
+- **Concurrent writers.** WAL mode is safe; we still document "one bench process at a time per cache file" for clarity, and the harness takes an advisory file lock.
+- **Determinism check (CI).** A small test runs `HefBackend` twice on the same crop and asserts byte-identical results. If a future HEF flavour proves non-deterministic, we'll need a hash-stability assertion or a switch to "first writer wins" semantics.
+
+### 7.8 Why not `frames.json`?
+
+The existing per-config `frames.json` outputs are frame-level (after merge / NMS / boundary-strip). They're not reusable across configs because they bake in aggregator choices. The cache is one level deeper — tile-local, pre-aggregator — and is the *right* granularity for "compute once, ablate many."
+
+`frames.json` stays as the per-config output format consumed by `analyze_pxt.py` and `overlay_viewer.py`. The cache feeds the aggregator; the aggregator writes `frames.json`.
+
+## 8. Ablation Harness
 
 `hailo-tiling-bench` reads a YAML matrix:
 
@@ -226,19 +356,19 @@ rows:
 
 For each row: runs the configured scheduler over a fixed video + telemetry trace, emits `runs/<name>/frames.json` + `runs/<name>/metadata.json` (lever list, git SHA, video hash). At the end, scores all rows against the GT trajectory and writes `runs/ablation_table.md` (and `.csv` for plotting). The table is what the paper reports.
 
-A second mode runs the ablation entirely on `MockBackend` against a previously-recorded backend output — this lets us ablate aggregator/modifier changes in seconds without booking the chip.
+When the cache (Section 7) is warm, the harness transparently serves all hits from disk — a full ablation matrix re-run takes seconds instead of minutes, and ablating aggregator/modifier choices on the same cropper output requires no chip access at all.
 
-## 8. Paper-with-Code Release Workflow
+## 9. Paper-with-Code Release Workflow
 
 This is a first-class deliverable in v1, not a polish step.
 
 **License:** Apache 2.0. Matches `hailo-apps-core` and `hailo-apps-infra`; commercial-friendly; standard for ML-with-code releases.
 
 **Reproducibility recipe:**
-- One reference video + one reference HEF + one reference telemetry trace, all referenced by SHA-256 in the repo (downloaded by `scripts/fetch_reference_data.sh`).
+- One reference video + one reference HEF + one reference telemetry trace + one pre-computed **inference cache** (Section 7), all referenced by SHA-256 in the repo (downloaded by `scripts/fetch_reference_data.sh`).
 - Public reference video: a clip from a CC-licensed aerial dataset (candidates: VisDrone-MOT, SeaDronesSee). The proprietary DJI footage we use today stays internal; the public ablation table uses the public clip so anyone can reproduce.
-- `make ablation` runs the full matrix on the reference data and regenerates `runs/ablation_table.md`. Expected runtime documented (target: < 30 min on a Hailo-8L RPi5).
-- All randomness seeded; tile-order deterministic.
+- `make ablation` runs the full matrix on the reference data and regenerates `runs/ablation_table.md`. With the published cache + `ReplayBackend`, this runs on any laptop in minutes — no Hailo hardware needed. With `HefBackend` + an empty cache, expected runtime is < 30 min on a Hailo-8L RPi5.
+- All randomness seeded; tile-order deterministic; cache file SHA published alongside the table so anyone can verify their replay matches the paper.
 
 **Technical report (`docs/paper/technical-report.md`):**
 - Sections: Introduction & related work (mostly already drafted in `docs/research/2026-05-27-...`); the budget framing; the Emitter+Modifier architecture; the lever catalogue; the ablation table; discussion; limitations; references.
@@ -247,11 +377,11 @@ This is a first-class deliverable in v1, not a polish step.
 
 **Citation:** Repo `README.md` carries a citation block; the repo is registered on Zenodo for a DOI. `CITATION.cff` at repo root.
 
-**CI:** A GitHub Actions / GitLab CI job runs the `MockBackend` ablation matrix on every PR — verifies the harness keeps working and the ablation table renders. Hardware ablation runs nightly on the dev RPi outside CI.
+**CI:** A GitHub Actions / GitLab CI job runs the `ReplayBackend` ablation matrix on every PR (against a small committed-to-repo reference cache subset) — verifies the harness keeps working and the ablation table renders. Hardware ablation runs nightly on the dev RPi outside CI and refreshes the published cache.
 
 **Public-API stability:** every class exported from `hailo_tiling.__init__` is marked stable; experimental things live in `hailo_tiling.experimental`. The detiler-plugin patch is versioned independently in `hailo-apps-core`.
 
-## 9. Phases
+## 10. Phases
 
 The implementation plan (next step after this spec) will decompose into these phases:
 
@@ -259,23 +389,25 @@ The implementation plan (next step after this spec) will decompose into these ph
 2. **Refactor scheduler to Emitter+Modifier** — extract current `_grid`, `_roi`, recovery logic into `DiscoveryGridEmitter`, `TrackROIEmitter`, `RecoveryGridEmitter`; introduce `BudgetTrimModifier`.
 3. **Telemetry layer** — `TelemetryProvider` ABC + the three implementations.
 4. **Two new modifiers** — `AdaptiveSliceSizingModifier` (ASAHI) and `AltitudeZoomModifier` (validates that telemetry flows correctly).
-5. **Backends + Aggregator extraction** — `InferenceBackend` ABC, `MockBackend`, lift `BoundaryStripFilter` into the Aggregator.
-6. **Ablation harness** — `hailo-tiling-bench` CLI + YAML schema + replay mode.
-7. **Detiler-plugin patch** — separate PR to `hailo-apps-core` adding metadata hooks (parallelisable with phases 1-6).
-8. **Paper-with-code artifacts** — license, README, citation, technical-report skeleton, reference-data fetcher, ablation table generation.
-9. **Drone-follow migration** — switch `drone_follow/pipeline_adapter/` over to `GstCropperBackend` for the live pipeline. Tracker subpackage stays minimal; ByteTracker keeps current behaviour.
+5. **Backends + Aggregator extraction** — `InferenceBackend` ABC, lift `BoundaryStripFilter` into the Aggregator.
+6. **Inference cache** — `SqliteCacheStore`, `CachingBackend`, `ReplayBackend`, `hailo-tiling-warm-cache` CLI; determinism CI test. Unlocks fast ablation iteration for all subsequent phases.
+7. **Ablation harness** — `hailo-tiling-bench` CLI + YAML schema; consumes the cache transparently via `CachingBackend`.
+8. **Detiler-plugin patch** — separate PR to `hailo-apps-core` adding metadata hooks (parallelisable with phases 1-7).
+9. **Paper-with-code artifacts** — license, README, citation, technical-report skeleton, reference-data + cache fetcher, ablation table generation.
+10. **Drone-follow migration** — switch `drone_follow/pipeline_adapter/` over to `GstCropperBackend` for the live pipeline. Tracker subpackage stays minimal; ByteTracker keeps current behaviour.
 
-## 10. Open Questions
+## 11. Open Questions
 
 - **Public reference data:** which CC-licensed aerial clip do we settle on? Resolved as part of Phase 8; doesn't block Phases 1-6.
 - **Detiler-plugin upstream timeline:** if `hailo-apps-core` maintainers are slow to take the patch, do we vendor the modified plugin temporarily? Default plan: live with the Python-pad-probe fallback until merged.
 - **YAML vs Python config for the ablation matrix:** spec assumes YAML for ease of paper reproducibility; can switch to a Python `@dataclass` matrix if it proves clunky.
 
-## 11. Success Criteria
+## 12. Success Criteria
 
 - All v1 emitters and modifiers covered by unit tests.
 - `hailo-tiling-bench` produces a reproducible ablation table from one command.
 - The table includes (at minimum): static-baseline, current `dynamic_tiling` config, +ASAHI, +altitude-zoom — measured on both the proprietary clip and the public reference clip.
 - The library installs cleanly without MAVSDK present.
+- **Inference cache delivers what it promises:** a fully-warmed cache makes a full ablation matrix re-run complete in seconds on a chip-free laptop; cache hit-rate is > 95% on repeated runs of the same matrix.
 - `drone-follow` runs on the RPi using `GstCropperBackend` with at least parity on the existing per-target recall metric.
 - `docs/paper/technical-report.md` has a complete first draft suitable for internal review.
