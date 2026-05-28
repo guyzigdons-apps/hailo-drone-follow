@@ -476,6 +476,8 @@ The `full_frame` mode (Section 7.8) produces a SQLite file with one row per fram
 
 **Interactive visualizer (`hailo-tiling-view`).** Frame-by-frame stepper that renders source frame + tile rectangles + detections + (optionally) tracker state. Designed to be the successor to `tiling_benchmark/overlay_viewer.py`; reads from `flight_record.sqlite3` so it works without chip access for any recorded run. Drone-follow's existing web UI can adopt the same data layer for post-flight review.
 
+**Recording from the interactive view.** `hailo-tiling-view` exposes a "record" affordance — a UI button / hotkey that captures the current playback (with whatever overlay layers are toggled on: detection boxes, tile rectangles, track IDs, telemetry, distance-to-target) to an annotated MP4. The same export is available headlessly via a `--record-out PATH` CLI flag (plus `--overlays bbox,tiles,telemetry` to select layers), so the visualizer can be driven from CI / scripts without opening the UI. This unifies the interactive review and the batch overlay flows: the user picks overlays interactively, then exports the same view to a shareable video. `hailo-tiling-overlay` remains the lower-level batch CLI for pure-script use (no UI bootstrap cost); `hailo-tiling-view --record-out` is the convenience layer.
+
 Both consumers operate on **per-frame source-coord data**, so they require nothing from the tile-cache SQLite — full-frame and tile-cache files are independent artifacts of the same flight.
 
 ### 7.13 Why not `frames.json`?
@@ -715,6 +717,7 @@ The implementation plan (next step after this spec) will decompose into these ph
 - The table includes (at minimum): static-baseline, current `dynamic_tiling` config, +ASAHI, +altitude-zoom — measured on both the proprietary clip and the public reference clip.
 - **`prepare_video.py --emit-fov` is deterministic** — two runs of the same source produce byte-identical 4K output files (so cache keys match across runs).
 - **Visualizer + overlay renderer work without chip access** — given any `flight_record.sqlite3` + matching source video, `hailo-tiling-view` and `hailo-tiling-overlay` produce annotated views on a laptop.
+- **`hailo-tiling-view` can record playback to an annotated MP4** from both the UI ("record" button / hotkey) and the CLI (`--record-out PATH`), capturing whatever overlay layers are currently selected.
 - The library installs cleanly without MAVSDK present.
 - **Inference cache delivers what it promises:** a fully-warmed cache makes a full ablation matrix re-run complete in seconds on a chip-free laptop; cache hit-rate is > 95% on repeated runs of the same matrix.
 - **GStreamer cache plugins meet the latency bar:** `hailodet_record` adds < 100 μs to the streaming-thread pad probe in steady state; `hailonet_cache` lookups are < 1 ms / crop (vs ~30–40 ms for live `hailonet`), measured by a microbench shipped with each plugin.
