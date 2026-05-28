@@ -65,15 +65,20 @@ class TileScheduler:
             ecx = bx + bw / 2 + lock.last_velocity[0] * lock.frames_since_seen
             ecy = by + bh / 2 + lock.last_velocity[1] * lock.frames_since_seen
             span = self.recovery_span
-            x0 = max(0.0, ecx - span / 2) * self.src_w
-            y0 = max(0.0, ecy - span / 2) * self.src_h
+            half = span / 2
+            x0_n = max(0.0, min(1.0 - span, ecx - half))
+            y0_n = max(0.0, min(1.0 - span, ecy - half))
+            x0 = x0_n * self.src_w
+            y0 = y0_n * self.src_h
             crops = self._grid(gx, gy, x0, y0, span * self.src_w, span * self.src_h, "s")
         else:
+            # ROI first so a tight budget keeps the locked-target tile and
+            # drops discovery tiles from the tail, not the other way around.
+            if lock.status == "TRACKING":
+                crops.append(self._roi(lock))
             if on_cadence:
                 gx, gy = self.discovery_grid
                 crops += self._grid(gx, gy, 0, 0, self.src_w, self.src_h, "m")
-            if lock.status == "TRACKING":
-                crops.append(self._roi(lock))
 
         budget = int(meter.available(frame_idx))
         if budget >= 0 and len(crops) > budget:

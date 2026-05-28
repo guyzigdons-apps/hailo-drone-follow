@@ -74,3 +74,38 @@ def test_discovery_grid_covers_full_frame():
     assert max(c.x + c.w for c in crops) == 4000
     assert min(c.y for c in crops) == 0
     assert max(c.y + c.h for c in crops) == 3000
+
+
+def test_tight_budget_keeps_roi_drops_discovery():
+    sched = TileScheduler(src_w=4000, src_h=3000, discovery_period=1,
+                          discovery_grid=(3, 2), max_zoom=2.0, target_model_h=40)
+    lock = LockState(track_id=7, bbox_norm=(0.50, 0.50, 0.05, 0.10),
+                     status="TRACKING")
+    # Budget allows only ~1 tile/frame. Discovery alone is 6 tiles.
+    tight = BudgetMeter(budget_inf_per_s=30, fps=30, window_s=1.0)
+    crops = sched.decide(lock, frame_idx=0, meter=tight)
+    assert len(crops) == 1
+    # The surviving crop must be the ROI: scale >= 1.0 (zoom-in or native),
+    # centred near the target. A discovery cell over a 4000x3000 frame would
+    # have scale < 1 (cw ~ 1333 -> scale 0.48 / or cw=2000 -> scale 0.32).
+    assert crops[0].scale >= 1.0
+
+
+def test_recovery_grid_stays_inside_frame_at_right_edge():
+    sched = TileScheduler(src_w=4000, src_h=3000, discovery_period=15,
+                          recovery_grid=(3, 3), recovery_span=0.4)
+    # Last-known at right edge + large rightward velocity over 5 frames pushes
+    # the extrapolated centre well past the right edge.
+    lock = LockState(track_id=7, bbox_norm=(0.95, 0.50, 0.05, 0.10),
+                     status="SEARCHING", frames_since_seen=5,
+                     last_velocity=(0.05, 0.0))
+    crops = sched.decide(lock, frame_idx=1, meter=_meter())
+    assert len(crops) == 3 * 3
+    # All tile centres must lie inside the frame.
+    for c in crops:
+        cx = c.x + c.w / 2
+        cy = c.y + c.h / 2
+        assert 0 <= cx <= 4000
+        assert 0 <= cy <= 3000
+    # The recovery region's right edge must not exceed src_w.
+    assert max(c.x + c.w for c in crops) <= 4000
