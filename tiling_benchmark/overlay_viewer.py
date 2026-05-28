@@ -994,9 +994,10 @@ class OverlayViewer:
         # orange vehicle). Single-scale rescue tiles in white-yellow.
         # Dynamic tiles (future per-frame attachments) in lime green.
         CAT_COLOURS = {
-            "multi-scale":  (255, 200, 0),    # cyan-ish blue (BGR)
-            "single-scale": (0, 255, 255),    # yellow (BGR)
-            "dynamic":      (0, 255, 100),    # lime green (BGR)
+            "multi-scale":    (255, 200, 0),    # cyan-ish blue (BGR)
+            "single-scale":   (0, 255, 255),    # yellow (BGR)
+            "dynamic":        (0, 255, 100),    # lime green (BGR)
+            "dynamic-merged": (255, 0, 200),    # magenta (BGR)
         }
         DEFAULT_TILE_COLOUR = (255, 255, 255)
         drawn = 0

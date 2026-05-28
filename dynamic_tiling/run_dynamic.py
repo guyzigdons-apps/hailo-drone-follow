@@ -57,6 +57,12 @@ def main():
                     help="Use multi-target dynamic tiling (v2) instead of single-target (v1).")
     ap.add_argument("--target-classes", default="0,1",
                     help="Comma-separated class ids for multi-target mode (default: 0,1).")
+    ap.add_argument("--merge-iou-threshold", type=float, default=0.5,
+                    help="Padded det IoU threshold for ROI merge (default: 0.5).")
+    ap.add_argument("--merge-pad-frac", type=float, default=0.25,
+                    help="Padding fraction applied to each bbox before IoU (default: 0.25).")
+    ap.add_argument("--merge-union-inflate-max", type=float, default=1.5,
+                    help="Max ratio union crop_w / max(crop_w_a, crop_w_b) (default: 1.5).")
     args = ap.parse_args()
 
     cap = cv2.VideoCapture(str(args.video))
@@ -77,7 +83,10 @@ def main():
         scheduler = MultiTargetTileScheduler(src_w, src_h,
                                              discovery_period=discovery_period,
                                              max_zoom=args.max_zoom,
-                                             target_model_h=args.target_model_h)
+                                             target_model_h=args.target_model_h,
+                                             merge_iou_threshold=args.merge_iou_threshold,
+                                             merge_pad_frac=args.merge_pad_frac,
+                                             merge_union_inflate_max=args.merge_union_inflate_max)
         lock = MultiTargetLock(target_classes=target_classes,
                                track_buffer=int(args.fps))
         try:

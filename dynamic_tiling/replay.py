@@ -105,57 +105,53 @@ def run_multi(frames, src_w: int, src_h: int,
     Feeds all allowed-class dets to the lock, asks the scheduler for
     per-target ROIs, and records the selected target's bbox in pred_traj
     (same schema as run() for score_run compatibility).
+
+    GT bbox is passed every frame while lock.selected_key is None — the
+    lock's internal guard prevents double-seeding.  This fixes the Phase 1
+    deviation where the GT seed fired on frame 0 before ByteTracker had
+    activated any tracks.
     """
     res = RunResult()
-    gt_seeded = False
     frame_idx = -1
 
     for frame_idx, frame in enumerate(frames):
         # Build current target list from lock state (empty on frame 0).
         current_targets = [s for s in lock.targets.values()
                            if s.status != "LOST"]
-        crops = scheduler.decide(current_targets, frame_idx, meter)
-        meter.charge(len(crops), frame_idx)
-        res.total_tiles += len(crops)
+
+        # Inform the scheduler which target is selected (for always-served logic).
+        scheduler.set_selected(lock.selected_key)
+
+        # scheduler.decide() now returns list[ScheduledTile].
+        scheduled = scheduler.decide(current_targets, frame_idx, meter)
+        meter.charge(len(scheduled), frame_idx)
+        res.total_tiles += len(scheduled)
 
         # Inference over all requested crops.
         dets = []
-        for crop in crops:
-            local = backend.infer(frame, crop, frame_idx)
-            dets += map_to_source(local, crop, src_w, src_h)
+        for tile in scheduled:
+            local = backend.infer(frame, tile.crop, frame_idx)
+            dets += map_to_source(local, tile.crop, src_w, src_h)
         dets = nms(dets, iou_thr=0.5)
         res.frame_dets[frame_idx] = dets
 
         # Feed all allowed-class dets to the multi-target lock.
+        # Pass gt_bbox_norm every frame while selected_key is None so the
+        # lock can seed as soon as ByteTracker activates the first track.
         dets_for_lock = [d for d in dets if d.cls in lock.target_classes]
         gt_box = gt_traj.get(frame_idx)
-        if not gt_seeded and gt_box is not None:
+        if lock.selected_key is None and gt_box is not None:
             targets = lock.step(dets_for_lock,
                                 gt_bbox_norm=gt_box, gt_cls=gt_cls)
-            gt_seeded = True
         else:
             targets = lock.step(dets_for_lock)
 
-        # Determine if we are in recovery mode (selected target is SEARCHING/LOST).
-        is_recovery = any(
-            s.selected and s.status in ("SEARCHING", "LOST")
-            for s in targets
-        )
-
-        # Tag crops with visualization categories.
+        # Tag tiles with visualization categories (scheduler provides them).
         tagged: list = []
-        if is_recovery:
-            for c in crops:
-                tagged.append((c.x / src_w, c.y / src_h,
-                               c.w / src_w, c.h / src_h, "single-scale"))
-        else:
-            for c in crops:
-                if c.mode == "m":
-                    cat = "multi-scale"
-                else:
-                    cat = "dynamic"
-                tagged.append((c.x / src_w, c.y / src_h,
-                               c.w / src_w, c.h / src_h, cat))
+        for tile in scheduled:
+            tagged.append((tile.crop.x / src_w, tile.crop.y / src_h,
+                           tile.crop.w / src_w, tile.crop.h / src_h,
+                           tile.category))
         res.frame_tiles[frame_idx] = tagged
 
         # Record selected target bbox for single-target scoring compatibility.

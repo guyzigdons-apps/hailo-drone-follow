@@ -70,3 +70,11 @@ class TargetState:
     frames_since_seen: int = 0
     last_velocity: tuple = (0.0, 0.0)
     selected: bool = False                        # True if this is the user-selected target
+
+
+@dataclass
+class ScheduledTile:
+    """One tile emitted by the scheduler, with metadata for the viewer and budget logic."""
+    crop: CropRect
+    category: str        # "dynamic" | "dynamic-merged" | "multi-scale" | "single-scale"
+    target_keys: tuple   # ((cls, track_id), ...) — empty tuple for discovery/recovery tiles

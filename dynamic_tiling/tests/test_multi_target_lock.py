@@ -60,3 +60,29 @@ def test_multi_target_lock_loses_track_after_buffer():
     # step() returns only non-LOST states; so either empty OR contains LOST.
     alive = [s for s in last_states if s.status != "LOST"]
     assert len(alive) == 0
+
+
+def test_multi_target_lock_seeds_selected_after_track_activation():
+    """GT-seed fix regression: selected_key must be set eventually even when
+    ByteTracker needs a frame or two to activate its first track."""
+    lock = MultiTargetLock(target_classes={0, 1})
+    p = Det(cls=0, score=0.9, x=0.40, y=0.40, w=0.08, h=0.20)
+    gt_bbox = (0.40, 0.40, 0.08, 0.20)
+
+    # Frame 0: ByteTracker may not activate yet — that's OK.
+    lock.step([p], gt_bbox_norm=gt_bbox, gt_cls=0)
+
+    # Frames 1-3: keep feeding same detection + GT every frame (mimics
+    # the fixed run_multi which passes gt_bbox_norm each frame while
+    # selected_key is None).
+    for _ in range(3):
+        if lock.selected_key is None:
+            lock.step([p], gt_bbox_norm=gt_bbox, gt_cls=0)
+        else:
+            lock.step([p])
+
+    # By frame 3 the track must be activated and selected.
+    assert lock.selected_key is not None, (
+        "selected_key should be set within 4 frames once detection is stable"
+    )
+    assert lock.selected_key[0] == 0, "selected target must be class 0 (person)"
