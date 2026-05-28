@@ -1,45 +1,37 @@
+"""Compatibility shim: backends live in hailo_tiling.backends.
+
+`HefBackend` is the same class as `hailo_tiling.backends.hef.HefBackend`.
+`ReplayBackend` is kept here as a legacy single-crop helper used by
+`dynamic_tiling.tests.test_inference`. The Plan-1-style per-crop API
+(infer(frame, crop, frame_idx)) is preserved exactly.
+
+This shim disappears in Plan 8 (drone-follow migration) once all callers
+move to hailo_tiling.
+"""
 from __future__ import annotations
 
 from typing import Protocol
 
-import cv2
-import numpy as np
+from hailo_tiling.backends.hef import HefBackend  # noqa: F401
 
-from .types import CropRect, MODEL_W, MODEL_H
+from .types import CropRect
 
 
 class InferenceBackend(Protocol):
-    def infer(self, frame: np.ndarray, crop: CropRect, frame_idx: int) -> list:
-        """Return crop-local normalized detections (.cls .x .y .w .h .score)."""
+    """Legacy single-crop protocol; preserved for dynamic_tiling callers."""
+
+    def infer(self, frame, crop: CropRect, frame_idx: int) -> list:  # noqa: D401
         ...
 
 
 class ReplayBackend:
-    """Deterministic backend: returns canned crop-local dets for tests.
+    """Legacy deterministic backend keyed on (frame_idx, (x, y, w, h)).
 
-    `canned` maps (frame_idx, (x,y,w,h)) -> list of objects exposing
-    .cls .x .y .w .h .score (crop-local normalized)."""
+    Single-crop API. The batched ReplayBackend lands in Plan 4.
+    """
 
     def __init__(self, canned: dict):
         self._canned = canned
 
     def infer(self, frame, crop: CropRect, frame_idx: int) -> list:
         return list(self._canned.get((frame_idx, (crop.x, crop.y, crop.w, crop.h)), []))
-
-
-class HefBackend:
-    """Real on-chip backend wrapping tiling_benchmark HefHandle."""
-
-    def __init__(self, hef_path: str, nms_score_threshold: float = 0.25):
-        from probe_phantom_hef import HefHandle, decode_nms_output  # via _vendor_paths
-        self._handle = HefHandle.open(hef_path, nms_score_threshold=nms_score_threshold)
-        self._decode = decode_nms_output
-
-    def infer(self, frame, crop: CropRect, frame_idx: int) -> list:
-        sub = frame[crop.y:crop.y + crop.h, crop.x:crop.x + crop.w]
-        resized = cv2.resize(sub, (MODEL_W, MODEL_H), interpolation=cv2.INTER_LINEAR)
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        return self._decode(self._handle.infer(rgb))
-
-    def close(self) -> None:
-        self._handle.close()
