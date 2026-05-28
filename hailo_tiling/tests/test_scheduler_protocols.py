@@ -1,8 +1,6 @@
 """Validate the Protocol shapes and TileScheduler composition contract."""
 from __future__ import annotations
 
-from typing import Sequence
-
 from hailo_tiling.budget import BudgetMeter
 from hailo_tiling.scheduler import (
     TileEmitter,
