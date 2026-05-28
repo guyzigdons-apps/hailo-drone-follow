@@ -1,9 +1,9 @@
 import numpy as np
 from dynamic_tiling.types import CropRect
 from dynamic_tiling.budget import BudgetMeter
-from dynamic_tiling.scheduler import TileScheduler
-from dynamic_tiling.target_lock import TargetLock
-from dynamic_tiling.replay import run
+from dynamic_tiling.scheduler import TileScheduler, MultiTargetTileScheduler
+from dynamic_tiling.target_lock import TargetLock, MultiTargetLock
+from dynamic_tiling.replay import run, run_multi
 
 
 def test_replay_tracks_target_with_replay_backend():
@@ -110,3 +110,54 @@ def test_replay_records_per_frame_tagged_tiles():
             assert -1e-6 <= ty <= 1.0 + 1e-6
             assert tw > 0 and th > 0
             assert cat in ("dynamic", "multi-scale", "single-scale")
+
+
+def test_run_multi_records_per_target_rois():
+    src_w, src_h = 4000, 3000
+    n_frames = 6
+    # Two persons moving slightly.
+    gt_traj = {f: (0.40 + 0.01 * f, 0.40, 0.08, 0.20) for f in range(n_frames)}
+    person2 = {f: (0.70 + 0.005 * f, 0.50, 0.08, 0.20) for f in range(n_frames)}
+
+    class _TwoPersonBackend:
+        def infer(self, frame, crop: CropRect, frame_idx):
+            results = []
+            for traj in [gt_traj, person2]:
+                gx, gy, gw, gh = traj[frame_idx]
+                gcx = (gx + gw / 2) * src_w
+                gcy = (gy + gh / 2) * src_h
+                if not (crop.x <= gcx <= crop.x + crop.w and
+                        crop.y <= gcy <= crop.y + crop.h):
+                    continue
+                lx = (gcx - crop.x) / crop.w
+                ly = (gcy - crop.y) / crop.h
+                lw = gw * src_w / crop.w
+                lh = gh * src_h / crop.h
+                results.append(
+                    type("D", (), dict(cls=0, x=lx - lw / 2, y=ly - lh / 2,
+                                       w=lw, h=lh, score=0.9))()
+                )
+            return results
+
+    frames = [np.zeros((src_h, src_w, 3), np.uint8) for _ in range(n_frames)]
+    lock = MultiTargetLock(target_classes={0, 1})
+    sched = MultiTargetTileScheduler(src_w, src_h, discovery_period=2)
+    result = run_multi(
+        frames=frames, src_w=src_w, src_h=src_h,
+        scheduler=sched,
+        lock=lock,
+        backend=_TwoPersonBackend(),
+        meter=BudgetMeter(budget_inf_per_s=300, fps=30),
+        gt_traj=gt_traj,
+        gt_cls=0,
+    )
+    assert result.n_frames == n_frames
+    # After a couple of frames to establish tracks, expect >= 2 frames with "dynamic" tiles.
+    dynamic_frames = [
+        f for f in range(2, n_frames)
+        if any(t[4] == "dynamic" for t in result.frame_tiles.get(f, []))
+    ]
+    assert len(dynamic_frames) >= 2, (
+        f"expected >=2 frames with 'dynamic' tiles, got {len(dynamic_frames)}: "
+        f"{result.frame_tiles}"
+    )

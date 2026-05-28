@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Sequence, TYPE_CHECKING
 
 import numpy as np
 
 import dynamic_tiling  # noqa: F401  ensures _vendor_paths ran
 from drone_follow.pipeline_adapter.tracker_factory import create_tracker
 
-from .types import Det, LockState
+from .types import Det, LockState, TargetState
 
 _SCALE = 1000.0
 _REACQ_IOU = 0.3  # min IoU vs last-known bbox to (re)acquire a track
@@ -129,3 +129,85 @@ class TargetLock:
             s.status = "SEARCHING" if s.frames_since_seen <= self.track_buffer else "LOST"
         s.track_id = self.track_id
         return s
+
+
+class MultiTargetLock:
+    """Tracks ALL activated ByteTracker tracks across multiple classes.
+
+    One ByteTrackerAdapter per allowed class avoids cross-class IoU id
+    collisions.  A single ``selected_key`` (composite key ``(cls, track_id)``)
+    marks the user-selected target; it is set once via GT IoU matching and
+    never cleared automatically.
+    """
+
+    def __init__(self, target_classes=frozenset({0, 1}),
+                 track_buffer: int = 90, **tracker_kwargs):
+        self._trackers = {c: create_tracker("byte", track_buffer=track_buffer,
+                                            **tracker_kwargs)
+                          for c in target_classes}
+        self.target_classes: set = set(target_classes)
+        self.track_buffer = track_buffer
+        self.targets: dict = {}          # (cls, track_id) -> TargetState
+        self.selected_key: tuple | None = None
+
+    def step(self, dets: Sequence[Det], *,
+             gt_bbox_norm: tuple | None = None,
+             gt_cls: int | None = None) -> list:
+        """Feed one frame of detections; return non-LOST TargetStates."""
+        # --- 1. partition dets by class and run each tracker ---
+        active_keys: set = set()
+        for cls, tracker in self._trackers.items():
+            cls_dets = [d for d in dets if d.cls == cls]
+            tracks = tracker.update(dets_to_array(cls_dets))
+            for t in tracks:
+                if not t.is_activated or not t.filtered_tlwh:
+                    continue
+                key = (cls, t.track_id)
+                active_keys.add(key)
+                s = self.targets.get(key)
+                if s is None:
+                    s = TargetState(key=key, cls=cls)
+                    self.targets[key] = s
+                # velocity update (same rule as v1 TargetLock)
+                had_prev = s.frames_since_seen == 0 and s.bbox_norm[2] > 0
+                cx_old = (s.bbox_norm[0] + s.bbox_norm[2] / 2) if had_prev else None
+                cy_old = (s.bbox_norm[1] + s.bbox_norm[3] / 2) if had_prev else None
+                s.bbox_norm = tuple(t.filtered_tlwh)
+                cx_new = s.bbox_norm[0] + s.bbox_norm[2] / 2
+                cy_new = s.bbox_norm[1] + s.bbox_norm[3] / 2
+                if cx_old is not None:
+                    s.last_velocity = (cx_new - cx_old, cy_new - cy_old)
+                s.status = "TRACKING"
+                s.frames_since_seen = 0
+
+        # --- 2. age inactive tracks ---
+        for key, s in list(self.targets.items()):
+            if key not in active_keys:
+                s.frames_since_seen += 1
+                if s.frames_since_seen > self.track_buffer:
+                    s.status = "LOST"
+                elif s.status != "LOST":
+                    s.status = "SEARCHING"
+
+        # --- 3. GT-seeded selection (once only) ---
+        if self.selected_key is None and gt_bbox_norm is not None:
+            best_key, best_iou = None, _REACQ_IOU
+            for key, s in self.targets.items():
+                if s.status == "TRACKING":
+                    if gt_cls is not None and s.cls != gt_cls:
+                        continue
+                    iou = _iou_tlwh(gt_bbox_norm, s.bbox_norm)
+                    if iou > best_iou:
+                        best_iou, best_key = iou, key
+            if best_key is not None:
+                self.selected_key = best_key
+
+        # --- 4. propagate selected flag ---
+        for key, s in self.targets.items():
+            s.selected = (key == self.selected_key)
+
+        # --- 5. return non-LOST, sorted TRACKING first, selected first ---
+        alive = [s for s in self.targets.values() if s.status != "LOST"]
+        alive.sort(key=lambda s: (0 if s.status == "TRACKING" else 1,
+                                  0 if s.selected else 1))
+        return alive

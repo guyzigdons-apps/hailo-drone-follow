@@ -19,12 +19,12 @@ from pathlib import Path
 import cv2
 
 from .budget import BudgetMeter
-from .scheduler import TileScheduler
-from .target_lock import TargetLock
+from .scheduler import TileScheduler, MultiTargetTileScheduler
+from .target_lock import TargetLock, MultiTargetLock
 from .inference import HefBackend
 from .gt_track import build_target_trajectory
 from .score import score_run
-from .replay import run, emit_frames_json
+from .replay import run, run_multi, emit_frames_json
 
 
 def _frame_iter(cap, max_frames):
@@ -53,6 +53,10 @@ def main():
     ap.add_argument("--nms-thresh", type=float, default=0.25)
     ap.add_argument("--out", type=Path,
                     default=Path("dynamic_tiling/runs/dynamic_run.frames.json"))
+    ap.add_argument("--multi-target", action="store_true",
+                    help="Use multi-target dynamic tiling (v2) instead of single-target (v1).")
+    ap.add_argument("--target-classes", default="0,1",
+                    help="Comma-separated class ids for multi-target mode (default: 0,1).")
     args = ap.parse_args()
 
     cap = cv2.VideoCapture(str(args.video))
@@ -65,19 +69,34 @@ def main():
     gt_traj = build_target_trajectory(gt_doc, label="person", anchor="largest")
 
     discovery_period = max(1, int(round(args.fps / args.discovery_fps)))
-    scheduler = TileScheduler(src_w, src_h, discovery_period=discovery_period,
-                              max_zoom=args.max_zoom,
-                              target_model_h=args.target_model_h)
-    lock = TargetLock(frame_rate=int(args.fps))
     backend = HefBackend(args.hef, nms_score_threshold=args.nms_thresh)
     meter = BudgetMeter(budget_inf_per_s=args.budget, fps=args.fps)
 
-    try:
-        res = run(_frame_iter(cap, args.max_frames), src_w, src_h,
-                  scheduler, lock, backend, meter, gt_traj)
-    finally:
-        backend.close()
-        cap.release()
+    if args.multi_target:
+        target_classes = {int(c) for c in args.target_classes.split(",")}
+        scheduler = MultiTargetTileScheduler(src_w, src_h,
+                                             discovery_period=discovery_period,
+                                             max_zoom=args.max_zoom,
+                                             target_model_h=args.target_model_h)
+        lock = MultiTargetLock(target_classes=target_classes,
+                               track_buffer=int(args.fps))
+        try:
+            res = run_multi(_frame_iter(cap, args.max_frames), src_w, src_h,
+                            scheduler, lock, backend, meter, gt_traj, gt_cls=0)
+        finally:
+            backend.close()
+            cap.release()
+    else:
+        scheduler = TileScheduler(src_w, src_h, discovery_period=discovery_period,
+                                  max_zoom=args.max_zoom,
+                                  target_model_h=args.target_model_h)
+        lock = TargetLock(frame_rate=int(args.fps))
+        try:
+            res = run(_frame_iter(cap, args.max_frames), src_w, src_h,
+                      scheduler, lock, backend, meter, gt_traj)
+        finally:
+            backend.close()
+            cap.release()
 
     # Score only over frames actually played (matters when --max-frames is set);
     # otherwise recall denominator includes frames we never had a chance to detect on.

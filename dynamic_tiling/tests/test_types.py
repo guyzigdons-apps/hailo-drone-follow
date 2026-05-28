@@ -1,4 +1,4 @@
-from dynamic_tiling.types import CropRect, Det, LockState, MODEL_W, MODEL_H, MODEL_ASPECT
+from dynamic_tiling.types import CropRect, Det, LockState, TargetState, MODEL_W, MODEL_H, MODEL_ASPECT
 
 
 def test_model_constants():
@@ -22,3 +22,12 @@ def test_croprect_clamp_keeps_inside_bounds():
 def test_lockstate_defaults():
     s = LockState()
     assert s.track_id is None and s.status == "LOST" and s.frames_since_seen == 0
+
+
+def test_target_state_defaults():
+    ts = TargetState(key=(0, 1), cls=0)
+    assert ts.status == "LOST"
+    assert ts.frames_since_seen == 0
+    assert ts.selected is False
+    assert ts.bbox_norm == (0.0, 0.0, 0.0, 0.0)
+    assert ts.last_velocity == (0.0, 0.0)

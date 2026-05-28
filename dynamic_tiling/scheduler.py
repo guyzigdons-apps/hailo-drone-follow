@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .types import CropRect, LockState, MODEL_W, MODEL_H, MODEL_ASPECT
+from .types import CropRect, LockState, TargetState, MODEL_W, MODEL_H, MODEL_ASPECT
 
 
 class TileScheduler:
@@ -79,6 +79,97 @@ class TileScheduler:
             if on_cadence:
                 gx, gy = self.discovery_grid
                 crops += self._grid(gx, gy, 0, 0, self.src_w, self.src_h, "m")
+
+        budget = int(meter.available(frame_idx))
+        if budget >= 0 and len(crops) > budget:
+            crops = crops[:max(0, budget)]
+        return crops
+
+
+class MultiTargetTileScheduler:
+    """Emits one ROI per TRACKING target + recovery grid for the selected
+    target + discovery on cadence.  Phase 1: no merging, no aging counter.
+    """
+
+    def __init__(self, src_w: int, src_h: int, *,
+                 discovery_period: int = 15, discovery_grid: tuple = (3, 2),
+                 recovery_grid: tuple = (3, 3), max_zoom: float = 2.0,
+                 target_model_h: float = 40.0, roi_margin_frac: float = 0.25,
+                 recovery_span: float = 0.4):
+        self.src_w = src_w
+        self.src_h = src_h
+        self.discovery_period = discovery_period
+        self.discovery_grid = discovery_grid
+        self.recovery_grid = recovery_grid
+        self.max_zoom = max_zoom
+        self.target_model_h = target_model_h
+        self.roi_margin_frac = roi_margin_frac
+        self.recovery_span = recovery_span
+        # Delegate grid/ROI helpers to a v1 TileScheduler instance.
+        self._v1 = TileScheduler(src_w, src_h,
+                                 discovery_period=discovery_period,
+                                 discovery_grid=discovery_grid,
+                                 recovery_grid=recovery_grid,
+                                 max_zoom=max_zoom,
+                                 target_model_h=target_model_h,
+                                 roi_margin_frac=roi_margin_frac,
+                                 recovery_span=recovery_span)
+
+    def _roi_for_target(self, s: TargetState) -> CropRect:
+        """Same adaptive-zoom ROI logic as v1 TileScheduler._roi, applied to
+        a TargetState instead of a LockState."""
+        lock = LockState(track_id=s.key[1],
+                         bbox_norm=s.bbox_norm,
+                         status=s.status,
+                         frames_since_seen=s.frames_since_seen,
+                         last_velocity=s.last_velocity)
+        return self._v1._roi(lock)
+
+    def decide(self, targets: list, frame_idx: int, meter) -> list:
+        on_cadence = (frame_idx % self.discovery_period == 0)
+
+        # --- recovery branch: SELECTED target is SEARCHING / LOST ---
+        selected = next((s for s in targets if s.selected), None)
+        if (selected is not None
+                and selected.status in ("SEARCHING", "LOST")
+                and selected.bbox_norm[2] > 0):
+            gx, gy = self.recovery_grid
+            bx, by, bw, bh = selected.bbox_norm
+            ecx = (bx + bw / 2
+                   + selected.last_velocity[0] * selected.frames_since_seen)
+            ecy = (by + bh / 2
+                   + selected.last_velocity[1] * selected.frames_since_seen)
+            span = self.recovery_span
+            half = span / 2
+            x0_n = max(0.0, min(1.0 - span, ecx - half))
+            y0_n = max(0.0, min(1.0 - span, ecy - half))
+            x0 = x0_n * self.src_w
+            y0 = y0_n * self.src_h
+            crops = self._v1._grid(gx, gy, x0, y0,
+                                   span * self.src_w, span * self.src_h, "s")
+            budget = int(meter.available(frame_idx))
+            if budget >= 0 and len(crops) > budget:
+                crops = crops[:max(0, budget)]
+            return crops
+
+        # --- normal path: per-target ROIs + optional discovery ---
+        crops: list[CropRect] = []
+
+        # Selected target's ROI first (survives a tight budget).
+        tracking_targets = [s for s in targets if s.status == "TRACKING"]
+        if selected is not None and selected.status == "TRACKING":
+            crops.append(self._roi_for_target(selected))
+
+        # All other TRACKING targets.
+        for s in tracking_targets:
+            if not s.selected:
+                crops.append(self._roi_for_target(s))
+
+        # Discovery grid on cadence.
+        if on_cadence:
+            gx, gy = self.discovery_grid
+            crops += self._v1._grid(gx, gy, 0, 0,
+                                    self.src_w, self.src_h, "m")
 
         budget = int(meter.available(frame_idx))
         if budget >= 0 and len(crops) > budget:

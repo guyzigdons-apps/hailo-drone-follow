@@ -58,3 +58,15 @@ class LockState:
     status: str = "LOST"                     # TRACKING | SEARCHING | LOST
     frames_since_seen: int = 0
     last_velocity: tuple = (0.0, 0.0)        # (dvx, dvy) of bbox centre, normalized/frame
+
+
+@dataclass
+class TargetState:
+    """Per-track state for multi-target tracking."""
+    key: tuple                                   # (cls, track_id) composite lock id
+    cls: int
+    bbox_norm: tuple = (0.0, 0.0, 0.0, 0.0)     # (x,y,w,h) normalized
+    status: str = "LOST"                          # TRACKING | SEARCHING | LOST
+    frames_since_seen: int = 0
+    last_velocity: tuple = (0.0, 0.0)
+    selected: bool = False                        # True if this is the user-selected target

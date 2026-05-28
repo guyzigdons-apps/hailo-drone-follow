@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .aggregator import map_to_source, nms
-from .scheduler import TileScheduler
-from .target_lock import TargetLock
+from .scheduler import TileScheduler, MultiTargetTileScheduler
+from .target_lock import TargetLock, MultiTargetLock
 
 
 @dataclass
@@ -94,3 +94,77 @@ def emit_frames_json(res: RunResult, label: str, out_path: Path,
              "confidence": d.score, "bbox": [d.x, d.y, d.w, d.h]} for d in dets],
             "tiles": tiles_out})
     out_path.write_text(json.dumps({"label": label, "frames": frames}))
+
+
+def run_multi(frames, src_w: int, src_h: int,
+              scheduler: MultiTargetTileScheduler,
+              lock: MultiTargetLock, backend, meter, gt_traj: dict,
+              gt_cls: int = 0) -> RunResult:
+    """Multi-target replay loop.
+
+    Feeds all allowed-class dets to the lock, asks the scheduler for
+    per-target ROIs, and records the selected target's bbox in pred_traj
+    (same schema as run() for score_run compatibility).
+    """
+    res = RunResult()
+    gt_seeded = False
+    frame_idx = -1
+
+    for frame_idx, frame in enumerate(frames):
+        # Build current target list from lock state (empty on frame 0).
+        current_targets = [s for s in lock.targets.values()
+                           if s.status != "LOST"]
+        crops = scheduler.decide(current_targets, frame_idx, meter)
+        meter.charge(len(crops), frame_idx)
+        res.total_tiles += len(crops)
+
+        # Inference over all requested crops.
+        dets = []
+        for crop in crops:
+            local = backend.infer(frame, crop, frame_idx)
+            dets += map_to_source(local, crop, src_w, src_h)
+        dets = nms(dets, iou_thr=0.5)
+        res.frame_dets[frame_idx] = dets
+
+        # Feed all allowed-class dets to the multi-target lock.
+        dets_for_lock = [d for d in dets if d.cls in lock.target_classes]
+        gt_box = gt_traj.get(frame_idx)
+        if not gt_seeded and gt_box is not None:
+            targets = lock.step(dets_for_lock,
+                                gt_bbox_norm=gt_box, gt_cls=gt_cls)
+            gt_seeded = True
+        else:
+            targets = lock.step(dets_for_lock)
+
+        # Determine if we are in recovery mode (selected target is SEARCHING/LOST).
+        is_recovery = any(
+            s.selected and s.status in ("SEARCHING", "LOST")
+            for s in targets
+        )
+
+        # Tag crops with visualization categories.
+        tagged: list = []
+        if is_recovery:
+            for c in crops:
+                tagged.append((c.x / src_w, c.y / src_h,
+                               c.w / src_w, c.h / src_h, "single-scale"))
+        else:
+            for c in crops:
+                if c.mode == "m":
+                    cat = "multi-scale"
+                else:
+                    cat = "dynamic"
+                tagged.append((c.x / src_w, c.y / src_h,
+                               c.w / src_w, c.h / src_h, cat))
+        res.frame_tiles[frame_idx] = tagged
+
+        # Record selected target bbox for single-target scoring compatibility.
+        sel = next(
+            (s for s in targets if s.selected and s.status == "TRACKING"),
+            None
+        )
+        if sel is not None:
+            res.pred_traj[frame_idx] = tuple(sel.bbox_norm)
+
+    res.n_frames = frame_idx + 1
+    return res
