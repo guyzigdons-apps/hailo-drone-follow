@@ -80,12 +80,21 @@ def bgr_to_hex(bgr: tuple[int, int, int]) -> str:
 
 def load_frames_indexed(
     path: Path,
-) -> tuple[str, dict[int, list[dict]], dict]:
+) -> tuple[str, dict[int, list[dict]], dict, dict[int, list[tuple]]]:
     with path.open() as f:
         doc = json.load(f)
     idx = {int(fr["frame"]): fr["detections"] for fr in doc["frames"]}
+    tiles_by_frame: dict[int, list[tuple]] = {}
+    for fr in doc["frames"]:
+        tlist = fr.get("tiles") or []
+        if tlist:
+            tiles_by_frame[int(fr["frame"])] = [
+                (float(t["x"]), float(t["y"]), float(t["w"]), float(t["h"]),
+                 str(t.get("category", "dynamic")))
+                for t in tlist
+            ]
     config = doc.get("config") or {}
-    return doc.get("label") or path.stem, idx, config
+    return doc.get("label") or path.stem, idx, config, tiles_by_frame
 
 
 def grid_tiles(tiles_x: int, tiles_y: int,
@@ -174,7 +183,8 @@ class Run:
 
     def __init__(self, label: str, idx: dict[int, list[dict]],
                  colour_bgr: tuple[int, int, int],
-                 config: dict | None = None):
+                 config: dict | None = None,
+                 tiles_by_frame: dict[int, list[tuple]] | None = None):
         self.label = label
         self.idx = idx
         self.colour_bgr = colour_bgr
@@ -188,6 +198,9 @@ class Run:
         self.tile_rects: list[tuple[float, float, float, float]] = [
             (x, y, w, h) for (x, y, w, h, _cat) in self.tile_rects_typed
         ]
+        # Per-frame dynamic tile rects from frames.json (overrides tile_rects_typed
+        # during rendering when present for the current frame).
+        self.tiles_by_frame: dict[int, list[tuple]] = tiles_by_frame or {}
         self.visible_var: tk.BooleanVar | None = None  # set after Tk root exists
         # Containment-merge per-frame cache: key = (frame_no, area_ratio_max,
         # center_slack, hide_phantoms). Value = (kept_dets_list, n_suppressed).
@@ -987,7 +1000,9 @@ class OverlayViewer:
         }
         DEFAULT_TILE_COLOUR = (255, 255, 255)
         drawn = 0
-        for (nx, ny, nw, nh, cat) in source_run.tile_rects_typed:
+        per_frame = source_run.tiles_by_frame.get(self.frame_no)
+        rects_to_draw = per_frame if per_frame else source_run.tile_rects_typed
+        for (nx, ny, nw, nh, cat) in rects_to_draw:
             sx1 = nx * self.src_w
             sy1 = ny * self.src_h
             sx2 = (nx + nw) * self.src_w
@@ -1040,7 +1055,9 @@ class OverlayViewer:
         tile_line: str | None = None
         if tile_source_run is not None:
             cat_counts: dict[str, int] = {}
-            for (_x, _y, _w, _h, cat) in tile_source_run.tile_rects_typed:
+            per_frame_hud = tile_source_run.tiles_by_frame.get(self.frame_no)
+            rects_for_hud = per_frame_hud if per_frame_hud else tile_source_run.tile_rects_typed
+            for (_x, _y, _w, _h, cat) in rects_for_hud:
                 cat_counts[cat] = cat_counts.get(cat, 0) + 1
             cat_summary = " ".join(
                 f"{cat}={n}"
@@ -1314,11 +1331,12 @@ def main(argv=None) -> int:
         if not p.is_file():
             print(f"ERROR: frames file not found: {p}")
             return 1
-        lbl, idx, cfg = load_frames_indexed(p)
+        lbl, idx, cfg, tiles_by_frame = load_frames_indexed(p)
         if lbl_override:
             lbl = lbl_override
         colour = PALETTE[i % len(PALETTE)]
-        runs.append(Run(label=lbl, idx=idx, colour_bgr=colour, config=cfg))
+        runs.append(Run(label=lbl, idx=idx, colour_bgr=colour, config=cfg,
+                        tiles_by_frame=tiles_by_frame))
 
     root = tk.Tk()
     try:
