@@ -8,7 +8,7 @@ Tracks the decomposed plans derived from the master spec:
 | 1   | `2026-05-28-hailo-tiling-scaffold-and-scheduler-refactor.md` | 1, 2        | done       |
 | 2   | `2026-05-28-telemetry-modifiers-backends.md`          | 3, 4, 5     | done       |
 | 3   | `2026-05-28-fov-emulation-source-data-prep.md`        | 6           | done       |
-| 4   | `2026-05-28-cache-schema-and-python-cache-layer.md`   | 7           | in flight  |
+| 4   | `2026-05-28-cache-schema-and-python-cache-layer.md`   | 7           | done       |
 | 5   | GStreamer cache plugins + hailo-apps-core patches     | 8, 14       | not started |
 | 6   | GstCropperBackend + ablation harness                  | 9, 10       | not started |
 | 7   | Telemetry import (ULG/SRT) + visualizer               | 11, 12      | not started |
