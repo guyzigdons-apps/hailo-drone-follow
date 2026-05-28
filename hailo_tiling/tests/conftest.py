@@ -83,3 +83,17 @@ def static_low_telemetry():
 @pytest.fixture
 def static_high_telemetry():
     return StaticTelemetry(altitude_agl_m=40.0)
+
+
+# ----------------------------------------------------------------------
+# Backend fixtures (added in Plan 2)
+# ----------------------------------------------------------------------
+from hailo_tiling.backends import MockBackend
+
+
+@pytest.fixture
+def make_mock_backend():
+    """Factory: returns a callable that builds a MockBackend with given canned dets."""
+    def _make(canned=None):
+        return MockBackend(canned or {})
+    return _make
