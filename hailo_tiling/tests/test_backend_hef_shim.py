@@ -64,10 +64,31 @@ def test_batched_infer_returns_list_per_crop(patched_hef):
     assert all(len(dets) == 1 for dets in out)
 
 
-def test_legacy_dynamic_tiling_inference_reexports_hefbackend():
-    """dynamic_tiling.inference must still expose HefBackend (shim path)."""
+def test_legacy_dynamic_tiling_inference_hef_backend_is_single_crop_wrapper():
+    """dynamic_tiling.inference.HefBackend must expose the legacy single-crop API.
+
+    It wraps the new batched hailo_tiling.backends.hef.HefBackend internally so
+    dynamic_tiling.run_dynamic / dynamic_tiling.replay keep working through the
+    shim (they call `backend.infer(frame, crop, frame_idx)` with a single CropRect).
+    """
+    import numpy as np
+
     from dynamic_tiling.inference import HefBackend as LegacyHefBackend
-    assert LegacyHefBackend is HefBackend
+    from hailo_tiling.backends.hef import HefBackend as BatchedHefBackend
+
+    # Different classes — wrapper, not identity.
+    assert LegacyHefBackend is not BatchedHefBackend
+
+    # Test-injection construction round-trips through the wrapper.
+    handle = _FakeHandle()
+    legacy = LegacyHefBackend(handle, _fake_decode)
+
+    crop = CropRect(x=0, y=0, w=640, h=480, mode="s")
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    # Legacy single-crop API: returns a flat list (not list-of-lists).
+    out = legacy.infer(frame, crop, frame_idx=0)
+    assert len(out) == 1  # _fake_decode returns one _FakeDet
 
 
 def test_legacy_replay_backend_still_works():
