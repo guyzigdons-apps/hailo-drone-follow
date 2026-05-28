@@ -3,7 +3,6 @@ from dynamic_tiling.types import CropRect
 from dynamic_tiling.budget import BudgetMeter
 from dynamic_tiling.scheduler import TileScheduler
 from dynamic_tiling.target_lock import TargetLock
-from dynamic_tiling.inference import ReplayBackend
 from dynamic_tiling.replay import run
 
 
@@ -39,3 +38,26 @@ def test_replay_tracks_target_with_replay_backend():
     assert result.pred_traj.get(n_frames - 1) is not None
     assert result.avg_tiles_per_frame < 10
     assert sum(1 for f in range(n_frames) if result.pred_traj.get(f)) >= n_frames - 2
+
+
+def test_replay_never_locked_path():
+    src_w, src_h = 4000, 3000
+    n_frames = 4
+    gt_traj = {f: (0.40, 0.40, 0.08, 0.20) for f in range(n_frames)}
+
+    class _NoDetBackend:
+        def infer(self, frame, crop, frame_idx):
+            return []
+
+    frames = [np.zeros((src_h, src_w, 3), np.uint8) for _ in range(n_frames)]
+    result = run(
+        frames=frames, src_w=src_w, src_h=src_h,
+        scheduler=TileScheduler(src_w, src_h, discovery_period=2),
+        lock=TargetLock(),
+        backend=_NoDetBackend(),
+        meter=BudgetMeter(budget_inf_per_s=300, fps=30),
+        gt_traj=gt_traj,
+    )
+    assert result.pred_traj == {}
+    assert set(result.frame_dets.keys()) == set(range(n_frames))
+    assert result.n_frames == n_frames

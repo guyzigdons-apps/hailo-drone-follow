@@ -40,6 +40,8 @@ def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
 
         persons = [d for d in dets if d.cls == person_cls]
         gt_box = gt_traj.get(frame_idx)
+        # `lock.track_id` never clears in the replay harness (single-target,
+        # set once), so this gates GT-seeded locking to the pre-lock phase only.
         if lock.track_id is None and gt_box is not None:
             state = lock.step(persons, gt_bbox_norm=gt_box)
         else:
@@ -57,6 +59,6 @@ def emit_frames_json(res: RunResult, label: str, out_path: Path,
     frames = []
     for f, dets in sorted(res.frame_dets.items()):
         frames.append({"frame": f, "detections": [
-            {"label": class_labels[d.cls] if d.cls < len(class_labels) else str(d.cls),
+            {"label": class_labels[d.cls] if 0 <= d.cls < len(class_labels) else str(d.cls),
              "confidence": d.score, "bbox": [d.x, d.y, d.w, d.h]} for d in dets]})
     out_path.write_text(json.dumps({"label": label, "frames": frames}))
