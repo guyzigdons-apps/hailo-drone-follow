@@ -19,9 +19,16 @@ dependencies = [
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project.optional-dependencies]
+mavsdk = ["mavsdk>=2.0"]
+test = ["pytest>=7"]
+
 [tool.setuptools.packages.find]
-include = ["drone_follow*", "reid_analysis*"]
-exclude = ["configs", "configs.*"]
+include = ["drone_follow*", "reid_analysis*", "hailo_tiling*"]
+exclude = ["configs", "configs.*", "hailo_tiling.tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["hailo_tiling/tests"]
 
 [project.scripts]
 drone-follow = "drone_follow.drone_follow_app:main"
