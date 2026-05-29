@@ -22,7 +22,8 @@ Reproduce with:
 ```python
 import pyulog
 keep = ['vehicle_local_position', 'vehicle_attitude', 'vehicle_air_data',
-        'vehicle_gps_position', 'vehicle_angular_velocity', 'sensor_combined']
+        'vehicle_gps_position', 'vehicle_global_position',
+        'vehicle_angular_velocity', 'sensor_combined']
 u = pyulog.ULog("<source>.ulg", message_name_filter_list=keep)
 for d in u.data_list:
     if d.name == 'vehicle_gps_position':

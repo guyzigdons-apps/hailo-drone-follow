@@ -48,10 +48,11 @@ def test_cli_srt_round_trip(tmp_path: Path) -> None:
 
 
 def test_cli_requires_one_source(tmp_path: Path) -> None:
-    # argparse exits with SystemExit(2) on a missing required argument.
+    # argparse exits with SystemExit(2) on a missing required argument
+    # (per the argparse docs — code 2 is "command line usage error").
     with pytest.raises(SystemExit) as exc:
         main(["--output", str(tmp_path / "out.jsonl")])
-    assert exc.value.code != 0
+    assert exc.value.code == 2
 
 
 def test_cli_rejects_both_sources(tmp_path: Path) -> None:
@@ -61,7 +62,20 @@ def test_cli_rejects_both_sources(tmp_path: Path) -> None:
             "--srt", str(SRT_FIXTURE),
             "--output", str(tmp_path / "out.jsonl"),
         ])
-    assert exc.value.code != 0
+    assert exc.value.code == 2
+
+
+def test_cli_video_creation_requires_video(tmp_path: Path) -> None:
+    # ``--align video-creation`` without ``--video`` is a documented misuse
+    # that the CLI catches itself (returning 2, matching argparse's code
+    # for usage errors). This exercises the explicit ``return 2`` path
+    # rather than argparse's own diagnostic.
+    rc = main([
+        "--srt", str(SRT_FIXTURE),
+        "--align", "video-creation",
+        "--output", str(tmp_path / "out.jsonl"),
+    ])
+    assert rc == 2
 
 
 def test_cli_default_output_path(tmp_path: Path) -> None:

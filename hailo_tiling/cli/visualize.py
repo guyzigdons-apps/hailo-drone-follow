@@ -21,6 +21,8 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
+from .. import __version__ as _PKG_VERSION
+
 
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -30,6 +32,12 @@ def _build_argparser() -> argparse.ArgumentParser:
             "ffmpeg + ASS subtitles. Reads JSONL timelines produced by "
             "hailo-tiling-import-telemetry."
         ),
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_PKG_VERSION}",
+        help="Print the hailo_tiling package version and exit.",
     )
     p.add_argument("--video", type=Path, required=True,
                    help="Source video file.")
@@ -66,13 +74,30 @@ def _escape_ass_text(s: str) -> str:
 
 
 def _fmt_float(value, width: int, precision: int) -> str:
-    """Format a float at fixed width/precision; render ``None`` as dashes."""
+    """Format a float at fixed width/precision; render ``None`` as dashes.
+
+    On overflow (the formatted string exceeds ``width``, e.g. altitude
+    ``> 9999.9`` for ``width=5`` or ``|yaw_rate| >= 100`` for
+    ``width=5, precision=2``), the cell is rendered as ``"+++++"`` /
+    ``"-----"`` truncated to ``width`` so the HUD's column alignment is
+    preserved instead of pushing later columns rightward.
+    """
     if value is None:
         return "-" * width
     try:
-        return f"{float(value):>{width}.{precision}f}"
+        formatted = f"{float(value):>{width}.{precision}f}"
     except (TypeError, ValueError):
         return "-" * width
+    if len(formatted) > width:
+        # Saturate to a width-respecting overflow marker. Keep the sign so
+        # extreme negatives stay readable.
+        try:
+            fv = float(value)
+        except (TypeError, ValueError):
+            return "-" * width
+        marker = "-" if fv < 0 else "+"
+        return marker * width
+    return formatted
 
 
 def _fmt_geo(value, width: int, precision: int) -> str:

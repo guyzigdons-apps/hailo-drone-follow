@@ -12,7 +12,7 @@ from __future__ import annotations
 import bisect
 import math
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 import pyulog
 
@@ -32,19 +32,27 @@ _TOPICS = (
 )
 
 
-def _get_dataset_or_none(ulog: "pyulog.ULog", name: str):
+def _get_dataset_or_none(ulog: "pyulog.ULog", name: str) -> Optional[Any]:
     """Return the dataset for `name`, or None if absent.
 
-    pyulog's `get_dataset` raises `KeyError`-equivalent (an Exception) when the
-    topic is missing. We turn that into None so the caller can skip cleanly.
+    pyulog's ``get_dataset`` (see ``pyulog.ULog.get_dataset`` docstring)
+    documents ``KeyError`` / ``IndexError`` / ``ValueError`` on a missing
+    topic or instance. We catch the broad ``Exception`` here defensively so
+    a future pyulog version that introduces a new exception type doesn't
+    crash the importer — the caller treats "absent" identically regardless
+    of the underlying raise.
     """
     try:
         return ulog.get_dataset(name)
-    except Exception:
+    except Exception:  # pyulog docs: KeyError | IndexError | ValueError
         return None
 
 
-def _last_le(timestamps: list[int], values, t_us: int):
+def _last_le(
+    timestamps: Sequence[int],
+    values: Sequence[Any],
+    t_us: int,
+) -> Optional[Any]:
     """Return the value whose timestamp is the largest <= t_us, or None.
 
     `timestamps` must be sorted ascending. `values` is index-aligned with
@@ -68,7 +76,7 @@ def _last_le(timestamps: list[int], values, t_us: int):
         return v
 
 
-def _column(dataset, field: str):
+def _column(dataset: Optional[Any], field: str) -> Optional[Any]:
     """Return dataset.data[field] if available, else None."""
     if dataset is None:
         return None
@@ -153,7 +161,9 @@ def parse_ulg(path: Path) -> list[dict]:
     # We compute pitch / roll lazily per row from att_q if available; this
     # keeps the parser self-contained (no scipy / numpy quaternion dep).
 
-    def quat_to_roll_pitch(q):
+    def quat_to_roll_pitch(
+        q: Optional[Sequence[Any]],
+    ) -> tuple[Optional[float], Optional[float]]:
         # q = [w, x, y, z]; returns (roll, pitch) in radians, NaN -> None.
         if q is None or any(v is None for v in q):
             return (None, None)

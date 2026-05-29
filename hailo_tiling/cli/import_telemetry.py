@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .. import __version__ as _PKG_VERSION
 from ..telemetry.align import align_to_video
 from ..telemetry.srt import parse_srt
 from ..telemetry.ulg import parse_ulg
@@ -28,6 +29,12 @@ def _build_argparser() -> argparse.ArgumentParser:
             "pipe through `hailo-tiling-bench --ingest-telemetry` once Plan 6 "
             "lands."
         ),
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_PKG_VERSION}",
+        help="Print the hailo_tiling package version and exit.",
     )
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--ulg", type=Path, default=None,
@@ -82,7 +89,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
-    video_path = args.video if args.video is not None else Path("/dev/null")
+    # Non-video-creation strategies ignore the path; pass a cross-platform
+    # empty Path() rather than '/dev/null' (which doesn't exist on Windows
+    # and was a Linux-specific placeholder).
+    video_path = args.video if args.video is not None else Path()
     rows = align_to_video(rows, video_path, args.align)
 
     if args.strip_geo:
