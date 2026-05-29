@@ -30,3 +30,24 @@ cache_db_cli = executable('cache_db_cli',
     link_with           : gsthailocache_lib,
     install             : false,
 )
+
+# Plan 5 Task 3 — cache_keys gtest + Python parity CLI.
+test_keys = executable('test_keys',
+    'test_keys.cpp',
+    include_directories : gsthailocache_inc,
+    dependencies        : [gtest_dep, gst_dep],
+    link_with           : gsthailocache_lib,
+    install             : false,
+)
+
+test('test_keys', test_keys, protocol : 'gtest')
+
+# cache_keys_cli — test-only helper used by
+# tests/integration/test_cache_keys_python_parity.py. NOT installed.
+cache_keys_cli = executable('cache_keys_cli',
+    'cache_keys_cli.cpp',
+    include_directories : gsthailocache_inc,
+    dependencies        : [gst_dep],
+    link_with           : gsthailocache_lib,
+    install             : false,
+)

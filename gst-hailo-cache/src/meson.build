@@ -7,6 +7,7 @@
 gsthailocache_sources = [
     'plugin.cpp',
     'tile_cache_db.cpp',
+    'cache_keys.cpp',
 ]
 
 gsthailocache_inc = include_directories('.')

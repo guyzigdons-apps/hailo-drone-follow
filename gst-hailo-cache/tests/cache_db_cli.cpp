@@ -21,6 +21,7 @@
 
 #include "tile_cache_db.hpp"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>

@@ -12,6 +12,7 @@
 
 #include <sqlite3.h>
 
+#include <cstdio>
 #include <sstream>
 #include <string>
 #include <utility>
