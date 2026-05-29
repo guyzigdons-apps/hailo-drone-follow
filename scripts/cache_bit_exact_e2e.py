@@ -167,7 +167,11 @@ def _build_crop_set(src_w: int, src_h: int) -> list[CropRect]:
 
 
 def _wait_for_chip(retries: int = 3, backoff_s: float = 30.0) -> bool:
-    """Best-effort: probe `hailortcli scan`, retry while busy."""
+    """Best-effort: probe `hailortcli scan`, retry while busy.
+
+    3 retries x 30s ~= typical chip-busy window when another process is
+    mid-inference.
+    """
     import shutil
     import subprocess
     if shutil.which("hailortcli") is None:
@@ -202,8 +206,9 @@ class _CountedHefBackend:
 
     def infer(self, frame, crops, frame_idx: int):
         self.call_count += 1
-        self.crop_calls += len(list(crops)) if not hasattr(crops, '__len__') else len(crops)
-        return self._inner.infer(frame, crops, frame_idx)
+        crops_list = list(crops)
+        self.crop_calls += len(crops_list)
+        return self._inner.infer(frame, crops_list, frame_idx)
 
     def close(self) -> None:
         self._inner.close()
@@ -323,7 +328,13 @@ def _check_floor_quantise_hit(frames: list, hef_path: Path, nms_thresh: float,
 
 
 def _check_cache_miss_error(frames: list, tmp_cache: Path) -> tuple[bool, str]:
-    """Empty cache + ReplayBackend must raise CacheMissError on first infer."""
+    """Empty cache + ReplayBackend must raise CacheMissError on first infer.
+
+    Precondition: ``frames`` is non-empty. ``run()`` early-returns when the
+    video produced zero frames, so by the time this helper runs we always
+    have at least one frame to feed the backend.
+    """
+    assert frames, "_check_cache_miss_error requires non-empty frames; run() must early-return otherwise"
     if tmp_cache.exists():
         tmp_cache.unlink()
     store = SqliteCacheStore.open(tmp_cache)
@@ -331,7 +342,7 @@ def _check_cache_miss_error(frames: list, tmp_cache: Path) -> tuple[bool, str]:
     try:
         be = ReplayBackend(store=store, ppv=1)
         try:
-            be.infer(frames[0] if frames else None, [crop], frame_idx=99)
+            be.infer(frames[0], [crop], frame_idx=99)
         except CacheMissError as exc:
             msg = str(exc)
             ok = ("frame_idx=99" in msg
@@ -463,7 +474,12 @@ def run(video: Path, hef: Path, out_dir: Path, max_frames: int,
 
 def _build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="cache_bit_exact_e2e")
-    ap.add_argument("--video", required=True, type=Path)
+    ap.add_argument(
+        "--video",
+        required=True,
+        type=Path,
+        help="Input video file; first --max-frames are decoded once and reused across all three modes.",
+    )
     ap.add_argument(
         "--hef",
         default=Path(
@@ -471,10 +487,26 @@ def _build_argparser() -> argparse.ArgumentParser:
             "hailo_yolov8n_4_classes_vga.hef"
         ),
         type=Path,
+        help="HEF model file (default: hailo10h yolov8n 4-classes VGA).",
     )
-    ap.add_argument("--out-dir", required=True, type=Path)
-    ap.add_argument("--max-frames", type=int, default=8)
-    ap.add_argument("--nms-thresh", type=float, default=0.25)
+    ap.add_argument(
+        "--out-dir",
+        required=True,
+        type=Path,
+        help="Output directory for per-mode JSON dumps and diff_report.json.",
+    )
+    ap.add_argument(
+        "--max-frames",
+        type=int,
+        default=8,
+        help="Maximum number of frames to decode and run through every mode (default: 8).",
+    )
+    ap.add_argument(
+        "--nms-thresh",
+        type=float,
+        default=0.25,
+        help="NMS score threshold passed to HefBackend; baseline JSONs are pinned at this value, do not change without re-baselining.",
+    )
     ap.add_argument(
         "--work-dir",
         type=Path,
