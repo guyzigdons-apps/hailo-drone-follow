@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -64,6 +65,23 @@ static bool file_exists(const std::string& path) {
 
 static GParamSpec* find_pspec(GObjectClass* klass, const char* name) {
     return g_object_class_find_property(klass, name);
+}
+
+// Build a unique tmp DB path per (test tag, PID, monotonic counter) so
+// parallel test runs (`meson test --repeat N` or `--num-processes >1`)
+// don't collide on a shared `/tmp/...sqlite3` filename. Mirrors the
+// pattern used in test_hailocachereader.cpp's `tmp_db_path`.
+static std::string tmp_db_path(const char* tag) {
+    static std::atomic<unsigned> counter{0};
+    const unsigned n = counter.fetch_add(1, std::memory_order_relaxed);
+    std::string path = std::string("/tmp/gst_hailocachewriter_task5_") +
+                       tag + "_" + std::to_string(::getpid()) +
+                       "_" + std::to_string(n) + ".sqlite3";
+    // Ensure a clean slate even if a previous failed run left a file.
+    ::unlink(path.c_str());
+    ::unlink((path + "-wal").c_str());
+    ::unlink((path + "-shm").c_str());
+    return path;
 }
 
 // -- Tests ------------------------------------------------------------------
@@ -247,8 +265,7 @@ static int count_detections(const std::string& path) {
 // -- Task 5 tests -----------------------------------------------------------
 
 TEST(WriterCreatesFileOnEos, ProducesSqliteWithNRows) {
-    const std::string out = "/tmp/gst_hailocachewriter_task5_create.sqlite3";
-    ::unlink(out.c_str());
+    const std::string out = tmp_db_path("create");
 
     const int N = 30;
     const std::string pipeline_str =
@@ -276,8 +293,7 @@ TEST(WriterRespectsRecordEmpty, NoRowsWhenEmptyAndDisabled) {
     // Task 5 emits dets_json="[]" for every frame (no detection
     // extraction yet). With record-empty=false, that means NO rows
     // should land.
-    const std::string out = "/tmp/gst_hailocachewriter_task5_empty.sqlite3";
-    ::unlink(out.c_str());
+    const std::string out = tmp_db_path("empty");
 
     const std::string pipeline_str =
         std::string("videotestsrc num-buffers=10 ! ")

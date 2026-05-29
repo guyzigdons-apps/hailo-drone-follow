@@ -180,12 +180,20 @@ bool ring_try_push_(HailoCacheWriterRing* ring, hailo_cache::Row&& row)
     return true;
 }
 
-// Number of populated slots (snapshot; the writer thread is the only
-// caller, so this is consistent w.r.t. the consumer-side index).
+// Number of populated slots (snapshot). Safely callable from BOTH sides:
+//   * Consumer (writer thread): owns `tail`, so `tail` read is naturally
+//     consistent; the `acquire` on `head` pairs with the producer's
+//     `release` to see all rows up to `head`.
+//   * Producer (streaming thread, post-push): owns `head`; reads `tail`
+//     with `acquire` so the view is symmetric with `ring_try_push_`
+//     (which also uses `acquire` on `tail`). The returned size is a
+//     snapshot — it may grow stale immediately after this call, but
+//     that is fine for the "did we just cross the batch threshold?"
+//     wake-up heuristic in `emit_tile_cache_row_`.
 std::size_t ring_size_(const HailoCacheWriterRing* ring)
 {
     const std::size_t head = ring->head.load(std::memory_order_acquire);
-    const std::size_t tail = ring->tail.load(std::memory_order_relaxed);
+    const std::size_t tail = ring->tail.load(std::memory_order_acquire);
     if (head >= tail) return head - tail;
     return ring->capacity - (tail - head);
 }
@@ -216,7 +224,8 @@ void post_writer_error_(GstHailoCacheWriter* self, const std::string& what)
     GError* gerr = g_error_new_literal(GST_RESOURCE_ERROR,
                                        GST_RESOURCE_ERROR_WRITE,
                                        what.c_str());
-    gchar* debug = g_strdup_printf("hailocachewriter background-thread error");
+    gchar* debug = g_strdup_printf(
+        "hailocachewriter background-thread error: %s", what.c_str());
     gst_element_post_message(GST_ELEMENT(self),
         gst_message_new_error(GST_OBJECT(self), gerr, debug));
     g_error_free(gerr);
@@ -653,6 +662,14 @@ gst_hailocachewriter_start(GstBaseTransform* trans)
     self->counter_state = 0;
     self->buffer_count  = 0;
     ensure_ring_allocated_(self);
+    // Reset ring indices unconditionally so a stop→start cycle starts
+    // from a clean state (ensure_ring_allocated_ only zeroes on first
+    // allocation; on re-start, head/tail would otherwise be mid-ring
+    // and ring_drain_ would read garbage from stale slot indices).
+    // The writer thread is not running yet, so no synchronization with
+    // a consumer is needed here; relaxed is sufficient.
+    self->ring->head.store(0, std::memory_order_relaxed);
+    self->ring->tail.store(0, std::memory_order_relaxed);
 
     // Spawn the writer thread.
     try {
