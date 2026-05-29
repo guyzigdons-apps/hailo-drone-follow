@@ -387,6 +387,30 @@ ENABLED=true    # set to false to disable auto-start
 
 Uninstall: `sudo scripts/boot/uninstall.sh`
 
+## Hailo tiling library
+
+The `hailo_tiling` package is a standalone tiling + benchmark library shared
+with this repo. It hosts the scheduler/emitter/modifier abstractions, the
+SQLite-backed inference cache, geospatial telemetry replay, and a small set of
+laptop-side CLIs. See
+[`docs/superpowers/specs/2026-05-28-tiling-library-design.md`](docs/superpowers/specs/2026-05-28-tiling-library-design.md)
+for the full design and
+[`docs/superpowers/plans/INDEX.md`](docs/superpowers/plans/INDEX.md) for the
+plan rollout.
+
+### Telemetry import + visualizer
+
+Import a PX4 ULog or DJI SRT sidecar into a `RecordedTelemetry`-compatible
+JSONL timeline, then render an annotated MP4 from any video + that timeline.
+
+    hailo-tiling-import-telemetry --srt clip.SRT --video clip.MP4 --output clip.jsonl
+    hailo-tiling-visualize --video clip.MP4 --telemetry clip.jsonl --output clip.annot.mp4
+
+Both tools run on a laptop without Hailo hardware. See
+`docs/superpowers/plans/2026-05-28-telemetry-import-visualizer.md` for the
+field-mapping table and `docs/superpowers/specs/2026-05-28-tiling-library-design.md`
+§8.8 for the geospatial-telemetry schema.
+
 ## Architecture
 
 ```

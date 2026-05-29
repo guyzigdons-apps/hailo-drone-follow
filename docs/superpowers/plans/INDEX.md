@@ -11,7 +11,7 @@ Tracks the decomposed plans derived from the master spec:
 | 4   | `2026-05-28-cache-schema-and-python-cache-layer.md`   | 7           | done       |
 | 5   | `2026-05-28-gst-cache-plugins.md`                     | 8, 14       | in flight   |
 | 6   | GstCropperBackend + ablation harness                  | 9, 10       | not started |
-| 7   | `2026-05-28-telemetry-import-visualizer.md`           | 11, 12      | in flight   |
+| 7   | `2026-05-28-telemetry-import-visualizer.md`           | 11, 12      | done        |
 | 8   | Drone-follow migration + RPI-GS data collection       | 13, 16      | not started |
 | 9   | Paper-with-code artifacts                             | 15          | not started |
 | (10)| DJI optical-zoom maximum-range bonus shoot            | 17          | bonus / ops |
