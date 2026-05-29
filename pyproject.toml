@@ -7,6 +7,7 @@ dependencies = [
     "mavsdk",
     "matplotlib",
     "numpy",
+    "pyulog>=1.0",
     "scipy>=1.11",
 ]
 
@@ -33,3 +34,5 @@ testpaths = ["hailo_tiling/tests", "dynamic_tiling/tests", "tests"]
 [project.scripts]
 drone-follow = "drone_follow.drone_follow_app:main"
 hailo-tiling-warm-cache = "hailo_tiling.cli.warm:main"
+hailo-tiling-import-telemetry = "hailo_tiling.cli.import_telemetry:main"
+hailo-tiling-visualize = "hailo_tiling.cli.visualize:main"
