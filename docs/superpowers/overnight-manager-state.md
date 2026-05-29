@@ -50,3 +50,36 @@ I am the **manager agent** for overnight work on the `hailo_tiling` library. I d
 - 2026-05-29 ~06:30: **Plan 4 fully landed.** 10 implementation tasks + INDEX flip. Commits `b9e7940` (doc), `ea4df3a` (schema), `0083871` (hashing), `96254d5` (store open+meta), `f41c71d` (store CRUD), `3bc3f91` (WAL concurrency), `8e324d0` (CachingBackend; 2 spec-data fixes), `82ff4b5` (ReplayBackend + CacheMissError), `37d2303` (warm-cache CLI), `66bd3fa` (pyproject + public API), `d57358a` (INDEX flip). 209 passed + 1 skipped. `hailo-tiling-warm-cache --help` works after editable install. INDEX now shows Plans 1, 2, 3, 4 all done.
 - 2026-05-29 ~06:30: video — 21 of 21 FOV outputs landed (final ffmpeg on clip 0034 fov50 writing the file now). Disk 19GB free. Manifest will get the last record once ffmpeg finishes.
 - 2026-05-29 ~06:30: **Stopping autonomous work here.** Plans 5-9 cover GStreamer plugins (C++ in submodule), GstCropperBackend, harness, telemetry import, drone-follow migration, paper artifacts. Plan 5 is the natural next step but touches hailo-apps-core submodule + GStreamer + C++ — substantially riskier than pure-Python Plans 1-4. Leaving for the user's morning review. Branch: `tiling-benchmark` clean at `d57358a`. Total overnight: ~50 commits, ~209 tests passing, 4 plans landed.
+- 2026-05-29 ~07:17 (cron fire): final verification. Branch clean at `192494f`. **Video work complete:** 21 / 21 FOV outputs on disk, 21 records in manifest, no ffmpeg running. Disk 19 GB. Test suite 209/1 skipped. Plans 1-4 done in INDEX. Pre-session uncommitted changes (reid_manager.py, hailo-apps submodule pointer, sim/PX4-Autopilot pointer, .claude scheduled_tasks lock) untouched — they were there at session start.
+- 2026-05-29 ~08:17 (cron fire): no drift. Branch at `192494f`. Video 21/21 confirmed (manifest + on-disk both 21). No ffmpeg running. Marked TaskList #32 (video work) complete. Manager idle — no remaining queued work. Plans 5-9 deliberately deferred for user-aware session.
+- 2026-05-29 ~09:17 (cron fire): still idle, no drift. HEAD `192494f`, 21 FOV outputs, no ffmpeg.
+- 2026-05-29 ~10:17 (cron fire): still idle. HEAD `192494f`, 21 FOV outputs, no ffmpeg.
+- 2026-05-29 ~11:17 (cron fire): still idle. HEAD `192494f`, 21 FOV outputs, no ffmpeg. All overnight TaskList roots (#31-#35) completed.
+- 2026-05-29 ~12:17 (cron fire): still idle.
+
+## Weekend run — kicked off 2026-05-29 afternoon
+
+User instructions for the weekend (no checkpoints until Monday):
+- New GStreamer plugins land in **this repo** (`gst-hailo-cache/` next to `hailo_tiling/`), not in the `hailo-apps` submodule. Submodule patches allowed if strictly needed, with subagent approval — never push the submodule.
+- **One Hailo chip → chip-using subagents are strictly serial.** Pure-Python / MockBackend / doc-writer / review work runs freely in parallel with each other and with the one chip-using job.
+- Full autonomy, no waiting.
+- Pre-flight bit-exact E2E validator is the GATE before Plan 5 implementers run. After every Plan 5 implementer commit that touches cache machinery, rerun the bit-exact pytest. If it diverges from the baseline JSON, **BLOCK**.
+
+Weekend dispatch order (DAG):
+
+```
+[#36 pre-flight bit-exact E2E (CHIP)]  ─┐
+[#37 Plan 5 doc (no chip)] ─┐           ├──> [#38 Plan 5 impl (CHIP, serial)]
+[#39 Plan 7 doc (no chip)] ─┴──────────────> [#40 Plan 7 impl (no chip, parallel with #38)]
+                                            └─> [#41 Plan 6 stretch — only if Plan 5 fully landed]
+```
+
+Hard guardrails (cron tick #2 onwards):
+- Never start a dependent task unless upstream is fully reviewed AND committed.
+- Test suite must stay ≥ 209 passing.
+- No uncommitted changes outside `tiling-benchmark` branch.
+- Submodule HEAD must not move unexpectedly.
+- 3 consecutive review failures on the same task = hard stop, append diagnosis.
+
+Cron: hourly at :17, prompt now points to weekend-mode status review (job `5b92f123`). Old session-only job `ef941e44` cancelled.
+
