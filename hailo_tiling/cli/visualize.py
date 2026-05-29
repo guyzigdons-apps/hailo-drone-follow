@@ -4,15 +4,20 @@ Reads a JSONL telemetry timeline (from ``hailo-tiling-import-telemetry``)
 plus a source video and produces an annotated MP4 with an ASS-burned HUD
 showing altitude / ground-speed / yaw-rate / lat-lon / frame number.
 
-Plan 7 Task 1 ships only the argparse skeleton; Task 7 lands the ASS
-generator and Task 8 wires the ffmpeg invocation. See
+Plan 7 Task 7 ships the pure-Python ASS generator; Task 8 wires the
+ffmpeg invocation. See
 ``docs/superpowers/plans/2026-05-28-telemetry-import-visualizer.md``.
 """
 from __future__ import annotations
 
 import argparse
 import bisect
+import json
 import math
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Sequence
 
@@ -231,13 +236,214 @@ def build_ass(rows: list[dict], fps: float, duration_s: float) -> str:
     return "".join(lines)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Entry point for the ``hailo-tiling-visualize`` console script.
+def _load_jsonl(path: Path) -> list[dict]:
+    """Load a JSONL telemetry timeline produced by ``import_telemetry``."""
+    rows: list[dict] = []
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
 
-    Stub: implemented in Plan 7 Tasks 7 + 8.
+
+def _parse_avg_frame_rate(value: str) -> float | None:
+    """Parse an ffprobe ``avg_frame_rate`` field (e.g. ``30000/1001``).
+
+    Returns ``None`` on any parse failure (caller falls back to the default).
     """
-    _build_argparser().parse_args(argv)
-    raise SystemExit("not implemented")
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        if "/" in value:
+            num, den = value.split("/", 1)
+            num_f = float(num)
+            den_f = float(den)
+            if den_f == 0.0:
+                return None
+            return num_f / den_f
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _probe_fps(video: Path, default: float = 30.0) -> float:
+    """Probe the video's average frame rate via ``ffprobe``.
+
+    Falls back to ``default`` if ffprobe is missing, the call fails, or the
+    output cannot be parsed.
+    """
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return default
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=avg_frame_rate",
+                "-of", "default=nw=1:nk=1",
+                str(video),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return default
+    if result.returncode != 0:
+        return default
+    parsed = _parse_avg_frame_rate(result.stdout)
+    if parsed is None or parsed <= 0.0:
+        return default
+    return parsed
+
+
+def _probe_duration(video: Path, default: float | None = None) -> float | None:
+    """Probe the video's duration in seconds via ``ffprobe``.
+
+    Returns ``default`` on any failure so the caller can compute duration
+    from row count if needed.
+    """
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return default
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=duration",
+                "-of", "default=nw=1:nk=1",
+                str(video),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return default
+    if result.returncode != 0:
+        return default
+    try:
+        return float(result.stdout.strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _invoke_ffmpeg(
+    ffmpeg_path: str,
+    video: Path,
+    ass_file: Path,
+    output: Path,
+) -> tuple[int, str]:
+    """Run ffmpeg to burn the ASS overlay onto ``video`` and write ``output``.
+
+    Returns ``(returncode, stderr_text)``. The caller is responsible for
+    reporting failure to the user.
+    """
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-i", str(video),
+        "-vf", f"ass={ass_file}",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "20",
+        "-c:a", "copy",
+        str(output),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return result.returncode, result.stderr
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point for the ``hailo-tiling-visualize`` console script."""
+    args = _build_argparser().parse_args(argv)
+
+    # Resolve ffmpeg binary: explicit --ffmpeg-path wins, else search PATH.
+    if args.ffmpeg_path is not None:
+        ffmpeg_bin: str | None = str(args.ffmpeg_path)
+    else:
+        ffmpeg_bin = shutil.which("ffmpeg")
+
+    # If we'll actually invoke ffmpeg, fail fast and clearly when missing.
+    if not args.dry_run and ffmpeg_bin is None:
+        print(
+            "error: ffmpeg not found on PATH. Install ffmpeg (e.g. "
+            "`sudo apt install ffmpeg`) or pass --ffmpeg-path.",
+            file=sys.stderr,
+        )
+        return 2
+
+    rows = _load_jsonl(args.telemetry)
+
+    fps = args.fps if args.fps is not None else _probe_fps(args.video)
+    if fps <= 0:
+        print(
+            f"error: invalid fps {fps!r}; pass --fps explicitly.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # In --dry-run we never shell out; the duration falls back to the last
+    # telemetry-row timestamp (plenty for inspecting the ASS payload). When
+    # actually rendering, probe the video so the ASS spans the real clip.
+    if args.dry_run:
+        duration = None
+    else:
+        duration = _probe_duration(args.video)
+    if duration is None or duration <= 0:
+        # Fall back to the last telemetry-row timestamp; if even that is
+        # missing, render a single-frame ASS.
+        if rows:
+            last_ts = max(float(r.get("timestamp", 0.0)) for r in rows)
+            duration = max(last_ts, 1.0 / fps)
+        else:
+            duration = 1.0 / fps
+
+    ass_text = build_ass(rows=rows, fps=fps, duration_s=duration)
+
+    if args.dry_run:
+        sys.stdout.write(ass_text)
+        sys.stdout.flush()
+        print(
+            f"dry-run: built ASS for {len(rows)} telemetry rows "
+            f"at {fps:.3f} fps over {duration:.3f} s",
+            file=sys.stderr,
+        )
+        return 0
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    # NamedTemporaryFile inside a TemporaryDirectory: ffmpeg's ass= filter
+    # takes a file path, and the surrounding directory tears down on exit.
+    with tempfile.TemporaryDirectory(prefix="hailo-tiling-vis-") as tmpdir:
+        ass_path = Path(tmpdir) / "overlay.ass"
+        ass_path.write_text(ass_text, encoding="utf-8")
+        assert ffmpeg_bin is not None  # guarded above
+        rc, stderr = _invoke_ffmpeg(
+            ffmpeg_bin, args.video, ass_path, args.output,
+        )
+
+    if rc != 0:
+        sys.stderr.write(stderr)
+        print(
+            f"error: ffmpeg exited with code {rc}",
+            file=sys.stderr,
+        )
+        return rc if rc != 0 else 1
+
+    print(
+        f"wrote annotated video to {args.output} "
+        f"({len(rows)} telemetry rows, {fps:.3f} fps, {duration:.3f} s)",
+        file=sys.stderr,
+    )
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
