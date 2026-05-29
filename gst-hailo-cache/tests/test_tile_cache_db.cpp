@@ -1,11 +1,14 @@
 // gst-hailo-cache — unit tests for TileCacheDb.
 //
-// Plan 5 Task 2. Five tests, one-to-one with the plan's acceptance:
+// Plan 5 Task 2 + Task 6. Eight tests:
 //   1. open-empty → schema persists; reopen idempotent
 //   2. meta_put upsert (insert then update same key)
 //   3. put_many is one transaction (duplicate PK → rollback the WHOLE batch)
 //   4. get / get_many order preservation
 //   5. mismatched user_version raises
+//   6. open creates the frame_results table too (Task 6)
+//   7. put_frame_results inserts + duplicate-PK rolls back the batch (Task 6)
+//   8. detections + frame_results coexist in one DB (Task 6)
 
 #include "tile_cache_db.hpp"
 
@@ -289,4 +292,136 @@ TEST(TileCacheDb, MismatchedUserVersionRaises) {
 
     // After failed open, the object must not be open.
     EXPECT_FALSE(db.is_open());
+}
+
+// ---------------------------------------------------------------------------
+// Test 6 (Task 6) — opening a DB creates the frame_results table too.
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, OpenCreatesFrameResultsTable) {
+    TmpFile tmp;
+    {
+        hailo_cache::TileCacheDb db;
+        db.open(tmp.str());
+        db.close();
+    }
+    // Both schemas (detections + meta + frame_results) are applied on
+    // every open(); the file is one logical artifact whether the writer
+    // ever populates frame_results or not.
+    EXPECT_TRUE(table_exists(tmp.str(), "detections"));
+    EXPECT_TRUE(table_exists(tmp.str(), "meta"));
+    EXPECT_TRUE(table_exists(tmp.str(), "frame_results"));
+}
+
+// ---------------------------------------------------------------------------
+// Test 7 (Task 6) — put_frame_results round-trip + duplicate-PK rollback.
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, PutFrameResultsRoundTripAndRollback) {
+    TmpFile tmp;
+    hailo_cache::TileCacheDb db;
+    db.open(tmp.str());
+
+    auto make_fr = [](std::int64_t f, std::int32_t ppv, std::string dets,
+                      std::string tiles, double ts = 1700000000.0) {
+        hailo_cache::FrameResultRow r;
+        r.frame_idx  = f;
+        r.ppv        = ppv;
+        r.dets_json  = std::move(dets);
+        r.tiles_json = std::move(tiles);
+        r.ts_epoch   = ts;
+        return r;
+    };
+
+    // Successful insert.
+    db.put_frame_results({
+        make_fr(0, 1, "[]",   "[]"),
+        make_fr(1, 1, "[{\"cls\":0}]", "[{\"x\":0,\"y\":0,\"w\":640,\"h\":480,\"mode\":\"m\"}]"),
+    });
+
+    // Read back via raw SQLite to keep this test independent of any
+    // future TileCacheDb::get_frame_results helper.
+    sqlite3* con = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(tmp.str().c_str(), &con,
+                              SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(
+        con,
+        "SELECT frame_idx, ppv, dets_json, tiles_json, ts_epoch "
+        "FROM frame_results ORDER BY frame_idx",
+        -1, &st, nullptr), SQLITE_OK);
+    int seen = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (seen == 0) {
+            EXPECT_EQ(sqlite3_column_int64(st, 0), 0);
+            EXPECT_EQ(sqlite3_column_int  (st, 1), 1);
+            EXPECT_STREQ(reinterpret_cast<const char*>(sqlite3_column_text(st, 2)), "[]");
+            EXPECT_STREQ(reinterpret_cast<const char*>(sqlite3_column_text(st, 3)), "[]");
+        } else if (seen == 1) {
+            EXPECT_EQ(sqlite3_column_int64(st, 0), 1);
+            EXPECT_STREQ(reinterpret_cast<const char*>(sqlite3_column_text(st, 2)),
+                         "[{\"cls\":0}]");
+        }
+        ++seen;
+    }
+    EXPECT_EQ(seen, 2);
+    sqlite3_finalize(st);
+    sqlite3_close(con);
+
+    // Now attempt a batch with a duplicate (frame_idx=0, ppv=1) — the
+    // primary key — and one good row that should NOT land due to rollback.
+    std::vector<hailo_cache::FrameResultRow> bad = {
+        make_fr(0, 1, "[]", "[]"),         // dup PK → fail
+        make_fr(2, 1, "[]", "[]"),         // would-be-good
+    };
+    EXPECT_THROW(db.put_frame_results(bad), std::runtime_error);
+
+    // Confirm frame_idx=2 didn't slip through (rolled-back batch).
+    ASSERT_EQ(sqlite3_open_v2(tmp.str().c_str(), &con,
+                              SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_prepare_v2(
+        con, "SELECT COUNT(*) FROM frame_results WHERE frame_idx=2",
+        -1, &st, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+    EXPECT_EQ(sqlite3_column_int(st, 0), 0) << "frame_idx=2 row should not have landed";
+    sqlite3_finalize(st);
+    sqlite3_close(con);
+
+    db.close();
+}
+
+// ---------------------------------------------------------------------------
+// Test 8 (Task 6) — detections + frame_results live in the same DB.
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, DetectionsAndFrameResultsCoexist) {
+    TmpFile tmp;
+    hailo_cache::TileCacheDb db;
+    db.open(tmp.str());
+
+    db.put_many({make_row(0, 0, 0, 640, 480, 1, "[]")});
+
+    hailo_cache::FrameResultRow fr;
+    fr.frame_idx = 0;
+    fr.ppv = 1;
+    fr.dets_json = "[]";
+    fr.tiles_json = "[]";
+    fr.ts_epoch = 1700000000.0;
+    db.put_frame_results({fr});
+
+    // Round-trip the detections row.
+    auto got = db.get(0, 0, 0, 640, 480, 1);
+    ASSERT_TRUE(got.has_value());
+
+    // Verify the frame_results row exists via raw sqlite.
+    sqlite3* con = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(tmp.str().c_str(), &con,
+                              SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(
+        con, "SELECT COUNT(*) FROM frame_results", -1, &st, nullptr),
+        SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+    EXPECT_EQ(sqlite3_column_int(st, 0), 1);
+    sqlite3_finalize(st);
+    sqlite3_close(con);
+
+    db.close();
 }

@@ -1,6 +1,6 @@
 // gst-hailo-cache — gtest cases for the hailocachewriter element.
 //
-// Plan 5 Tasks 4 + 5. Verifies:
+// Plan 5 Tasks 4 + 5 + 6. Verifies:
 //   * The element class is registered after the plugin loads.
 //   * Every spec §7.8 property is present with the right type & default.
 //   * `passthrough` is TRUE on a freshly constructed instance.
@@ -9,6 +9,12 @@
 //   * Task 5: `record-empty=false` skips empty rows.
 //   * Task 5: `record-cache-hits` property is preserved (semantics
 //     verified end-to-end in Task 9 once the reader registers the meta).
+//   * Task 6: mode=full_frame produces a `frame_results` table with the
+//     correct schema and one row per buffer.
+//   * Task 6: tile_cache + full_frame writers coexist in one run (two
+//     distinct output files, two distinct schemas).
+//   * Task 6: record-cache-hits=true is silently ignored under
+//     mode=full_frame (pipeline runs cleanly).
 
 #include <gst/gst.h>
 #include <gst/base/gstbasetransform.h>
@@ -352,6 +358,188 @@ TEST(WriterExposesDroppedRows, ReadableProperty) {
     g_object_get(el, "dropped-rows", &n, NULL);
     EXPECT_EQ(n, 0u);
     gst_object_unref(el);
+}
+
+// -- Task 6 helpers ---------------------------------------------------------
+
+// Count rows in the `frame_results` table. Returns -1 on SQLite error
+// (e.g. the table doesn't exist).
+static int count_frame_results(const std::string& path) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_stmt* stmt = nullptr;
+    int n = -1;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM frame_results", -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            n = sqlite3_column_int(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    return n;
+}
+
+// Verify the `frame_results` table exists AND its columns match the
+// spec §7.8 schema EXACTLY (5 columns, the documented names + SQLite
+// types, no extras). Asserts pass-by-pass via gtest macros so any
+// mismatch points to the offending column.
+static void verify_frame_results_schema(const std::string& path) {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr),
+              SQLITE_OK);
+
+    // PRAGMA table_info(frame_results) returns one row per column:
+    //   cid, name, type, notnull, dflt_value, pk
+    sqlite3_stmt* stmt = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db, "PRAGMA table_info(frame_results)",
+                                 -1, &stmt, nullptr),
+              SQLITE_OK);
+
+    struct ColExpect {
+        const char* name;
+        const char* type;
+        int         notnull;
+        int         pk;   // primary-key ordinal (1-based) or 0
+    };
+    static const ColExpect kExpected[] = {
+        // PRIMARY KEY (frame_idx, ppv) ordered → pk=1, pk=2.
+        { "frame_idx",  "INTEGER", 1, 1 },
+        { "ppv",        "INTEGER", 1, 2 },
+        { "dets_json",  "TEXT",    1, 0 },
+        { "tiles_json", "TEXT",    1, 0 },
+        { "ts_epoch",   "REAL",    1, 0 },
+    };
+    constexpr int kExpectedColCount = sizeof(kExpected) / sizeof(kExpected[0]);
+
+    int seen = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ASSERT_LT(seen, kExpectedColCount)
+            << "frame_results has MORE columns than spec §7.8 documents";
+        const ColExpect& want = kExpected[seen];
+        const unsigned char* name = sqlite3_column_text(stmt, 1);
+        const unsigned char* type = sqlite3_column_text(stmt, 2);
+        int notnull = sqlite3_column_int(stmt, 3);
+        int pk      = sqlite3_column_int(stmt, 5);
+        EXPECT_STREQ(reinterpret_cast<const char*>(name), want.name)
+            << "column " << seen << " name mismatch";
+        EXPECT_STREQ(reinterpret_cast<const char*>(type), want.type)
+            << "column " << seen << " (" << want.name << ") type mismatch";
+        EXPECT_EQ(notnull, want.notnull)
+            << "column " << seen << " (" << want.name << ") NOT NULL mismatch";
+        EXPECT_EQ(pk, want.pk)
+            << "column " << seen << " (" << want.name << ") PK ordinal mismatch";
+        ++seen;
+    }
+    EXPECT_EQ(seen, kExpectedColCount)
+        << "frame_results has FEWER columns than spec §7.8 documents";
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+}
+
+// -- Task 6 tests -----------------------------------------------------------
+
+TEST(FullFrameSchema, FrameResultsTableHasCorrectShape) {
+    const std::string out = tmp_db_path("ff_schema");
+
+    const int N = 10;
+    const std::string pipeline_str =
+        std::string("videotestsrc num-buffers=") + std::to_string(N) + " ! "
+      + "identity ! "
+      + "hailocachewriter mode=full_frame output-file=" + out + " ! "
+      + "fakesink";
+
+    ASSERT_TRUE(run_pipeline_to_eos(pipeline_str));
+
+    ASSERT_TRUE(file_exists(out)) << "Expected " << out << " to exist after EOS";
+
+    // The frame_results table must exist and match spec §7.8 byte-for-byte.
+    verify_frame_results_schema(out);
+
+    // And we should have ONE row per buffer (record-empty default = TRUE).
+    EXPECT_EQ(count_frame_results(out), N)
+        << "Expected " << N << " frame_results rows; got "
+        << count_frame_results(out);
+
+    // Sanity: the `detections` table is present (schema.sql + apply_schema_
+    // create both tables on open) but should be EMPTY in full_frame mode
+    // — we should NOT have leaked tile_cache rows into this file.
+    EXPECT_EQ(count_detections(out), 0)
+        << "full_frame writer should NOT populate the detections table";
+
+    ::unlink(out.c_str());
+    ::unlink((out + "-wal").c_str());
+    ::unlink((out + "-shm").c_str());
+}
+
+TEST(FullFrameAndTileCacheCoexist, TwoFilesInOneRun) {
+    const std::string out_tile  = tmp_db_path("coexist_tile");
+    const std::string out_frame = tmp_db_path("coexist_frame");
+
+    const int N = 7;
+    // Chain a tile_cache writer feeding a full_frame writer in the same
+    // pipeline (passthrough, so both see every buffer). This mirrors the
+    // production pipeline placement from spec §7.8:
+    //   ... ! hailocachewriter mode=tile_cache ! hailocachewriter mode=full_frame ! ...
+    // (In production the hailodetiler element sits between them; for the
+    // no-chip test we elide it — the writer doesn't read detection metadata
+    // yet, so the placement is observationally identical.)
+    const std::string pipeline_str =
+        std::string("videotestsrc num-buffers=") + std::to_string(N) + " ! "
+      + "hailocachewriter mode=tile_cache  output-file=" + out_tile  + " ! "
+      + "hailocachewriter mode=full_frame  output-file=" + out_frame + " ! "
+      + "fakesink";
+
+    ASSERT_TRUE(run_pipeline_to_eos(pipeline_str));
+
+    ASSERT_TRUE(file_exists(out_tile));
+    ASSERT_TRUE(file_exists(out_frame));
+
+    // Tile-cache file: detections rows present, frame_results empty.
+    EXPECT_GE(count_detections(out_tile), N);
+    EXPECT_EQ(count_frame_results(out_tile), 0);
+
+    // Full-frame file: frame_results rows present, detections empty.
+    EXPECT_EQ(count_frame_results(out_frame), N);
+    EXPECT_EQ(count_detections(out_frame), 0);
+
+    // Schema of frame_results in the full-frame file is correct.
+    verify_frame_results_schema(out_frame);
+
+    ::unlink(out_tile.c_str());
+    ::unlink((out_tile + "-wal").c_str());
+    ::unlink((out_tile + "-shm").c_str());
+    ::unlink(out_frame.c_str());
+    ::unlink((out_frame + "-wal").c_str());
+    ::unlink((out_frame + "-shm").c_str());
+}
+
+TEST(RecordCacheHitsIgnoredInFullFrame, PipelineRunsCleanly) {
+    // Spec §7.8: `record-cache-hits` is ignored in full_frame mode. The
+    // writer logs a GST_INFO once at start, then accepts buffers as
+    // normal. We verify the pipeline runs cleanly and produces the
+    // expected row count.
+    const std::string out = tmp_db_path("ff_recordhits");
+
+    const int N = 5;
+    const std::string pipeline_str =
+        std::string("videotestsrc num-buffers=") + std::to_string(N) + " ! "
+      + "hailocachewriter mode=full_frame record-cache-hits=true "
+      + "output-file=" + out + " ! fakesink";
+
+    ASSERT_TRUE(run_pipeline_to_eos(pipeline_str));
+
+    ASSERT_TRUE(file_exists(out));
+    EXPECT_EQ(count_frame_results(out), N)
+        << "record-cache-hits=true must NOT change the row count under "
+           "mode=full_frame (the flag is ignored, per spec §7.8)";
+
+    ::unlink(out.c_str());
+    ::unlink((out + "-wal").c_str());
+    ::unlink((out + "-shm").c_str());
 }
 
 }  // namespace

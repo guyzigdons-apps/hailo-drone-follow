@@ -100,3 +100,34 @@ test('hailocachereader', test_hailocachereader,
      env      : [
          'GST_HAILOCACHE_PLUGIN_PATH=' + gsthailocache_lib.full_path(),
      ])
+
+# Plan 5 Task 10 — lookup latency + writer microbench.
+#
+# Wired as a meson benchmark() target rather than a regular test() so
+# `meson test -C build --benchmark` picks it up. The binary writes a
+# human-readable percentile report to ../tests/bench-results.txt
+# (gitignored) and prints the same to stdout. Exit status:
+#   0 — both reader and writer p99 within their spec bars
+#   1 — at least one bench above its spec bar
+#   2 — harness error (pipeline failed, plugin missing, etc.)
+#
+# The writer half drives the real plugin element through a parse-launched
+# pipeline so we exercise the SPSC ring + writer-thread plumbing exactly
+# as production does. We use the same GST_HAILOCACHE_PLUGIN_PATH env-var
+# convention as the writer/reader gtests above so the bench works
+# straight after `ninja` without a system install.
+if with_bench
+    bench_lookup_latency = executable('bench_lookup_latency',
+        'bench_lookup_latency.cpp',
+        include_directories : gsthailocache_inc,
+        dependencies        : [gst_dep, gst_base_dep, sqlite3_dep],
+        link_with           : gsthailocache_lib,
+        install             : false,
+    )
+
+    benchmark('lookup_latency', bench_lookup_latency,
+              timeout  : 120,
+              env      : [
+                  'GST_HAILOCACHE_PLUGIN_PATH=' + gsthailocache_lib.full_path(),
+              ])
+endif

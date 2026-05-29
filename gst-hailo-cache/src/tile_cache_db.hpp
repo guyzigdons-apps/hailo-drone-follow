@@ -45,6 +45,19 @@ struct Row {
     double       ts_epoch{0.0};
 };
 
+// One full-frame result row (spec §7.8 / §7.13). Mirrors the
+// `frame_results` table layout. Written by hailocachewriter
+// mode=full_frame AFTER hailodetiler — `dets_json` carries the
+// aggregated detections in source-frame normalized coords; `tiles_json`
+// carries the tile layout used for the frame as `[{x,y,w,h,mode}, ...]`.
+struct FrameResultRow {
+    std::int64_t frame_idx{0};
+    std::int32_t ppv{0};
+    std::string  dets_json;
+    std::string  tiles_json;
+    double       ts_epoch{0.0};
+};
+
 class TileCacheDb {
 public:
     TileCacheDb() = default;
@@ -93,6 +106,15 @@ public:
     // and std::runtime_error is thrown — same contract as
     // hailo_tiling.cache.store.SqliteCacheStore.put_many.
     void put_many(const std::vector<Row>& rows);
+
+    // Insert `rows` into the `frame_results` table in a single
+    // transaction. Plan 5 Task 6 (`hailocachewriter mode=full_frame`).
+    //
+    // Same empty-input + rollback-on-failure contract as `put_many`.
+    // Both schemas (`detections` and `frame_results`) live in the same
+    // .so / DB file, but a writer typically targets only ONE table per
+    // output-file (see schema.sql commentary).
+    void put_frame_results(const std::vector<FrameResultRow>& rows);
 
     // Single-row lookup. Returns nullopt on cache miss.
     std::optional<Row> get(std::int64_t frame_idx,

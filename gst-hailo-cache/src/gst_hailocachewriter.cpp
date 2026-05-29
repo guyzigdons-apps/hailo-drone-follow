@@ -29,10 +29,24 @@
 //   - `record-empty=false` skips empty rows; `record-cache-hits=false`
 //     skips buffers carrying the `hailo-cache-hit` meta (Task 9 sets it).
 //
-// full_frame mode lands in Task 6. Until then, transform_ip falls back
-// to tile_cache row-building when mode=full_frame (with a one-shot
-// GST_WARNING) so the plumbing stays exercised but no wrong-schema rows
-// hit the disk.
+// full_frame mode (Plan 5 Task 6):
+//   Writes the `frame_results` table — ONE row per buffer, holding
+//   source-frame-coord aggregated detections + the tile layout that was
+//   used this frame. The schema (frame_idx, ppv, dets_json, tiles_json,
+//   ts_epoch) lives in the SAME .so as tile_cache but in a different
+//   table. A given writer instance commits to ONE mode at start time
+//   (the `mode` property is MUTABLE_READY), so we maintain TWO typed
+//   SPSC rings inside the writer and only one is populated at runtime.
+//
+//   Detections + tiles upstream-metadata wiring is the Phase 14 hook;
+//   for Task 6 the row is emitted with dets_json="[]" and (when the
+//   upstream meta channel is missing) tiles_json="[]". The fallback is
+//   logged once per pipeline start so it doesn't spam.
+//
+//   record-cache-hits is documented as IGNORED in full_frame mode
+//   (spec §7.8). We log a GST_INFO once per pipeline start when the
+//   user explicitly set record-cache-hits=true under mode=full_frame,
+//   then ignore the flag.
 
 #include "gst_hailocachewriter.hpp"
 
@@ -218,6 +232,50 @@ std::size_t ring_drain_(HailoCacheWriterRing* ring,
     return drained;
 }
 
+// -- frame_results ring helpers (Plan 5 Task 6) ----------------------------
+//
+// Mirror images of the `Row` helpers above. We keep two typed rings
+// rather than a variant to avoid an extra indirection on the streaming
+// fast path; in production only one ring is populated per instance.
+
+bool ring_try_push_(HailoCacheWriterFrameResultRing* ring, hailo_cache::FrameResultRow&& row)
+{
+    if (!ring || ring->capacity == 0) return false;
+    const std::size_t head = ring->head.load(std::memory_order_relaxed);
+    const std::size_t next = (head + 1) % ring->capacity;
+    if (next == ring->tail.load(std::memory_order_acquire)) {
+        return false;  // full
+    }
+    ring->slots[head] = std::move(row);
+    ring->head.store(next, std::memory_order_release);
+    return true;
+}
+
+std::size_t ring_size_(const HailoCacheWriterFrameResultRing* ring)
+{
+    const std::size_t head = ring->head.load(std::memory_order_acquire);
+    const std::size_t tail = ring->tail.load(std::memory_order_acquire);
+    if (head >= tail) return head - tail;
+    return ring->capacity - (tail - head);
+}
+
+std::size_t ring_drain_(HailoCacheWriterFrameResultRing* ring,
+                        std::size_t max_rows,
+                        std::vector<hailo_cache::FrameResultRow>& out)
+{
+    std::size_t drained = 0;
+    while (drained < max_rows) {
+        const std::size_t tail = ring->tail.load(std::memory_order_relaxed);
+        if (tail == ring->head.load(std::memory_order_acquire)) {
+            break;  // empty
+        }
+        out.push_back(std::move(ring->slots[tail]));
+        ring->tail.store((tail + 1) % ring->capacity, std::memory_order_release);
+        ++drained;
+    }
+    return drained;
+}
+
 // Post a non-fatal ERROR on the element bus and continue.
 void post_writer_error_(GstHailoCacheWriter* self, const std::string& what)
 {
@@ -376,7 +434,8 @@ gst_hailocachewriter_init(GstHailoCacheWriter* self)
     // Allocate the C++ internals. We use plain `new` and store the
     // pointers in the POD struct so GObject doesn't need to know about
     // the C++ types. Lifetime ends in `finalize`.
-    self->ring           = new HailoCacheWriterRing();
+    self->ring               = new HailoCacheWriterRing();
+    self->frame_results_ring = new HailoCacheWriterFrameResultRing();
     self->writer_thread  = nullptr;  // started lazily in `start()`
     self->writer_stop    = new std::atomic<bool>(false);
     self->writer_mu      = new std::mutex();
@@ -501,6 +560,7 @@ gst_hailocachewriter_finalize(GObject* object)
     delete self->writer_started;    self->writer_started = nullptr;
     delete self->dropped_rows;      self->dropped_rows = nullptr;
     delete self->ring;              self->ring = nullptr;
+    delete self->frame_results_ring; self->frame_results_ring = nullptr;
 
     g_free(self->output_file);
     g_free(self->hef_id_meta_key);
@@ -582,38 +642,65 @@ writer_thread_main_(GstHailoCacheWriter* self)
         return;
     }
 
-    std::vector<hailo_cache::Row> batch;
-    batch.reserve(self->batch_size);
+    const bool full_frame_mode =
+        (self->mode == GST_HAILOCACHEWRITER_MODE_FULL_FRAME);
+
+    // We keep both batch vectors stack-local; only the matching one is
+    // ever populated. Branching once outside the loop costs a few cycles
+    // per buffer at most; the alternative (a typed-pointer dispatch)
+    // adds an indirection that's not worth saving here.
+    std::vector<hailo_cache::Row>             batch_tile;
+    std::vector<hailo_cache::FrameResultRow>  batch_frame;
+    if (full_frame_mode) batch_frame.reserve(self->batch_size);
+    else                 batch_tile.reserve(self->batch_size);
 
     const auto flush_period = std::chrono::milliseconds(self->flush_interval_ms);
     auto deadline = std::chrono::steady_clock::now() + flush_period;
+
+    auto pending_rows = [&]() -> std::size_t {
+        return full_frame_mode
+            ? ring_size_(self->frame_results_ring)
+            : ring_size_(self->ring);
+    };
 
     while (true) {
         const bool stop = self->writer_stop->load(std::memory_order_acquire);
         // Sleep until either: a row arrives (signalled via cv), the
         // flush deadline passes, or we're asked to stop.
-        if (!stop && ring_size_(self->ring) < self->batch_size) {
+        if (!stop && pending_rows() < self->batch_size) {
             std::unique_lock<std::mutex> lk(*self->writer_mu);
             self->writer_cv->wait_until(lk, deadline, [&] {
                 return self->writer_stop->load(std::memory_order_acquire) ||
-                       ring_size_(self->ring) >= self->batch_size;
+                       pending_rows() >= self->batch_size;
             });
         }
 
-        // Drain up to batch_size into `batch`.
-        batch.clear();
-        ring_drain_(self->ring, self->batch_size, batch);
-
-        if (!batch.empty()) {
-            try {
-                db.put_many(batch);
-            } catch (const std::exception& e) {
-                // Don't set writer_failed here — a single failed batch
-                // shouldn't poison the connection. Post on the bus and
-                // continue accepting buffers. (The streaming thread is
-                // never blocked either way.)
-                post_writer_error_(self,
-                    std::string("hailocachewriter: put_many failed: ") + e.what());
+        // Drain up to batch_size into the active batch.
+        if (full_frame_mode) {
+            batch_frame.clear();
+            ring_drain_(self->frame_results_ring, self->batch_size, batch_frame);
+            if (!batch_frame.empty()) {
+                try {
+                    db.put_frame_results(batch_frame);
+                } catch (const std::exception& e) {
+                    post_writer_error_(self,
+                        std::string("hailocachewriter: put_frame_results failed: ") + e.what());
+                }
+            }
+        } else {
+            batch_tile.clear();
+            ring_drain_(self->ring, self->batch_size, batch_tile);
+            if (!batch_tile.empty()) {
+                try {
+                    db.put_many(batch_tile);
+                } catch (const std::exception& e) {
+                    // Don't set writer_failed here — a single failed batch
+                    // shouldn't poison the connection. Post on the bus and
+                    // continue accepting buffers. (The streaming thread is
+                    // never blocked either way.)
+                    post_writer_error_(self,
+                        std::string("hailocachewriter: put_many failed: ") + e.what());
+                }
             }
         }
 
@@ -623,7 +710,7 @@ writer_thread_main_(GstHailoCacheWriter* self)
 
         // Exit only when stop has been requested AND the ring is drained.
         if (self->writer_stop->load(std::memory_order_acquire) &&
-            ring_size_(self->ring) == 0) {
+            pending_rows() == 0) {
             break;
         }
     }
@@ -634,13 +721,25 @@ writer_thread_main_(GstHailoCacheWriter* self)
 static void
 ensure_ring_allocated_(GstHailoCacheWriter* self)
 {
-    if (self->ring->capacity == 0) {
-        std::size_t cap = static_cast<std::size_t>(self->batch_size) * 4;
-        if (cap < RING_MIN_CAPACITY) cap = RING_MIN_CAPACITY;
-        self->ring->slots = std::unique_ptr<hailo_cache::Row[]>(new hailo_cache::Row[cap]);
-        self->ring->capacity = cap;
-        self->ring->head.store(0, std::memory_order_relaxed);
-        self->ring->tail.store(0, std::memory_order_relaxed);
+    std::size_t cap = static_cast<std::size_t>(self->batch_size) * 4;
+    if (cap < RING_MIN_CAPACITY) cap = RING_MIN_CAPACITY;
+
+    if (self->mode == GST_HAILOCACHEWRITER_MODE_FULL_FRAME) {
+        if (self->frame_results_ring->capacity == 0) {
+            self->frame_results_ring->slots =
+                std::unique_ptr<hailo_cache::FrameResultRow[]>(
+                    new hailo_cache::FrameResultRow[cap]);
+            self->frame_results_ring->capacity = cap;
+            self->frame_results_ring->head.store(0, std::memory_order_relaxed);
+            self->frame_results_ring->tail.store(0, std::memory_order_relaxed);
+        }
+    } else {
+        if (self->ring->capacity == 0) {
+            self->ring->slots = std::unique_ptr<hailo_cache::Row[]>(new hailo_cache::Row[cap]);
+            self->ring->capacity = cap;
+            self->ring->head.store(0, std::memory_order_relaxed);
+            self->ring->tail.store(0, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -668,8 +767,13 @@ gst_hailocachewriter_start(GstBaseTransform* trans)
     // and ring_drain_ would read garbage from stale slot indices).
     // The writer thread is not running yet, so no synchronization with
     // a consumer is needed here; relaxed is sufficient.
-    self->ring->head.store(0, std::memory_order_relaxed);
-    self->ring->tail.store(0, std::memory_order_relaxed);
+    if (self->mode == GST_HAILOCACHEWRITER_MODE_FULL_FRAME) {
+        self->frame_results_ring->head.store(0, std::memory_order_relaxed);
+        self->frame_results_ring->tail.store(0, std::memory_order_relaxed);
+    } else {
+        self->ring->head.store(0, std::memory_order_relaxed);
+        self->ring->tail.store(0, std::memory_order_relaxed);
+    }
 
     // Spawn the writer thread.
     try {
@@ -682,12 +786,26 @@ gst_hailocachewriter_start(GstBaseTransform* trans)
     }
     self->writer_started->store(true, std::memory_order_release);
 
+    const std::size_t reported_capacity =
+        (self->mode == GST_HAILOCACHEWRITER_MODE_FULL_FRAME)
+            ? self->frame_results_ring->capacity
+            : self->ring->capacity;
     GST_INFO_OBJECT(self,
         "writer started: output-file=%s mode=%d batch-size=%u "
         "flush-interval-ms=%u ring-capacity=%zu",
         self->output_file ? self->output_file : "(unset)",
         (int)self->mode, self->batch_size, self->flush_interval_ms,
-        self->ring->capacity);
+        reported_capacity);
+
+    // Plan 5 Task 6 / spec §7.8: record-cache-hits is IGNORED in
+    // full_frame mode. Surface a one-shot GST_INFO so the user knows the
+    // property is being silently dropped rather than honoured.
+    if (self->mode == GST_HAILOCACHEWRITER_MODE_FULL_FRAME && self->record_cache_hits) {
+        GST_INFO_OBJECT(self,
+            "mode=full_frame: record-cache-hits=true is ignored "
+            "(spec §7.8). Full-frame recording always happens, "
+            "including during replay.");
+    }
 
     return TRUE;
 }
@@ -768,15 +886,15 @@ gst_hailocachewriter_sink_event(GstBaseTransform* trans, GstEvent* event)
 
 // -- transform_ip (streaming-thread side) -----------------------------------
 //
-// For Task 5, in tile_cache mode we emit ONE row per buffer with the
-// full-frame crop (0, 0, width, height) and `dets_json="[]"`. This is
-// the documented fallback when upstream crop-list metadata is missing;
+// In tile_cache mode we emit ONE row per buffer with the full-frame
+// crop (0, 0, width, height) and `dets_json="[]"`. This is the
+// documented fallback when upstream crop-list metadata is missing;
 // Phase 14 will plumb real crops + detections through.
 //
-// In full_frame mode (Task 6 — not yet implemented), we currently fall
-// back to the same single-row tile_cache shape with a one-shot WARNING.
-// This keeps the pipeline composing without writing wrong-schema rows;
-// Task 6 will branch the row construction.
+// In full_frame mode (Plan 5 Task 6) we emit ONE row per buffer into the
+// `frame_results` table with dets_json="[]" and tiles_json="[]". The
+// schema is correct; the payload becomes real once Phase 14 wires the
+// upstream HailoROI + tile-list metadata channels.
 
 namespace {
 
@@ -821,6 +939,52 @@ void emit_tile_cache_row_(GstHailoCacheWriter* self,
     }
 }
 
+// Plan 5 Task 6: emit one frame_results row.  `dets_json` carries
+// source-frame-coord aggregated detections; `tiles_json` carries the
+// tile layout list `[{x,y,w,h,mode}, ...]`. Both default to "[]" for
+// Task 6 (the upstream HailoROI / tile-list metadata channels are
+// Phase 14 work — see transform_ip's TODOs).
+void emit_frame_result_row_(GstHailoCacheWriter* self,
+                            std::int64_t frame_idx,
+                            std::int32_t ppv,
+                            const std::string& dets_json,
+                            const std::string& tiles_json,
+                            double ts_epoch)
+{
+    // record-empty=false: skip rows that look fully empty. We treat a
+    // frame_result as "empty" only when BOTH detections and tile layout
+    // are absent — keeping a row with zero dets but a known tile layout
+    // is still useful provenance (the visualizer needs to know we did
+    // schedule tiles even if nothing matched).
+    if (!self->record_empty && dets_json == "[]" && tiles_json == "[]") {
+        return;
+    }
+
+    hailo_cache::FrameResultRow row;
+    row.frame_idx  = frame_idx;
+    row.ppv        = ppv;
+    row.dets_json  = dets_json;
+    row.tiles_json = tiles_json;
+    row.ts_epoch   = ts_epoch;
+
+    if (!ring_try_push_(self->frame_results_ring, std::move(row))) {
+        const std::uint64_t prev = self->dropped_rows->fetch_add(1, std::memory_order_relaxed);
+        if ((prev % 100) == 0) {
+            GST_WARNING_OBJECT(self,
+                "SPSC frame_results ring full — dropping row "
+                "(total dropped=%" G_GUINT64_FORMAT
+                "). Increase batch-size or shorten flush-interval-ms.",
+                (guint64)(prev + 1));
+        }
+        return;
+    }
+
+    if (ring_size_(self->frame_results_ring) >= self->batch_size) {
+        std::lock_guard<std::mutex> lk(*self->writer_mu);
+        self->writer_cv->notify_one();
+    }
+}
+
 }  // namespace
 
 static GstFlowReturn
@@ -840,7 +1004,11 @@ gst_hailocachewriter_transform_ip(GstBaseTransform* trans, GstBuffer* buffer)
     // record-cache-hits=false: skip buffers carrying the cache-hit meta.
     // Until Task 9 registers the meta type, this is a no-op (the lookup
     // returns 0 GType and `buffer_has_cache_hit_meta_` returns false).
-    if (!self->record_cache_hits && buffer_has_cache_hit_meta_(buffer)) {
+    //
+    // Plan 5 Task 6 / spec §7.8: this flag is IGNORED in full_frame
+    // mode (full-frame recording always happens, even during replay).
+    if (self->mode != GST_HAILOCACHEWRITER_MODE_FULL_FRAME &&
+        !self->record_cache_hits && buffer_has_cache_hit_meta_(buffer)) {
         return GST_FLOW_OK;
     }
 
@@ -885,23 +1053,46 @@ gst_hailocachewriter_transform_ip(GstBaseTransform* trans, GstBuffer* buffer)
     }
 
     if (self->mode == GST_HAILOCACHEWRITER_MODE_FULL_FRAME) {
-        // TODO(Task 6): branch to frame_results-shaped row.
-        static gboolean warned_once = FALSE;
-        if (!warned_once) {
-            warned_once = TRUE;
+        // Plan 5 Task 6 — frame_results row.
+        //
+        // dets_json: TODO(Phase 14) — read source-frame-coord
+        // detections from the buffer's HailoROI (set by hailodetiler).
+        // For Task 6 we emit "[]".
+        //
+        // tiles_json: TODO(Phase 14) — read the tile-list metadata set
+        // upstream by hailotilecropper_dynamic (the same channel
+        // hailocachewriter mode=tile_cache will consume). When that
+        // metadata channel lands, this becomes
+        //   [{"x":..,"y":..,"w":..,"h":..,"mode":".."}, ...].
+        // Until then, emit "[]" and log a one-shot WARNING so it's
+        // obvious in test logs that the tile layout is missing.
+        static gboolean warned_no_tiles_once = FALSE;
+        if (!warned_no_tiles_once) {
+            warned_no_tiles_once = TRUE;
             GST_WARNING_OBJECT(self,
-                "mode=full_frame is a Task 6 deliverable; currently falling "
-                "back to tile_cache row shape. Output file may carry rows "
-                "with the wrong schema for full_frame consumers.");
+                "mode=full_frame: upstream tile-list metadata channel "
+                "is not yet wired (Phase 14). Emitting tiles_json='[]' "
+                "for every frame. The frame_results schema is correct; "
+                "only the tile-layout payload is empty.");
         }
+
+        const std::string ff_dets_json  = "[]";
+        const std::string ff_tiles_json = "[]";
+        emit_frame_result_row_(self, frame_idx, kPpv,
+                               ff_dets_json, ff_tiles_json, ts_epoch);
+
+        GST_LOG_OBJECT(self,
+            "buffer #%" G_GUINT64_FORMAT " frame_idx=%" G_GINT64_FORMAT
+            " full_frame (dets/tiles empty)",
+            self->buffer_count, (gint64)frame_idx);
+    } else {
+        emit_tile_cache_row_(self, frame_idx, ts_epoch, cx, cy, cw, ch, kPpv, dets_json);
+
+        GST_LOG_OBJECT(self,
+            "buffer #%" G_GUINT64_FORMAT " frame_idx=%" G_GINT64_FORMAT
+            " crop=(%d,%d,%dx%d)",
+            self->buffer_count, (gint64)frame_idx, cx, cy, cw, ch);
     }
-
-    emit_tile_cache_row_(self, frame_idx, ts_epoch, cx, cy, cw, ch, kPpv, dets_json);
-
-    GST_LOG_OBJECT(self,
-        "buffer #%" G_GUINT64_FORMAT " frame_idx=%" G_GINT64_FORMAT
-        " crop=(%d,%d,%dx%d)",
-        self->buffer_count, (gint64)frame_idx, cx, cy, cw, ch);
 
     return GST_FLOW_OK;
 }

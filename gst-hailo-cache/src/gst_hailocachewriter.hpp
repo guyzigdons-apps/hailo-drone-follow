@@ -95,6 +95,18 @@ struct HailoCacheWriterRing {
     std::atomic<std::size_t>             tail{0};   // consumer: writer thread
 };
 
+// Parallel SPSC ring of `FrameResultRow` for Plan 5 Task 6's full_frame
+// mode. Only one of the two rings is actively pushed-to per element
+// instance (gated by the `mode` property at start time). Keeping them
+// as distinct typed rings avoids variant boilerplate and lets the
+// writer thread call the correct `TileCacheDb::put_*` overload directly.
+struct HailoCacheWriterFrameResultRing {
+    std::unique_ptr<hailo_cache::FrameResultRow[]> slots;
+    std::size_t                                     capacity{0};
+    std::atomic<std::size_t>                        head{0};
+    std::atomic<std::size_t>                        tail{0};
+};
+
 struct _GstHailoCacheWriter {
     GstBaseTransform base;
 
@@ -121,8 +133,12 @@ struct _GstHailoCacheWriter {
     std::int32_t                     frame_width;
     std::int32_t                     frame_height;
 
-    // Cached state for the writer thread.
-    HailoCacheWriterRing*            ring;
+    // Cached state for the writer thread. The tile_cache ring carries
+    // `Row` values (one row per crop, schema §7.2); the frame_results
+    // ring carries `FrameResultRow` values (one per frame, spec §7.13).
+    // Only the ring matching `mode` is populated at runtime.
+    HailoCacheWriterRing*               ring;
+    HailoCacheWriterFrameResultRing*    frame_results_ring;
     std::thread*                     writer_thread;
     std::atomic<bool>*               writer_stop;
     std::mutex*                      writer_mu;

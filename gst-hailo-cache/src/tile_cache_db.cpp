@@ -43,6 +43,23 @@ constexpr const char* kCreateMeta =
     "    v TEXT NOT NULL"
     ");";
 
+// Plan 5 Task 6: full_frame mode (spec §7.8 / §7.13). Same DDL the
+// Python schema.sql carries — both readers/writers accept it.
+constexpr const char* kCreateFrameResults =
+    "CREATE TABLE IF NOT EXISTS frame_results ("
+    "    frame_idx    INTEGER NOT NULL,"
+    "    ppv          INTEGER NOT NULL,"
+    "    dets_json    TEXT    NOT NULL,"
+    "    tiles_json   TEXT    NOT NULL,"
+    "    ts_epoch     REAL    NOT NULL,"
+    "    PRIMARY KEY (frame_idx, ppv)"
+    ") WITHOUT ROWID;";
+
+constexpr const char* kInsertFrameResult =
+    "INSERT INTO frame_results "
+    "(frame_idx, ppv, dets_json, tiles_json, ts_epoch) "
+    "VALUES (?, ?, ?, ?, ?)";
+
 constexpr const char* kInsertDetection =
     "INSERT INTO detections "
     "(frame_idx, crop_x, crop_y, crop_w, crop_h, ppv, dets_json, ts_epoch) "
@@ -122,6 +139,10 @@ void TileCacheDb::exec_(const char* sql) {
 void TileCacheDb::apply_schema_() {
     exec_(kCreateDetections);
     exec_(kCreateMeta);
+    // Plan 5 Task 6: full_frame mode also needs its table on the same
+    // schema_version. `IF NOT EXISTS` makes this safe for tile_cache-only
+    // files (the empty table is a no-op until full_frame writes a row).
+    exec_(kCreateFrameResults);
 }
 
 void TileCacheDb::check_user_version_(bool was_new) {
@@ -304,6 +325,44 @@ void TileCacheDb::put_many(const std::vector<Row>& rows) {
             int sr = sqlite3_step(stmt);
             if (sr != SQLITE_DONE) {
                 throw make_error_(con_, "put_many: INSERT step failed");
+            }
+        }
+    } catch (...) {
+        sqlite3_finalize(stmt);
+        sqlite3_exec(con_, "ROLLBACK", nullptr, nullptr, nullptr);
+        throw;
+    }
+    sqlite3_finalize(stmt);
+    exec_("COMMIT");
+}
+
+// -- put_frame_results (Plan 5 Task 6) --------------------------------------
+
+void TileCacheDb::put_frame_results(const std::vector<FrameResultRow>& rows) {
+    if (!con_) throw std::runtime_error("TileCacheDb::put_frame_results: not open");
+    if (rows.empty()) return;
+
+    exec_("BEGIN");
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(con_, kInsertFrameResult, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        auto err = make_error_(con_, "put_frame_results: prepare INSERT failed");
+        sqlite3_exec(con_, "ROLLBACK", nullptr, nullptr, nullptr);
+        throw err;
+    }
+
+    try {
+        for (const auto& r : rows) {
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+            sqlite3_bind_int64 (stmt, 1, r.frame_idx);
+            sqlite3_bind_int   (stmt, 2, r.ppv);
+            sqlite3_bind_text  (stmt, 3, r.dets_json.c_str(),  -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text  (stmt, 4, r.tiles_json.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_double(stmt, 5, r.ts_epoch);
+            int sr = sqlite3_step(stmt);
+            if (sr != SQLITE_DONE) {
+                throw make_error_(con_, "put_frame_results: INSERT step failed");
             }
         }
     } catch (...) {
