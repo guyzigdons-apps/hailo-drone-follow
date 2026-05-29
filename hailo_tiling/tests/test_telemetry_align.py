@@ -115,3 +115,22 @@ def test_align_invalid_strategy():
     rows = [_ulg_shaped_row(0.0)]
     with pytest.raises(ValueError, match="unknown strategy"):
         align_to_video(rows, Path("/tmp/does_not_exist.mp4"), "bogus")
+
+
+def test_ffprobe_creation_time_missing_tag(monkeypatch, tmp_path):
+    """ffprobe JSON with empty tags must raise ValueError."""
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"")
+
+    def fake_run(cmd, *args, **kwargs):  # noqa: ARG001
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout=json.dumps({"format": {"tags": {}}}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(align_module.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError):
+        align_module._ffprobe_creation_time(video_path)

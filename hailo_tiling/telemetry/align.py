@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -127,7 +128,7 @@ def _find_sibling_srt(video_path: Path) -> Optional[Path]:
     look for the case-sensitive match first, then a lowercase variant.
     Returns ``None`` if neither exists.
     """
-    for suffix in (".srt", ".SRT"):
+    for suffix in (".srt", ".SRT", ".Srt"):
         candidate = video_path.with_suffix(suffix)
         if candidate.exists():
             return candidate
@@ -197,12 +198,18 @@ def _parse_offset_strategy(strategy: str) -> float:
             f"Valid strategies: {_VALID_STRATEGIES}"
         )
     try:
-        return float(tail)
+        val = float(tail)
     except ValueError as exc:
         raise ValueError(
             f"offset strategy value {tail!r} is not a float "
             f"(strategy={strategy!r})"
         ) from exc
+    if not math.isfinite(val):
+        raise ValueError(
+            f"offset strategy value {tail!r} is not finite "
+            f"(strategy={strategy!r})"
+        )
+    return val
 
 
 def align_to_video(
@@ -255,6 +262,14 @@ def align_to_video(
         # a tzinfo we drop it for the subtraction (we're aligning two
         # timestamps that both nominally describe wall-clock UTC anyway).
         if (first_iso.tzinfo is None) != (creation.tzinfo is None):
+            log.warning(
+                "align_to_video: timezone mismatch -- srt_first_iso tz=%s, "
+                "video_creation tz=%s; treating both as wall-clock UTC. "
+                "If the camera records local time, the offset may be off by "
+                "the UTC offset.",
+                first_iso.tzinfo,
+                creation.tzinfo,
+            )
             first_iso = first_iso.replace(tzinfo=None)
             creation = creation.replace(tzinfo=None)
         offset = (first_iso - creation).total_seconds()
