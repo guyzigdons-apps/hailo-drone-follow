@@ -2,25 +2,36 @@
 //
 // Task 1 of Plan 5 (docs/superpowers/plans/2026-05-28-gst-cache-plugins.md):
 //   scaffold only — no element classes registered yet.
-//
-// Element classes (hailocachewriter, hailocachereader) are registered in
-// later tasks (Task 4 and Task 8 respectively). For now this file only
-// brings up the GST_PLUGIN_DEFINE plumbing so the install + registry
-// hand-off can be exercised end-to-end before any real code lands.
+// Task 4 of Plan 5:
+//   register `hailocachewriter` (passthrough skeleton + property surface).
+// Task 8 of Plan 5 (concurrent):
+//   register `hailocachereader` alongside the writer. Both registrations
+//   sit side-by-side here so the two tasks can land without disturbing
+//   each other; if Task 8 lands first, its `gst_element_register(...)`
+//   call will already be present — just leave it alone and add the
+//   writer line next to it.
 
 #include <gst/gst.h>
+
+#include "gst_hailocachewriter.hpp"
 
 #ifndef PACKAGE
 #define PACKAGE "hailo-drone-follow"
 #endif
 
 static gboolean
-plugin_init(GstPlugin* /*plugin*/)
+plugin_init(GstPlugin* plugin)
 {
-    // Intentionally empty: element classes register in later tasks.
-    // Returning TRUE means "plugin loaded; the (empty) element set was
-    // installed successfully", which is what gst-inspect expects for a
-    // scaffold drop.
+    // WRITER — Task 4.
+    if (!gst_element_register(plugin, "hailocachewriter",
+                              GST_RANK_NONE,
+                              GST_TYPE_HAILOCACHEWRITER)) {
+        return FALSE;
+    }
+
+    // READER — Task 8 (registers `hailocachereader`). Add registration
+    // here when Task 8 lands; until then the plugin ships writer only.
+
     return TRUE;
 }
 

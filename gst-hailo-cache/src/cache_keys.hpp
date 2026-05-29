@@ -50,8 +50,9 @@ struct CanonicalCrop {
     std::int32_t h;
 };
 
-// Round-down quantisation to multiples of q. q<=1 is identity.
-// Matches hailo_tiling.cache.hashing.canonicalize_crop byte-for-byte.
+// Round-down quantisation to multiples of q. q<=1 (including zero and
+// negative) is identity. Matches hailo_tiling.cache.hashing.canonicalize_crop
+// byte-for-byte.
 CanonicalCrop canonicalize_crop(std::int32_t x,
                                 std::int32_t y,
                                 std::int32_t w,

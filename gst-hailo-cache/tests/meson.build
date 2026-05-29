@@ -51,3 +51,25 @@ cache_keys_cli = executable('cache_keys_cli',
     link_with           : gsthailocache_lib,
     install             : false,
 )
+
+# Plan 5 Task 4 — hailocachewriter element gtest.
+#
+# Unlike test_tile_cache_db / test_keys (which link directly against the
+# .so and exercise internal symbols), this test must EXERCISE the loaded
+# GStreamer plugin — element-factory lookups need the plugin registered
+# with the global gstreamer registry, which happens via
+# gst_plugin_load_file(). The test passes the path through env var
+# GST_HAILOCACHE_PLUGIN_PATH; meson.build below sets it relative to the
+# build tree so `meson test` works straight after `ninja`.
+test_hailocachewriter = executable('test_hailocachewriter',
+    'test_hailocachewriter.cpp',
+    include_directories : gsthailocache_inc,
+    dependencies        : [gtest_dep, gst_dep, gst_base_dep],
+    install             : false,
+)
+
+test('hailocachewriter', test_hailocachewriter,
+     protocol : 'gtest',
+     env      : [
+         'GST_HAILOCACHE_PLUGIN_PATH=' + gsthailocache_lib.full_path(),
+     ])
