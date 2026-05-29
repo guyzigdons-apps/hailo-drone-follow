@@ -1,5 +1,6 @@
 project('gst-hailo-cache', 'c', 'cpp',
         version : '0.1.0',
+        meson_version : '>= 0.59',
         default_options : [ 'warning_level=1',
                             'buildtype=release',
                             'c_std=c11', 'cpp_std=c++17',
@@ -25,3 +26,4 @@ with_bench = get_option('with_bench')
 message('with_bench: @0@'.format(with_bench))
 
 subdir('src')
+subdir('tests')

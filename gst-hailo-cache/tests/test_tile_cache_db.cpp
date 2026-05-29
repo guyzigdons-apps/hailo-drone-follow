@@ -1,0 +1,292 @@
+// gst-hailo-cache — unit tests for TileCacheDb.
+//
+// Plan 5 Task 2. Five tests, one-to-one with the plan's acceptance:
+//   1. open-empty → schema persists; reopen idempotent
+//   2. meta_put upsert (insert then update same key)
+//   3. put_many is one transaction (duplicate PK → rollback the WHOLE batch)
+//   4. get / get_many order preservation
+//   5. mismatched user_version raises
+
+#include "tile_cache_db.hpp"
+
+#include <gtest/gtest.h>
+#include <sqlite3.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+class TmpFile {
+public:
+    TmpFile() {
+        auto dir = fs::temp_directory_path() / "gsthailocache_tests";
+        fs::create_directories(dir);
+        // Mix in pid + a counter for parallel-test safety.
+        static int counter = 0;
+        path_ = dir / ("cache_" + std::to_string(::getpid()) + "_" +
+                       std::to_string(++counter) + ".sqlite3");
+        // Ensure clean slate.
+        std::error_code ec;
+        fs::remove(path_, ec);
+        // Also remove the WAL/SHM sidecars from a stale prior run.
+        fs::remove(fs::path(path_).string() + "-wal", ec);
+        fs::remove(fs::path(path_).string() + "-shm", ec);
+    }
+    ~TmpFile() {
+        std::error_code ec;
+        fs::remove(path_, ec);
+        fs::remove(fs::path(path_).string() + "-wal", ec);
+        fs::remove(fs::path(path_).string() + "-shm", ec);
+    }
+    const std::string& str() const { return path_str_cache_(); }
+private:
+    const std::string& path_str_cache_() const {
+        if (cached_.empty()) cached_ = path_.string();
+        return cached_;
+    }
+    fs::path             path_;
+    mutable std::string  cached_;
+};
+
+hailo_cache::Row make_row(std::int64_t f, std::int32_t x, std::int32_t y,
+                          std::int32_t w, std::int32_t h, std::int32_t ppv,
+                          std::string dets = "[]", double ts = 1700000000.0) {
+    hailo_cache::Row r;
+    r.frame_idx = f;
+    r.crop_x = x;
+    r.crop_y = y;
+    r.crop_w = w;
+    r.crop_h = h;
+    r.ppv = ppv;
+    r.dets_json = std::move(dets);
+    r.ts_epoch = ts;
+    return r;
+}
+
+// Helper: read PRAGMA user_version directly via libsqlite3 (independent
+// path from TileCacheDb so the assertions actually verify on-disk state).
+int read_user_version(const std::string& path) {
+    sqlite3* con = nullptr;
+    int rc = sqlite3_open_v2(path.c_str(), &con, SQLITE_OPEN_READONLY, nullptr);
+    if (rc != SQLITE_OK) { if (con) sqlite3_close(con); return -1; }
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(con, "PRAGMA user_version", -1, &st, nullptr);
+    int uv = -1;
+    if (sqlite3_step(st) == SQLITE_ROW) uv = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    sqlite3_close(con);
+    return uv;
+}
+
+bool table_exists(const std::string& path, const char* name) {
+    sqlite3* con = nullptr;
+    if (sqlite3_open_v2(path.c_str(), &con, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        if (con) sqlite3_close(con);
+        return false;
+    }
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(con,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_TRANSIENT);
+    bool found = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    sqlite3_close(con);
+    return found;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Test 1 — open-empty creates schema; reopen is idempotent.
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, OpenEmptyCreatesSchemaAndReopenIsIdempotent) {
+    TmpFile tmp;
+
+    {
+        hailo_cache::TileCacheDb db;
+        db.open(tmp.str());
+        EXPECT_TRUE(db.is_open());
+        db.close();
+        EXPECT_FALSE(db.is_open());
+    }
+
+    EXPECT_EQ(read_user_version(tmp.str()), hailo_cache::kSchemaVersion);
+    EXPECT_TRUE(table_exists(tmp.str(), "detections"));
+    EXPECT_TRUE(table_exists(tmp.str(), "meta"));
+
+    // Reopen — must succeed and not double-apply / reset anything.
+    {
+        hailo_cache::TileCacheDb db;
+        db.open(tmp.str());
+        // Insert a row, close, reopen and confirm the row's still there
+        // (i.e. reopen didn't drop the table).
+        db.put_many({make_row(0, 10, 20, 100, 200, 1, "[]")});
+        db.close();
+    }
+    {
+        hailo_cache::TileCacheDb db;
+        db.open(tmp.str());
+        auto r = db.get(0, 10, 20, 100, 200, 1);
+        ASSERT_TRUE(r.has_value());
+        EXPECT_EQ(r->dets_json, "[]");
+        db.close();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 2 — meta_put upserts (insert then update same key).
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, MetaPutInsertsThenUpdates) {
+    TmpFile tmp;
+    hailo_cache::TileCacheDb db;
+    db.open(tmp.str());
+
+    // Insert.
+    db.meta_put("video_sha", "abc123");
+    auto v1 = db.meta_get("video_sha");
+    ASSERT_TRUE(v1.has_value());
+    EXPECT_EQ(*v1, "abc123");
+
+    // Upsert with the SAME key — must update, not duplicate-PK fail.
+    db.meta_put("video_sha", "def456");
+    auto v2 = db.meta_get("video_sha");
+    ASSERT_TRUE(v2.has_value());
+    EXPECT_EQ(*v2, "def456");
+
+    // Unknown key returns nullopt.
+    EXPECT_FALSE(db.meta_get("does_not_exist").has_value());
+
+    db.close();
+}
+
+// ---------------------------------------------------------------------------
+// Test 3 — put_many is ONE transaction: a mid-batch failure rolls back
+//          ALL inserts in the batch (matches Python
+//          test_put_many_is_one_transaction).
+//
+// We trigger the failure by including two rows with the same primary
+// key in a single batch — the second INSERT fails with SQLITE_CONSTRAINT.
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, PutManyIsOneTransaction) {
+    TmpFile tmp;
+    hailo_cache::TileCacheDb db;
+    db.open(tmp.str());
+
+    // Sanity: first put a valid row OUTSIDE the failing batch.
+    db.put_many({make_row(42, 1, 2, 3, 4, 1, "[\"existing\"]")});
+    ASSERT_TRUE(db.get(42, 1, 2, 3, 4, 1).has_value());
+
+    // Now attempt a batch that contains a duplicate primary key
+    // between rows[0] and rows[1]. rows[2] is a UNIQUE good row that
+    // we want to confirm did NOT land — proving the rollback.
+    std::vector<hailo_cache::Row> rows = {
+        make_row(100, 0, 0, 640, 480, 1, "[\"a\"]"),
+        make_row(100, 0, 0, 640, 480, 1, "[\"b\"]"),  // dup PK → fail
+        make_row(101, 0, 0, 640, 480, 1, "[\"c\"]"),  // never reached
+    };
+    EXPECT_THROW(db.put_many(rows), std::runtime_error);
+
+    // None of the batch's three rows should be visible. The
+    // pre-existing row 42 must still be there.
+    EXPECT_FALSE(db.get(100, 0, 0, 640, 480, 1).has_value());
+    EXPECT_FALSE(db.get(101, 0, 0, 640, 480, 1).has_value());
+    auto pre = db.get(42, 1, 2, 3, 4, 1);
+    ASSERT_TRUE(pre.has_value());
+    EXPECT_EQ(pre->dets_json, "[\"existing\"]");
+
+    db.close();
+}
+
+// ---------------------------------------------------------------------------
+// Test 4 — get / get_many preserve input order; nullopt on miss.
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, GetManyPreservesOrder) {
+    TmpFile tmp;
+    hailo_cache::TileCacheDb db;
+    db.open(tmp.str());
+
+    // Insert a few rows out of "request order".
+    db.put_many({
+        make_row(7, 100, 100, 200, 200, 1, "[\"alpha\"]"),
+        make_row(7, 300, 300, 200, 200, 1, "[\"beta\"]"),
+        make_row(7, 500, 500, 200, 200, 1, "[\"gamma\"]"),
+    });
+
+    // Build a lookup vector with deliberate (hit, miss, hit, miss, hit)
+    // ordering — verifies position-preserving nullopts.
+    std::vector<hailo_cache::TileCacheDb::CropKey> crops = {
+        {500, 500, 200, 200},   // hit  → gamma
+        {999, 999, 200, 200},   // miss
+        {100, 100, 200, 200},   // hit  → alpha
+        {  0,   0, 200, 200},   // miss
+        {300, 300, 200, 200},   // hit  → beta
+    };
+    auto results = db.get_many(7, crops, 1);
+    ASSERT_EQ(results.size(), crops.size());
+
+    ASSERT_TRUE(results[0].has_value());
+    EXPECT_EQ(results[0]->dets_json, "[\"gamma\"]");
+
+    EXPECT_FALSE(results[1].has_value());
+
+    ASSERT_TRUE(results[2].has_value());
+    EXPECT_EQ(results[2]->dets_json, "[\"alpha\"]");
+
+    EXPECT_FALSE(results[3].has_value());
+
+    ASSERT_TRUE(results[4].has_value());
+    EXPECT_EQ(results[4]->dets_json, "[\"beta\"]");
+
+    // single-row get sanity-check
+    auto g = db.get(7, 100, 100, 200, 200, 1);
+    ASSERT_TRUE(g.has_value());
+    EXPECT_EQ(g->dets_json, "[\"alpha\"]");
+    EXPECT_EQ(g->frame_idx, 7);
+    EXPECT_EQ(g->crop_x, 100);
+    EXPECT_EQ(g->ppv, 1);
+
+    db.close();
+}
+
+// ---------------------------------------------------------------------------
+// Test 5 — mismatched user_version raises on open.
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, MismatchedUserVersionRaises) {
+    TmpFile tmp;
+
+    // Create a SQLite with PRAGMA user_version = 99 (bogus future schema).
+    {
+        sqlite3* con = nullptr;
+        ASSERT_EQ(sqlite3_open_v2(tmp.str().c_str(), &con,
+                                  SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                                  nullptr),
+                  SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(con, "PRAGMA user_version = 99",
+                               nullptr, nullptr, nullptr),
+                  SQLITE_OK);
+        sqlite3_close(con);
+    }
+
+    hailo_cache::TileCacheDb db;
+    try {
+        db.open(tmp.str());
+        FAIL() << "Expected std::runtime_error for mismatched user_version";
+    } catch (const std::runtime_error& e) {
+        std::string msg = e.what();
+        EXPECT_NE(msg.find("schema_version mismatch"), std::string::npos)
+            << "msg = " << msg;
+        EXPECT_NE(msg.find("file=99"), std::string::npos) << "msg = " << msg;
+        EXPECT_NE(msg.find("expected=1"), std::string::npos) << "msg = " << msg;
+    }
+
+    // After failed open, the object must not be open.
+    EXPECT_FALSE(db.is_open());
+}
