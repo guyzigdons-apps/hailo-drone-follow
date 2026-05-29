@@ -83,3 +83,14 @@ Hard guardrails (cron tick #2 onwards):
 
 Cron: hourly at :17, prompt now points to weekend-mode status review (job `5b92f123`). Old session-only job `ef941e44` cancelled.
 
+## Weekend progress log
+
+- 2026-05-29 ~12:30: dispatched 3 parallel subagents: pre-flight bit-exact E2E (chip), Plan 5 doc, Plan 7 doc.
+- 2026-05-29 ~12:35: Plan 5 doc committed at `83ac5d3` — 15 tasks, 3 [CHIP] strictly serial (T7, T11, T14), Task 12 chooses wrapper-vs-submodule for `bypass-on-cache-hit` based on a small experiment.
+- 2026-05-29 ~12:40: Plan 7 doc committed at `92ae2f2` — 10 tasks all [no-chip], adapter pattern (no new provider), ffmpeg+ASS visualizer.
+- 2026-05-29 ~12:45: pre-flight validator committed at `ae44880` + `53c0d62` — 3 modes (HefBackend / Caching / Replay) bit-exact verified on DJI_0029 fov50 clip. Floor-quantise + CacheMissError checks pass. Chip not invoked on Mode B pass 2. **Test baseline corrected: actual is 184 passed + 1 skipped at `192494f`, NOT the 209 I'd been carrying. Updated guardrail floor to 184.**
+- 2026-05-29 ~12:55: spec review for pre-flight validator → PASS. Quality review → REWORK (2 IMPORTANT findings: latent generator-exhaustion in `_CountedHefBackend.infer`, dead `frames[0] if frames else None` defensive branch). Fix-implementer dispatched.
+- 2026-05-29 ~13:00: Plan 5 Task 1 (gst scaffold) landed at `be5b7d0` — DONE_WITH_CONCERNS. Sudo on the system-install step requires interactive password (no NOPASSWD configured for `giladn`); the plugin builds + loads cleanly via `GST_PLUGIN_PATH=gst-hailo-cache/build/src` which is sufficient for all our test pipelines. System install can wait for a user-attended session. All 184 + 3 tests still pass.
+- 2026-05-29 ~13:00: Plan 7 Task 1 (pyulog + scaffold) landed at `3b8c977`. Console scripts registered. 184 + 3 tests still pass. Spec + quality review dispatched.
+
+
