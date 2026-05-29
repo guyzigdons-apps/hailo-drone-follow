@@ -1,0 +1,4 @@
+option('with_bench',
+       type        : 'boolean',
+       value       : true,
+       description : 'Build C++ latency microbenches under tests/ (lands in Task 10)')
