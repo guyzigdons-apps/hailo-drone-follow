@@ -5,7 +5,8 @@
 # test (tests/integration/test_cache_cpp_round_trip.py) — the CLI is
 # test-only and is NOT installed.
 
-gtest_dep = dependency('gtest', main : true, required : true)
+gtest_dep   = dependency('gtest', main : true, required : true)
+gst_app_dep = dependency('gstreamer-app-1.0', required : true)
 
 # Link against the shared plugin lib so we exercise exactly the same
 # binary that ships. This avoids the ODR risk of recompiling the
@@ -83,13 +84,19 @@ test('hailocachewriter', test_hailocachewriter,
 test_hailocachereader = executable('test_hailocachereader',
     'test_hailocachereader.cpp',
     include_directories : gsthailocache_inc,
-    dependencies        : [gtest_dep, gst_dep, gst_base_dep],
+    dependencies        : [gtest_dep, gst_dep, gst_base_dep, gst_app_dep, sqlite3_dep],
+    # Task 9 lookup tests pre-populate the cache via TileCacheDb directly
+    # — link against the same libgsthailocache.so the plugin ships.
+    link_with           : gsthailocache_lib,
     install             : false,
 )
 
 test('hailocachereader', test_hailocachereader,
      protocol : 'gtest',
-     timeout  : 30,
+     # Task 9 added 4 more cases that each spin up a real GstPipeline
+     # and pump it to EOS; the suite still runs in ~200 ms but verbose
+     # mode in meson test adds enough stdio overhead to flirt with 30 s.
+     timeout  : 90,
      env      : [
          'GST_HAILOCACHE_PLUGIN_PATH=' + gsthailocache_lib.full_path(),
      ])

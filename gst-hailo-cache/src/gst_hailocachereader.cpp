@@ -1,10 +1,13 @@
-// gst-hailo-cache — hailocachereader element (Plan 5 Task 8 skeleton).
+// gst-hailo-cache — hailocachereader element (Plan 5 Task 9).
 //
 // See gst_hailocachereader.hpp for the contract. This file:
 //
 //   1. Registers all five spec §7.9 properties:
 //        cache-file, hef-path, video-id, on-miss, quantise.
-//   2. Mirrors every public property of `hailonet` (extracted from
+//   2. Registers `frame-id-source` (Task 9 addition; mirrors the writer's
+//      enum so a writer-then-reader run keys both ends to the same
+//      sequence of frame_idx values).
+//   3. Mirrors every public property of `hailonet` (extracted from
 //      `gst-inspect-1.0 hailonet` on GStreamer 1.20). Properties whose
 //      meaning is hailonet-internal (batch-size, device-id, …) are
 //      declared with matching name + type + default but are NO-OPS:
@@ -12,17 +15,38 @@
 //      stores the value without changing element behaviour. The point
 //      is property-name/caps compatibility so a pipeline can do
 //      `s/hailonet/hailocachereader/` with zero other edits.
-//   3. Implements `transform_ip` with the Task-8 placeholder semantics:
-//      - on-miss=error  → post GST_ERROR + EOS on the first buffer (we
-//                         have no cache file open yet, so every buffer
-//                         is by definition a miss).
-//      - on-miss=drop   → pass through unmodified.
-//      Task 9 swaps this for a real DB lookup.
+//   4. Implements `transform_ip` with the §7.9 cache-hit semantics:
+//      - Open the cache lazily on NULL→READY (cache `meta` table `ppv`
+//        is cached on first open).
+//      - Per buffer: derive `frame_idx` per `frame-id-source`, take the
+//        upstream crop list (fallback: single full-frame crop;
+//        TODO Phase 14 — read GstHailoBaseCropperDyn provenance meta),
+//        apply `quantise` via `cache_keys::canonicalize_crop`, then
+//        `tile_cache_db::get` each crop.
+//      - On HIT: attach cached detections as a JSON payload under
+//        `GST_HAILO_CACHED_DETECTIONS_QDATA_KEY`, mark
+//        `GST_HAILO_CACHE_HIT_QDATA_KEY` = 1. Emit ZERO HailoTensor metas.
+//        (TODO Phase 14 — switch to native TAPPAS HailoROI / HailoDetection
+//        once `hailo-apps-core` ships the public API path; see Plan 5
+//        Open-Q #2.)
+//      - On MISS, `on-miss=error`: post GST_ELEMENT_ERROR + return
+//        GST_FLOW_ERROR (Task-8 fix at commit 0a2c763 — let
+//        GstBaseTransform handle EOS; pushing an explicit EOS here races
+//        the error handler).
+//      - On MISS, `on-miss=drop`: mark `GST_HAILO_CACHE_HIT_QDATA_KEY` =
+//        0, attach no detections, push buffer through.
 
 #include "gst_hailocachereader.hpp"
 
+#include "cache_keys.hpp"
+#include "tile_cache_db.hpp"
+
+#include <cstdint>
 #include <cstring>
+#include <exception>
+#include <memory>
 #include <string>
+#include <vector>
 
 GST_DEBUG_CATEGORY_STATIC(gst_hailo_cache_reader_debug);
 #define GST_CAT_DEFAULT gst_hailo_cache_reader_debug
@@ -74,6 +98,21 @@ GType gst_hailo_cache_reader_scheduling_get_type(void) {
     return t;
 }
 
+GType gst_hailo_cache_reader_frame_id_source_get_type(void) {
+    static GType t = 0;
+    if (t == 0) {
+        // Nicks match the writer's enum exactly so the same property
+        // values can be passed verbatim on either element.
+        static const GEnumValue values[] = {
+            { GST_HAILO_CACHE_READER_FRAME_ID_COUNTER, "Per-instance monotonic counter (starts at 0)", "counter" },
+            { GST_HAILO_CACHE_READER_FRAME_ID_PTS,     "GST_BUFFER_PTS / GST_NSECOND",                 "pts"     },
+            { 0, nullptr, nullptr }
+        };
+        t = g_enum_register_static("GstHailoCacheReaderFrameIdSource", values);
+    }
+    return t;
+}
+
 // ---------------------------------------------------------------------------
 // Property IDs
 // ---------------------------------------------------------------------------
@@ -89,6 +128,7 @@ enum {
     PROP_VIDEO_ID,
     PROP_ON_MISS,
     PROP_QUANTISE,
+    PROP_FRAME_ID_SOURCE,
 
     // ---- hailonet mirror (NO-OP stubs) ----
     // Listed in the order `gst-inspect-1.0 hailonet` reports them so a
@@ -131,6 +171,7 @@ struct _GstHailoCacheReader {
     gchar*    video_id;
     GstHailoCacheReaderOnMiss on_miss;
     guint     quantise;
+    GstHailoCacheReaderFrameIdSource frame_id_source;
 
     // hailonet-mirror property storage (no-op; we keep the value so
     // get_property returns what was last set).
@@ -158,7 +199,12 @@ struct _GstHailoCacheReader {
     gchar*    m_vdevice_group_id;
 
     // Internal state.
-    gboolean  miss_error_posted;  // ensures we only push one error+EOS.
+    gboolean  miss_error_posted;     // ensures we only post one error.
+    std::unique_ptr<hailo_cache::TileCacheDb>* db;   // heap-allocated owner.
+    std::int64_t frame_counter;      // counter_state for cache_keys.
+    std::int32_t cached_ppv;         // value from `meta` table; -1 = unset.
+    gint      cached_width;          // upstream caps width  (for fallback crop).
+    gint      cached_height;         // upstream caps height (for fallback crop).
 };
 
 G_DEFINE_TYPE_WITH_CODE(
@@ -214,6 +260,10 @@ gst_hailo_cache_reader_set_property(GObject* object, guint prop_id,
             break;
         case PROP_QUANTISE:
             self->quantise = g_value_get_uint(value);
+            break;
+        case PROP_FRAME_ID_SOURCE:
+            self->frame_id_source =
+                (GstHailoCacheReaderFrameIdSource)g_value_get_enum(value);
             break;
 
         // ---- hailonet mirror (no-op storage) ----
@@ -287,6 +337,9 @@ gst_hailo_cache_reader_get_property(GObject* object, guint prop_id,
         case PROP_VIDEO_ID:   g_value_set_string(value, self->video_id);   break;
         case PROP_ON_MISS:    g_value_set_enum  (value, self->on_miss);    break;
         case PROP_QUANTISE:   g_value_set_uint  (value, self->quantise);   break;
+        case PROP_FRAME_ID_SOURCE:
+            g_value_set_enum(value, self->frame_id_source);
+            break;
 
         // ---- hailonet mirror ----
         case PROP_BATCH_SIZE:                   g_value_set_uint   (value, self->m_batch_size); break;
@@ -330,38 +383,295 @@ gst_hailo_cache_reader_finalize(GObject* object)
     g_clear_pointer(&self->video_id,   g_free);
     g_clear_pointer(&self->m_device_id,        g_free);
     g_clear_pointer(&self->m_vdevice_group_id, g_free);
+
+    // Tear down the cache handle if state-change cleanup didn't run
+    // (e.g. element disposed before ever going to READY).
+    if (self->db) {
+        delete self->db;
+        self->db = nullptr;
+    }
+
     G_OBJECT_CLASS(gst_hailo_cache_reader_parent_class)->finalize(object);
 }
 
 // ---------------------------------------------------------------------------
-// transform_ip — Task 8 placeholder
+// Cache lifecycle helpers
 // ---------------------------------------------------------------------------
 
+// Open the SQLite cache file referenced by `cache-file` and cache the
+// `ppv` value from the meta table. Called on NULL→READY. Posts a bus
+// error and returns FALSE on any failure.
+static gboolean
+gst_hailo_cache_reader_open_cache(GstHailoCacheReader* self)
+{
+    if (self->db && (*self->db)->is_open()) {
+        return TRUE;
+    }
+    if (!self->cache_file || self->cache_file[0] == '\0') {
+        GST_ELEMENT_ERROR(self, RESOURCE, NOT_FOUND,
+            ("hailocachereader: cache-file property is unset"),
+            ("Set the cache-file property to a SQLite cache produced by "
+             "hailocachewriter (or SqliteCacheStore on the Python side)."));
+        return FALSE;
+    }
+
+    if (!self->db) {
+        self->db = new std::unique_ptr<hailo_cache::TileCacheDb>(
+            new hailo_cache::TileCacheDb());
+    }
+    try {
+        // create_if_missing=false: read path expects a populated cache.
+        // Letting it create a fresh empty DB silently would mask the
+        // "stale-cache or wrong-path" failure mode this element is
+        // specifically designed to catch (cf. spec §7.9 "loud errors").
+        (*self->db)->open(self->cache_file, /*create_if_missing=*/false);
+    } catch (const std::exception& ex) {
+        GST_ELEMENT_ERROR(self, RESOURCE, OPEN_READ,
+            ("hailocachereader: failed to open cache-file '%s'",
+             self->cache_file),
+            ("%s", ex.what()));
+        delete self->db;
+        self->db = nullptr;
+        return FALSE;
+    }
+
+    // Pull `ppv` from the cache's `meta` table; spec §7.9 says the
+    // reader reads it from the meta table exclusively (see plan §
+    // "Open questions / risks" #3). Fall back to 1 if absent — matches
+    // Plan 5 Task 5's writer default for caches written before this
+    // contract was finalised.
+    try {
+        auto v = (*self->db)->meta_get("ppv");
+        if (v.has_value() && !v->empty()) {
+            self->cached_ppv = static_cast<std::int32_t>(std::stol(*v));
+        } else {
+            self->cached_ppv = 1;
+        }
+    } catch (...) {
+        self->cached_ppv = 1;
+    }
+
+    GST_INFO_OBJECT(self,
+        "opened cache '%s' (ppv=%d, on-miss=%s, quantise=%u)",
+        self->cache_file,
+        (int)self->cached_ppv,
+        self->on_miss == GST_HAILO_CACHE_READER_ON_MISS_ERROR ? "error" : "drop",
+        self->quantise);
+
+    return TRUE;
+}
+
+static void
+gst_hailo_cache_reader_close_cache(GstHailoCacheReader* self)
+{
+    if (self->db) {
+        if ((*self->db)->is_open()) {
+            (*self->db)->close();
+        }
+        delete self->db;
+        self->db = nullptr;
+    }
+    self->cached_ppv = -1;
+    self->frame_counter = 0;
+    self->miss_error_posted = FALSE;
+}
+
+// Sniff width/height from upstream caps; used to construct the
+// fallback full-frame crop (TODO Phase 14 — read the real crop list
+// from GstHailoBaseCropperDyn provenance metadata once the upstream
+// pad probe lands).
+static gboolean
+gst_hailo_cache_reader_set_caps(GstBaseTransform* trans,
+                                GstCaps* incaps,
+                                GstCaps* /*outcaps*/)
+{
+    GstHailoCacheReader* self = GST_HAILO_CACHE_READER(trans);
+    self->cached_width  = 0;
+    self->cached_height = 0;
+
+    if (!incaps) return TRUE;
+    GstStructure* s = gst_caps_get_structure(incaps, 0);
+    if (!s) return TRUE;
+    gst_structure_get_int(s, "width",  &self->cached_width);
+    gst_structure_get_int(s, "height", &self->cached_height);
+    GST_DEBUG_OBJECT(self, "set_caps: width=%d height=%d",
+                     self->cached_width, self->cached_height);
+    return TRUE;
+}
+
+static GstStateChangeReturn
+gst_hailo_cache_reader_change_state(GstElement* element,
+                                    GstStateChange transition)
+{
+    GstHailoCacheReader* self = GST_HAILO_CACHE_READER(element);
+
+    if (transition == GST_STATE_CHANGE_NULL_TO_READY) {
+        if (!gst_hailo_cache_reader_open_cache(self)) {
+            return GST_STATE_CHANGE_FAILURE;
+        }
+    }
+
+    GstStateChangeReturn ret = GST_ELEMENT_CLASS(
+        gst_hailo_cache_reader_parent_class)->change_state(element, transition);
+
+    if (transition == GST_STATE_CHANGE_READY_TO_NULL) {
+        gst_hailo_cache_reader_close_cache(self);
+    }
+    return ret;
+}
+
+// ---------------------------------------------------------------------------
+// transform_ip — Task 9: real cache lookup
+// ---------------------------------------------------------------------------
+
+// Mark a buffer as a HIT or MISS. Uses gst_mini_object_set_qdata
+// because GstBuffer is a GstMiniObject, not a GObject — g_object_set_data
+// won't work. This is the Task-9 fallback for the proper GstMeta that
+// Phase 14 will ship; see the TODO in the header.
+//
+// Encoding is HIT=1 / MISS=2 (not 1/0) because qdata stores a gpointer
+// and `nullptr` is the "key absent" sentinel — GINT_TO_POINTER(0) would
+// collide with that.
+static void
+mark_buffer_cache_hit(GstBuffer* buf, gboolean hit)
+{
+    GQuark q = g_quark_from_static_string(GST_HAILO_CACHE_HIT_QDATA_KEY);
+    int v = hit ? GST_HAILO_CACHE_HIT_VALUE_HIT
+                : GST_HAILO_CACHE_HIT_VALUE_MISS;
+    gst_mini_object_set_qdata(GST_MINI_OBJECT(buf), q,
+                              GINT_TO_POINTER(v),
+                              /*destroy=*/nullptr);
+}
+
+// Attach the cached detection JSON payload to the buffer. Owned by the
+// buffer; freed via g_free when the buffer is unreffed.
+//
+// TODO Phase 14 — switch to the native TAPPAS `HailoROI::add_object()` API
+// (via `<hailo/tappas/hailo_objects.hpp>`) once we're comfortable taking
+// on the TAPPAS ABI risk (Plan 5 Open-Q #2). Until then, downstream
+// elements read the JSON via `gst_mini_object_get_qdata`.
+static void
+attach_cached_dets_json(GstBuffer* buf, const std::string& dets_json)
+{
+    GQuark q = g_quark_from_static_string(GST_HAILO_CACHED_DETECTIONS_QDATA_KEY);
+    gchar* payload = g_strdup(dets_json.c_str());
+    gst_mini_object_set_qdata(GST_MINI_OBJECT(buf), q, payload,
+                              /*destroy=*/g_free);
+}
+
 static GstFlowReturn
-gst_hailo_cache_reader_transform_ip(GstBaseTransform* trans, GstBuffer* /*buf*/)
+gst_hailo_cache_reader_transform_ip(GstBaseTransform* trans, GstBuffer* buf)
 {
     GstHailoCacheReader* self = GST_HAILO_CACHE_READER(trans);
 
-    // TODO(Task 9): real DB lookup. For Task 8 every buffer is a miss
-    // because we haven't opened the cache.
+    // The cache should already be open via change_state(NULL→READY);
+    // re-open lazily as a defensive belt-and-braces for test paths that
+    // skip the formal state machine.
+    if (!self->db || !(*self->db)->is_open()) {
+        if (!gst_hailo_cache_reader_open_cache(self)) {
+            return GST_FLOW_ERROR;
+        }
+    }
+
+    // (1) Frame id (counter or PTS — same rule as the writer; see
+    //     cache_keys::frame_id_from_buffer in cache_keys.cpp).
+    hailo_cache::FrameIdSource src =
+        (self->frame_id_source == GST_HAILO_CACHE_READER_FRAME_ID_PTS)
+            ? hailo_cache::FrameIdSource::PTS
+            : hailo_cache::FrameIdSource::COUNTER;
+    std::int64_t frame_idx =
+        hailo_cache::frame_id_from_buffer(buf, src, self->frame_counter);
+    if (frame_idx < 0) {
+        GST_ELEMENT_ERROR(self, STREAM, FORMAT,
+            ("hailocachereader: buffer has no valid PTS and frame-id-source=pts"),
+            ("Switch frame-id-source to 'counter' or ensure upstream sets PTS."));
+        return GST_FLOW_ERROR;
+    }
+
+    // (2) Crop list. TODO Phase 14: read the upstream
+    //     GstHailoBaseCropperDyn provenance metadata to get the actual
+    //     per-buffer crop list. Today we fall back to a single
+    //     full-frame crop using the negotiated caps dimensions — this
+    //     matches what Task 5's writer does so writer-then-reader stays
+    //     bit-exact on the no-crop path.
+    std::int32_t fw = self->cached_width  > 0 ? self->cached_width  : 0;
+    std::int32_t fh = self->cached_height > 0 ? self->cached_height : 0;
+    std::vector<hailo_cache::TileCacheDb::CropKey> crops;
+    crops.push_back({0, 0, fw, fh});
+
+    // (3) Per-crop lookup.
+    bool all_hit = true;
+    // Accumulate detection JSON across crops. For the single-crop
+    // fallback this is just the one row's payload; the multi-crop
+    // path is wired in Phase 14 once we have a real upstream crop list.
+    std::string accumulated_dets;
+
+    for (const auto& c : crops) {
+        // Quantise per spec §7.3 before lookup.
+        hailo_cache::CanonicalCrop k{c.x, c.y, c.w, c.h};
+        if (self->quantise > 0) {
+            k = hailo_cache::canonicalize_crop(
+                c.x, c.y, c.w, c.h, (int)self->quantise);
+        }
+
+        std::optional<hailo_cache::Row> row;
+        try {
+            row = (*self->db)->get(frame_idx, k.x, k.y, k.w, k.h,
+                                   self->cached_ppv);
+        } catch (const std::exception& ex) {
+            GST_ELEMENT_ERROR(self, RESOURCE, READ,
+                ("hailocachereader: lookup failed for frame_idx=%ld",
+                 (long)frame_idx),
+                ("%s", ex.what()));
+            return GST_FLOW_ERROR;
+        }
+
+        if (!row.has_value()) {
+            all_hit = false;
+            GST_DEBUG_OBJECT(self,
+                "MISS frame=%ld crop=(%d,%d,%d,%d) ppv=%d",
+                (long)frame_idx, (int)k.x, (int)k.y, (int)k.w, (int)k.h,
+                (int)self->cached_ppv);
+            // We could break early on the first miss; collect all of
+            // them in DEBUG so log review shows the full pattern.
+            break;
+        }
+
+        GST_LOG_OBJECT(self,
+            "HIT frame=%ld crop=(%d,%d,%d,%d) ppv=%d dets_json.size=%zu",
+            (long)frame_idx, (int)k.x, (int)k.y, (int)k.w, (int)k.h,
+            (int)self->cached_ppv, row->dets_json.size());
+
+        // Single-crop fallback: just use the only payload. Multi-crop
+        // accumulation lands with the real upstream crop list.
+        accumulated_dets = row->dets_json;
+    }
+
+    if (all_hit) {
+        mark_buffer_cache_hit(buf, TRUE);
+        if (!accumulated_dets.empty()) {
+            attach_cached_dets_json(buf, accumulated_dets);
+        }
+        return GST_FLOW_OK;
+    }
+
+    // ---- MISS path ----
     switch (self->on_miss) {
         case GST_HAILO_CACHE_READER_ON_MISS_ERROR: {
             if (!self->miss_error_posted) {
                 self->miss_error_posted = TRUE;
                 GST_ELEMENT_ERROR(self, RESOURCE, NOT_FOUND,
-                    ("Cache miss with on-miss=error (Task 8 skeleton: no cache file opened)"),
-                    ("hailocachereader Task 8 always misses; set on-miss=drop "
-                     "to suppress this error. cache-file=\"%s\"",
+                    ("hailocachereader: cache miss with on-miss=error"),
+                    ("frame_idx=%ld not in cache '%s'. "
+                     "Re-warm the cache or set on-miss=drop.",
+                     (long)frame_idx,
                      self->cache_file ? self->cache_file : ""));
-                // GstBaseTransform handles downstream teardown when transform_ip
-                // returns GST_FLOW_ERROR; pushing an explicit EOS here would
-                // race the error handler.
             }
             return GST_FLOW_ERROR;
         }
         case GST_HAILO_CACHE_READER_ON_MISS_DROP:
         default:
-            // Pass through unmodified.
+            mark_buffer_cache_hit(buf, FALSE);
             return GST_FLOW_OK;
     }
 }
@@ -414,6 +724,16 @@ gst_hailo_cache_reader_class_init(GstHailoCacheReaderClass* klass)
             "lookup; 0 means no quantisation",
             0, G_MAXUINT, 0,
             (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+    // Task 9 addition: mirror the writer's frame-id-source enum so a
+    // writer-then-reader run keys both ends to the same sequence.
+    g_object_class_install_property(gobject_class, PROP_FRAME_ID_SOURCE,
+        g_param_spec_enum("frame-id-source", "frame-id-source",
+            "Frame indexing strategy (counter | pts) — must match the writer "
+            "that produced the cache",
+            GST_TYPE_HAILO_CACHE_READER_FRAME_ID_SOURCE,
+            GST_HAILO_CACHE_READER_FRAME_ID_COUNTER,
+            (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
 
     // --- hailonet mirror (NO-OP stubs). Types + defaults match the
     //     hailonet `gst-inspect-1.0` output so naive copy-paste of a
@@ -567,10 +887,14 @@ gst_hailo_cache_reader_class_init(GstHailoCacheReaderClass* klass)
 
     // --- BaseTransform config ---
     trans_class->transform_ip = gst_hailo_cache_reader_transform_ip;
+    trans_class->set_caps     = gst_hailo_cache_reader_set_caps;
     // passthrough=FALSE per Task 8 spec (the element must own the
     // transform_ip callback so on-miss=error can post errors). The
     // passthrough flip lives in _init() because GstBaseTransform reads
     // it per-instance, not per-class.
+
+    // --- Element-level state-change override (Task 9 cache lifecycle).
+    element_class->change_state = gst_hailo_cache_reader_change_state;
 }
 
 static void
@@ -582,6 +906,7 @@ gst_hailo_cache_reader_init(GstHailoCacheReader* self)
     self->video_id   = g_strdup("");
     self->on_miss    = GST_HAILO_CACHE_READER_ON_MISS_ERROR;
     self->quantise   = 0;
+    self->frame_id_source = GST_HAILO_CACHE_READER_FRAME_ID_COUNTER;
 
     // hailonet-mirror defaults (match the values printed by
     // gst-inspect-1.0 hailonet on GStreamer 1.20).
@@ -609,6 +934,11 @@ gst_hailo_cache_reader_init(GstHailoCacheReader* self)
     self->m_vdevice_group_id = g_strdup("");
 
     self->miss_error_posted = FALSE;
+    self->db                = nullptr;
+    self->frame_counter     = 0;
+    self->cached_ppv        = -1;
+    self->cached_width      = 0;
+    self->cached_height     = 0;
 
     gst_base_transform_set_passthrough(GST_BASE_TRANSFORM(self), FALSE);
     // We modify metadata in Task 9; for Task 8 we DO want transform_ip
