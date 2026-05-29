@@ -9,6 +9,7 @@ gsthailocache_sources = [
     'tile_cache_db.cpp',
     'cache_keys.cpp',
     'gst_hailocachewriter.cpp',
+    'gst_hailocachereader.cpp',
 ]
 
 gsthailocache_inc = include_directories('.')

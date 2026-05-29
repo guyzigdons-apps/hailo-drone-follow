@@ -14,6 +14,7 @@
 #include <gst/gst.h>
 
 #include "gst_hailocachewriter.hpp"
+#include "gst_hailocachereader.hpp"
 
 #ifndef PACKAGE
 #define PACKAGE "hailo-drone-follow"
@@ -29,8 +30,12 @@ plugin_init(GstPlugin* plugin)
         return FALSE;
     }
 
-    // READER — Task 8 (registers `hailocachereader`). Add registration
-    // here when Task 8 lands; until then the plugin ships writer only.
+    // READER — Task 8. Element class lives in gst_hailocachereader.cpp;
+    // gst_hailo_cache_reader_plugin_init wraps the gst_element_register
+    // call so the reader's GType + enum types stay private to its TU.
+    if (!gst_hailo_cache_reader_plugin_init(plugin)) {
+        return FALSE;
+    }
 
     return TRUE;
 }

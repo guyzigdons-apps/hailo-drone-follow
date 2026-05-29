@@ -73,3 +73,23 @@ test('hailocachewriter', test_hailocachewriter,
      env      : [
          'GST_HAILOCACHE_PLUGIN_PATH=' + gsthailocache_lib.full_path(),
      ])
+
+# Plan 5 Task 8 — hailocachereader element gtest.
+#
+# Same loading pattern as the writer: the test binary loads
+# libgsthailocache.so explicitly via gst_plugin_load_file using the
+# GST_HAILOCACHE_PLUGIN_PATH env var. This avoids depending on a
+# system-installed copy of the plugin.
+test_hailocachereader = executable('test_hailocachereader',
+    'test_hailocachereader.cpp',
+    include_directories : gsthailocache_inc,
+    dependencies        : [gtest_dep, gst_dep, gst_base_dep],
+    install             : false,
+)
+
+test('hailocachereader', test_hailocachereader,
+     protocol : 'gtest',
+     timeout  : 30,
+     env      : [
+         'GST_HAILOCACHE_PLUGIN_PATH=' + gsthailocache_lib.full_path(),
+     ])
