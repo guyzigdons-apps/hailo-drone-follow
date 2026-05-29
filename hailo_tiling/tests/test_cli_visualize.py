@@ -145,7 +145,7 @@ def test_visualize_probes_fps_from_video(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Probed ffprobe ``avg_frame_rate`` (``24000/1001``) drives ASS cue cadence."""
+    """Probed ffprobe ``avg_frame_rate`` (``30/1``) drives ASS cue cadence."""
     telemetry = tmp_path / "t.jsonl"
     _write_jsonl(telemetry, [
         {"timestamp": 0.0, "altitude_agl_m": 1.0},
@@ -153,7 +153,7 @@ def test_visualize_probes_fps_from_video(
     ])
 
     # Monkeypatch subprocess.run to fake ffprobe responses:
-    #  - avg_frame_rate query returns "24000/1001"
+    #  - avg_frame_rate query returns "30/1" (exact, no float drift)
     #  - duration query returns "2.0"
     # Any other call raises (we shouldn't actually invoke ffmpeg in --dry-run).
     class _FakeResult:
@@ -168,7 +168,7 @@ def test_visualize_probes_fps_from_video(
         # Identify by the value passed to -show_entries.
         joined = " ".join(str(c) for c in cmd)
         if "stream=avg_frame_rate" in joined:
-            return _FakeResult("24000/1001\n")
+            return _FakeResult("30/1\n")
         if "stream=duration" in joined:
             return _FakeResult("2.000000\n")
         raise AssertionError(f"unexpected subprocess invocation: {cmd!r}")
@@ -194,8 +194,8 @@ def test_visualize_probes_fps_from_video(
     assert rc == 0
     ass_text = capsys.readouterr().out
 
-    # 23.976 fps * 2.0 s = 47.952 → int() = 47 cues.
+    # 30 fps * 2.0 s = 60 cues exactly (no float-drift risk).
     n_cues = _dialogue_count(ass_text)
-    assert n_cues == 47, (
-        f"expected 47 cues for 23.976 fps × 2.0 s, got {n_cues}"
+    assert n_cues == 60, (
+        f"expected 60 cues for 30 fps × 2.0 s, got {n_cues}"
     )

@@ -176,30 +176,46 @@ def _ass_time(seconds: float) -> str:
     return f"{hours:d}:{minutes:02d}:{secs:02d}.{cs:02d}"
 
 
-_ASS_HEADER = (
-    "[Script Info]\n"
-    "ScriptType: v4.00+\n"
-    "Collisions: Normal\n"
-    "PlayResX: 1920\n"
-    "PlayResY: 1080\n"
-    "WrapStyle: 2\n"
-    "ScaledBorderAndShadow: yes\n"
-    "\n"
-    "[V4+ Styles]\n"
-    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
-    "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
-    "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-    "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-    "Style: Default,Consolas,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
-    "0,0,0,0,100,100,0,0,1,0.5,0,1,20,20,20,1\n"
-    "\n"
-    "[Events]\n"
-    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
-    "Effect, Text\n"
-)
+def _ass_header(font_size: int = 24) -> str:
+    """Build the ASS preamble (Script Info + V4+ Styles + Events header).
+
+    ``font_size`` controls the Fontsize column of the Default style; callers
+    thread the ``--font`` CLI arg through :func:`build_ass`.
+    """
+    return (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "Collisions: Normal\n"
+        "PlayResX: 1920\n"
+        "PlayResY: 1080\n"
+        "WrapStyle: 2\n"
+        "ScaledBorderAndShadow: yes\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,Consolas,{font_size},&H00FFFFFF,&H000000FF,&H00000000,"
+        "&H00000000,0,0,0,0,100,100,0,0,1,0.5,0,1,20,20,20,1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+    )
 
 
-def build_ass(rows: list[dict], fps: float, duration_s: float) -> str:
+# Backwards-compatible alias for callers/tests that imported the module-level
+# header string (Plan 7 Task 7 shipped it as a constant).
+_ASS_HEADER = _ass_header()
+
+
+def build_ass(
+    rows: list[dict],
+    fps: float,
+    duration_s: float,
+    font_size: int = 24,
+) -> str:
     """Render an ASS subtitle file string with one Dialogue per video frame.
 
     Last-value-carried-forward: the cue for frame ``i`` (covering
@@ -216,7 +232,7 @@ def build_ass(rows: list[dict], fps: float, duration_s: float) -> str:
     timestamps = [float(r.get("timestamp", 0.0)) for r in sorted_rows]
 
     n_frames = int(duration_s * fps)
-    lines = [_ASS_HEADER]
+    lines = [_ass_header(font_size=font_size)]
     empty_row: dict = {}
 
     for frame_idx in range(n_frames):
@@ -291,8 +307,11 @@ def _probe_fps(video: Path, default: float = 30.0) -> float:
             capture_output=True,
             text=True,
             check=False,
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
+        # subprocess.TimeoutExpired is a subclass of SubprocessError, so a
+        # hung ffprobe degrades to the default fps rather than wedging.
         return default
     if result.returncode != 0:
         return default
@@ -324,8 +343,10 @@ def _probe_duration(video: Path, default: float | None = None) -> float | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
+        # Hung/missing ffprobe degrades to the caller's default.
         return default
     if result.returncode != 0:
         return default
@@ -340,24 +361,49 @@ def _invoke_ffmpeg(
     video: Path,
     ass_file: Path,
     output: Path,
+    timeout: float = 600.0,
 ) -> tuple[int, str]:
     """Run ffmpeg to burn the ASS overlay onto ``video`` and write ``output``.
 
-    Returns ``(returncode, stderr_text)``. The caller is responsible for
-    reporting failure to the user.
+    The ASS path is passed to the ``ass=`` filter as a bare filename and
+    ffmpeg is invoked with ``cwd=ass_file.parent``. ffmpeg's filtergraph
+    parser uses ``:`` as an option separator and ``\\`` as an escape, so
+    embedding the full absolute path (e.g. ``C:\\Users\\…\\overlay.ass`` on
+    Windows, or any Linux temp path containing a colon) breaks the filter.
+    Side-stepping the parser is cheaper than escaping every special.
+
+    ``timeout`` caps the call so a hung encode (e.g. corrupted audio) does
+    not wedge the CLI; the caller converts ``TimeoutExpired`` into a clean
+    non-zero exit. Returns ``(returncode, stderr_text)``.
     """
     cmd = [
         ffmpeg_path,
         "-y",
-        "-i", str(video),
-        "-vf", f"ass={ass_file}",
+        # Absolute paths since cwd changes for the subprocess.
+        "-i", str(video.resolve()),
+        "-vf", f"ass={ass_file.name}",
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "20",
         "-c:a", "copy",
-        str(output),
+        str(output.resolve()),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(ass_file.parent),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr = exc.stderr or ""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        return 124, (
+            f"{stderr}\nerror: ffmpeg timed out after {timeout:.1f} s.\n"
+        )
     return result.returncode, result.stderr
 
 
@@ -406,7 +452,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             duration = 1.0 / fps
 
-    ass_text = build_ass(rows=rows, fps=fps, duration_s=duration)
+    ass_text = build_ass(
+        rows=rows, fps=fps, duration_s=duration, font_size=args.font,
+    )
 
     if args.dry_run:
         sys.stdout.write(ass_text)
@@ -420,8 +468,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    # NamedTemporaryFile inside a TemporaryDirectory: ffmpeg's ass= filter
-    # takes a file path, and the surrounding directory tears down on exit.
+    # Write the ASS into a fresh TemporaryDirectory and hand ffmpeg the bare
+    # filename (see _invoke_ffmpeg); the directory tears down on exit.
     with tempfile.TemporaryDirectory(prefix="hailo-tiling-vis-") as tmpdir:
         ass_path = Path(tmpdir) / "overlay.ass"
         ass_path.write_text(ass_text, encoding="utf-8")
@@ -436,7 +484,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"error: ffmpeg exited with code {rc}",
             file=sys.stderr,
         )
-        return rc if rc != 0 else 1
+        return rc
 
     print(
         f"wrote annotated video to {args.output} "
