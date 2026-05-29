@@ -1,25 +1,40 @@
 // gst-hailo-cache — hailocachewriter element header.
 //
-// Plan 5, Task 4 (docs/superpowers/plans/2026-05-28-gst-cache-plugins.md):
-//   passthrough skeleton + spec §7.8 property surface only.
+// Plan 5, Task 5 (docs/superpowers/plans/2026-05-28-gst-cache-plugins.md):
+//   SPSC ring + background writer thread + tile_cache DB writes.
 //
-// Subclasses GstBaseTransform with passthrough=TRUE so the element does
-// nothing to the streaming data path beyond logging the buffer count.
-// DB writes land in Task 5.
+// The streaming-thread side (`transform_ip`) builds a Row from each
+// buffer and pushes it onto a lock-free single-producer / single-consumer
+// ring buffer. A background writer thread (`writer_thread_main_`) drains
+// the ring in batches and writes them to SQLite through `TileCacheDb`.
 //
 // Properties (spec §7.8):
 //   mode               enum  {tile_cache, full_frame}, default tile_cache
-//   output-file        string (required; not validated in Task 4)
+//   output-file        string (required)
 //   flush-interval-ms  uint, default 100
 //   batch-size         uint, default 64
 //   frame-id-source    enum  {counter, pts}, default counter
 //   record-empty       bool, default TRUE
 //   record-cache-hits  bool, default FALSE
 //   hef-id-meta-key    string, default "hailo-hef-sha"
+//   dropped-rows       uint (read-only) — count of rows dropped because
+//                      the SPSC ring was full. Task 5 surfaces it for
+//                      diagnostics; the streaming thread never blocks.
 
 #pragma once
 
 #include <gst/base/gstbasetransform.h>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "tile_cache_db.hpp"
 
 G_BEGIN_DECLS
 
@@ -53,6 +68,33 @@ typedef enum {
     GST_HAILOCACHEWRITER_FRAME_ID_PTS     = 1,
 } GstHailoCacheWriterFrameIdSource;
 
+G_END_DECLS
+
+// -- C++-only internals -----------------------------------------------------
+//
+// The ring buffer + writer-thread plumbing lives in C++ types embedded in
+// the GstHailoCacheWriter struct. GObject doesn't care about the layout
+// as long as G_DEFINE_TYPE can compute sizeof at compile time, so we keep
+// these as POD pointers + a couple of `std::atomic` fields. The C++
+// destructor work happens in the GObject finalize hook (manual placement
+// new/delete is *not* used; we just construct/destruct via the GObject
+// init/finalize seams).
+
+// Fixed-size single-producer/single-consumer ring of pending rows.
+// Capacity is set lazily on first push (it depends on the `batch-size`
+// property, which may be tuned before the element transitions to
+// PLAYING). We pick `max(1024, 4*batch_size)` per the plan.
+//
+// Layout note: head_ is mutated only by the streaming thread; tail_ only
+// by the writer thread. Both publish their respective indices via release
+// stores; the reader uses acquire loads. This is a textbook SPSC ring.
+struct HailoCacheWriterRing {
+    std::unique_ptr<hailo_cache::Row[]> slots;
+    std::size_t                          capacity{0};
+    std::atomic<std::size_t>             head{0};   // producer: streaming thread
+    std::atomic<std::size_t>             tail{0};   // consumer: writer thread
+};
+
 struct _GstHailoCacheWriter {
     GstBaseTransform base;
 
@@ -66,13 +108,34 @@ struct _GstHailoCacheWriter {
     gboolean                         record_cache_hits;
     gchar*                           hef_id_meta_key;
 
-    // Internal state — Task 4 only uses buffer_count.
+    // Diagnostics (read-only property)
+    std::atomic<std::uint64_t>*      dropped_rows;
+
+    // Internal state — Task 5 wires the writer thread.
     guint64                          buffer_count;
+    std::int64_t                     counter_state;   // frame-id COUNTER source
+
+    // Frame dimensions captured from sink caps. Used as the fallback crop
+    // when no upstream crop-list metadata is available (Phase 14 wiring
+    // not landed yet — see Task 5 description in the plan).
+    std::int32_t                     frame_width;
+    std::int32_t                     frame_height;
+
+    // Cached state for the writer thread.
+    HailoCacheWriterRing*            ring;
+    std::thread*                     writer_thread;
+    std::atomic<bool>*               writer_stop;
+    std::mutex*                      writer_mu;
+    std::condition_variable*         writer_cv;
+    std::atomic<bool>*               writer_failed;
+    std::atomic<bool>*               writer_started;
 };
 
 struct _GstHailoCacheWriterClass {
     GstBaseTransformClass base_class;
 };
+
+G_BEGIN_DECLS
 
 GType gst_hailocachewriter_get_type(void);
 

@@ -1,16 +1,20 @@
 // gst-hailo-cache — gtest cases for the hailocachewriter element.
 //
-// Plan 5 Task 4. Verifies:
+// Plan 5 Tasks 4 + 5. Verifies:
 //   * The element class is registered after the plugin loads.
 //   * Every spec §7.8 property is present with the right type & default.
 //   * `passthrough` is TRUE on a freshly constructed instance.
-//   * A minimal pipeline (videotestsrc ! hailocachewriter ! fakesink)
-//     runs to EOS with no bus errors AND no file is created on disk
-//     (writes land in Task 5).
+//   * Task 5: A minimal pipeline produces a SQLite file with one row per
+//     buffer (single full-frame crop fallback).
+//   * Task 5: `record-empty=false` skips empty rows.
+//   * Task 5: `record-cache-hits` property is preserved (semantics
+//     verified end-to-end in Task 9 once the reader registers the meta).
 
 #include <gst/gst.h>
 #include <gst/base/gstbasetransform.h>
 #include <gtest/gtest.h>
+
+#include <sqlite3.h>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -173,37 +177,38 @@ TEST(PassthroughMode, IsTrueOnFreshElement) {
     gst_object_unref(el);
 }
 
-TEST(PipelineRunsToEos, NoErrorsNoFile) {
-    // Use a path we'll explicitly remove first so we can assert "no file
-    // created" reliably even if a previous failed run left a stale file.
-    const std::string out = "/tmp/gst_hailocachewriter_task4.sqlite3";
-    ::unlink(out.c_str());
+// -- Task 5 helpers ---------------------------------------------------------
 
-    const std::string pipeline_str =
-        std::string("videotestsrc num-buffers=10 ! ")
-      + "hailocachewriter mode=tile_cache output-file=" + out + " ! "
-      + "fakesink";
-
+// Run the pipeline string to EOS; fail the test on bus errors / timeouts.
+// Returns true if the pipeline ran cleanly to EOS.
+static bool run_pipeline_to_eos(const std::string& pipeline_str, int timeout_s = 10) {
     GError* err = nullptr;
     GstElement* pipeline = gst_parse_launch(pipeline_str.c_str(), &err);
-    ASSERT_NE(pipeline, nullptr)
-        << "parse_launch failed: " << (err ? err->message : "(none)");
+    if (!pipeline) {
+        ADD_FAILURE() << "parse_launch failed: " << (err ? err->message : "(none)");
+        if (err) g_error_free(err);
+        return false;
+    }
     if (err) { g_error_free(err); err = nullptr; }
 
-    ASSERT_EQ(gst_element_set_state(pipeline, GST_STATE_PLAYING),
-              GST_STATE_CHANGE_ASYNC);
+    GstStateChangeReturn sc = gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    if (sc == GST_STATE_CHANGE_FAILURE) {
+        ADD_FAILURE() << "set_state(PLAYING) failed";
+        gst_object_unref(pipeline);
+        return false;
+    }
 
     GstBus* bus = gst_element_get_bus(pipeline);
-    ASSERT_NE(bus, nullptr);
-
-    // Wait up to 5 s for EOS or ERROR.
     GstMessage* msg = gst_bus_timed_pop_filtered(
-        bus, 5 * GST_SECOND,
+        bus, timeout_s * GST_SECOND,
         (GstMessageType)(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
-    ASSERT_NE(msg, nullptr) << "Pipeline timed out (no EOS / ERROR)";
-    EXPECT_EQ(GST_MESSAGE_TYPE(msg), GST_MESSAGE_EOS)
-        << "Got error/non-EOS on bus";
-    if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
+
+    bool ok = false;
+    if (!msg) {
+        ADD_FAILURE() << "Pipeline timed out (no EOS / ERROR)";
+    } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
+        ok = true;
+    } else {
         GError* gerr = nullptr;
         gchar* dbg = nullptr;
         gst_message_parse_error(msg, &gerr, &dbg);
@@ -212,17 +217,125 @@ TEST(PipelineRunsToEos, NoErrorsNoFile) {
         if (gerr) g_error_free(gerr);
         g_free(dbg);
     }
-    gst_message_unref(msg);
+    if (msg) gst_message_unref(msg);
     gst_object_unref(bus);
 
     gst_element_set_state(pipeline, GST_STATE_NULL);
     gst_object_unref(pipeline);
+    return ok;
+}
 
-    // Task 4 contract: NO file is created. (Task 5 wires the SQLite
-    // writer thread; until that lands, output-file is property-only.)
-    EXPECT_FALSE(file_exists(out))
-        << "Task 4 must NOT create the output file. Found: " << out;
+// Count rows in the `detections` table. Returns -1 on SQLite error.
+static int count_detections(const std::string& path) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_stmt* stmt = nullptr;
+    int n = -1;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM detections", -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            n = sqlite3_column_int(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    return n;
+}
+
+// -- Task 5 tests -----------------------------------------------------------
+
+TEST(WriterCreatesFileOnEos, ProducesSqliteWithNRows) {
+    const std::string out = "/tmp/gst_hailocachewriter_task5_create.sqlite3";
     ::unlink(out.c_str());
+
+    const int N = 30;
+    const std::string pipeline_str =
+        std::string("videotestsrc num-buffers=") + std::to_string(N) + " ! "
+      + "identity ! "
+      + "hailocachewriter mode=tile_cache output-file=" + out + " ! "
+      + "fakesink";
+
+    ASSERT_TRUE(run_pipeline_to_eos(pipeline_str));
+
+    // The file should exist after EOS (writer-thread synchronous drain).
+    ASSERT_TRUE(file_exists(out)) << "Expected " << out << " to exist after EOS";
+
+    const int rows = count_detections(out);
+    EXPECT_GE(rows, N)
+        << "Expected at least " << N << " rows; got " << rows;
+
+    ::unlink(out.c_str());
+    // Also clear the WAL/SHM sidecar files SQLite creates.
+    ::unlink((out + "-wal").c_str());
+    ::unlink((out + "-shm").c_str());
+}
+
+TEST(WriterRespectsRecordEmpty, NoRowsWhenEmptyAndDisabled) {
+    // Task 5 emits dets_json="[]" for every frame (no detection
+    // extraction yet). With record-empty=false, that means NO rows
+    // should land.
+    const std::string out = "/tmp/gst_hailocachewriter_task5_empty.sqlite3";
+    ::unlink(out.c_str());
+
+    const std::string pipeline_str =
+        std::string("videotestsrc num-buffers=10 ! ")
+      + "hailocachewriter mode=tile_cache record-empty=false "
+      + "output-file=" + out + " ! fakesink";
+
+    ASSERT_TRUE(run_pipeline_to_eos(pipeline_str));
+
+    // The DB file is created (the writer opens it on start), but it
+    // should contain zero rows.
+    ASSERT_TRUE(file_exists(out));
+    EXPECT_EQ(count_detections(out), 0)
+        << "record-empty=false should drop dets_json='[]' rows";
+
+    ::unlink(out.c_str());
+    ::unlink((out + "-wal").c_str());
+    ::unlink((out + "-shm").c_str());
+}
+
+TEST(WriterRespectsCacheHitsFlag, PropertyPersists) {
+    // The semantic check (skipping buffers carrying `hailo-cache-hit`
+    // meta) is end-to-end-verifiable once Task 9 registers that meta
+    // type from the reader. For Task 5, we just confirm the property
+    // surface accepts and persists the value.
+    GstElement* el = gst_element_factory_make("hailocachewriter", nullptr);
+    ASSERT_NE(el, nullptr);
+
+    // Default is FALSE.
+    gboolean v = TRUE;
+    g_object_get(el, "record-cache-hits", &v, NULL);
+    EXPECT_FALSE(v);
+
+    // Set TRUE; read back.
+    g_object_set(el, "record-cache-hits", TRUE, NULL);
+    g_object_get(el, "record-cache-hits", &v, NULL);
+    EXPECT_TRUE(v);
+
+    // Set FALSE; read back.
+    g_object_set(el, "record-cache-hits", FALSE, NULL);
+    g_object_get(el, "record-cache-hits", &v, NULL);
+    EXPECT_FALSE(v);
+
+    gst_object_unref(el);
+}
+
+TEST(WriterExposesDroppedRows, ReadableProperty) {
+    GstElement* el = gst_element_factory_make("hailocachewriter", nullptr);
+    ASSERT_NE(el, nullptr);
+    GObjectClass* klass = G_OBJECT_GET_CLASS(el);
+    GParamSpec* pspec = find_pspec(klass, "dropped-rows");
+    ASSERT_NE(pspec, nullptr);
+    EXPECT_EQ(pspec->value_type, G_TYPE_UINT);
+    // Read-only — flags should NOT include G_PARAM_WRITABLE.
+    EXPECT_FALSE(pspec->flags & G_PARAM_WRITABLE);
+    guint n = 999u;
+    g_object_get(el, "dropped-rows", &n, NULL);
+    EXPECT_EQ(n, 0u);
+    gst_object_unref(el);
 }
 
 }  // namespace

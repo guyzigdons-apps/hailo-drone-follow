@@ -64,7 +64,7 @@ cache_keys_cli = executable('cache_keys_cli',
 test_hailocachewriter = executable('test_hailocachewriter',
     'test_hailocachewriter.cpp',
     include_directories : gsthailocache_inc,
-    dependencies        : [gtest_dep, gst_dep, gst_base_dep],
+    dependencies        : [gtest_dep, gst_dep, gst_base_dep, sqlite3_dep],
     install             : false,
 )
 
