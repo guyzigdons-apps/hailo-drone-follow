@@ -102,5 +102,32 @@ Cron: hourly at :17, prompt now points to weekend-mode status review (job `5b92f
 - 2026-05-29 ~14:45: Plan 7 Task 4 (`f931db2`) — `align_to_video` with 3 strategies + ffprobe. SRT detector via `_geo._agl_source`. Spec PASS, quality REWORK — silent tz strip is IMPORTANT. Fix at `dfcdc82` (log.warning + .Srt suffix + nan/inf reject + ffprobe error-path test). Re-review APPROVED. Suite at 207 + 3.
 - 2026-05-29 ~15:17 (cron tick): no new commits since dfcdc82. 3 implementers in flight in parallel: Plan 5 Task 4 (writer skeleton, no-chip, coord on plugin.cpp with T8), Plan 5 Task 8 (reader skeleton, no-chip, coord on plugin.cpp with T4), Plan 7 Task 5 (import CLI). All disjoint or safely coordinated. Suite floor recalibrated to **184** (was misremembered as 209 in cron prompt; not editing cron, just keeping mental model accurate). Plans 5/7 both progressing healthily. Plan 5 Task 7 (first [CHIP] task) is still 4 tasks out — chip remains idle. **No hard stops.**
 
+## **2026-05-29 ~16:30 — CROSS-AGENT INDEX RACE (logged for Monday review)**
+
+Three parallel implementers running concurrently encountered a `.git/index` race:
+- Plan 5 Task 6 (full_frame mode, agent `ae25761c`): staged its gst-hailo-cache writer + schema changes.
+- Plan 5 Task 10 (microbench, agent `ad8527fa`): staged its bench files.
+- Plan 7 Task 9 (hardening, agent `a55068da`): staged its hailo_tiling/ Python changes.
+
+Plan 7 Task 9's report flagged: "my Plan 7 Task 9 files were already `git add`-ed in my session when [Plan 5 Task 6] ran `git commit`; since `.git/index` is shared between simultaneous sessions, my staged files got swept into their commit."
+
+**Resulting state:**
+- HEAD = `bb632b8` with commit message describing **Plan 5 Task 6** work but commit content (per `git show --stat`) is entirely **Plan 7 Task 9** Python files.
+- The actual Plan 5 Task 6 + Plan 5 Task 10 changes are still in the working tree, STAGED but uncommitted.
+
+**Decision:** Do NOT touch git until Plan 5 Task 10 (`ad8527fa`) lands. Concurrent index ops would compound the problem. Plan 5 Task 6's implementer (`ae25761c`) has not reported back — its work is "orphaned" in the index but recoverable.
+
+**Cleanup plan once T10 lands** (manager will execute, not delegate):
+1. `git restore --staged .` to clear the index.
+2. `git commit --amend -m "<correct Plan 7 Task 9 message>"` — rewrites `bb632b8` to reflect actual content. (No content change, just message.)
+3. Manually sort the unstaged files into Plan 5 Task 6 vs Plan 5 Task 10 buckets by file path (T10 = `bench_lookup_latency.cpp` + `.gitignore`; T6 = everything else).
+4. Two clean commits, one per task.
+5. Dispatch the two pending reviews against the correct SHAs.
+
+**Test suite still healthy:** 235 + 3 passed at `bb632b8`. No regression. The race produced a labeling problem, not a code problem.
+
+**Future preventive note for skill:** when dispatching multiple no-chip implementers in parallel, they share `.git/index`. The subagent-driven-development skill should warn that implementers MUST `git add` and `git commit` as a single atomic sequence in one Bash invocation, OR each implementer should `git stash`/`git stash pop` around its commits to isolate the index. Adding to `.claude/memory/` candidates list.
+
+
 
 
