@@ -353,9 +353,9 @@ gst_hailo_cache_reader_transform_ip(GstBaseTransform* trans, GstBuffer* /*buf*/)
                     ("hailocachereader Task 8 always misses; set on-miss=drop "
                      "to suppress this error. cache-file=\"%s\"",
                      self->cache_file ? self->cache_file : ""));
-                // Post EOS so downstream stops cleanly.
-                gst_pad_push_event(GST_BASE_TRANSFORM_SRC_PAD(trans),
-                                   gst_event_new_eos());
+                // GstBaseTransform handles downstream teardown when transform_ip
+                // returns GST_FLOW_ERROR; pushing an explicit EOS here would
+                // race the error handler.
             }
             return GST_FLOW_ERROR;
         }
@@ -560,10 +560,10 @@ gst_hailo_cache_reader_class_init(GstHailoCacheReaderClass* klass)
 
     gst_element_class_set_static_metadata(element_class,
         "Hailo cache reader",
-        "Hailo/Cache",
+        "Filter/Cache",
         "Drop-in replacement for hailonet on the cache-replay path "
         "(Task 8 skeleton — no DB lookup yet)",
-        "Hailo drone-follow contributors");
+        "hailo.ai <contact@hailo.ai>");
 
     // --- BaseTransform config ---
     trans_class->transform_ip = gst_hailo_cache_reader_transform_ip;
@@ -571,7 +571,6 @@ gst_hailo_cache_reader_class_init(GstHailoCacheReaderClass* klass)
     // transform_ip callback so on-miss=error can post errors). The
     // passthrough flip lives in _init() because GstBaseTransform reads
     // it per-instance, not per-class.
-    (void)trans_class;
 }
 
 static void
