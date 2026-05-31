@@ -190,7 +190,166 @@ Captured this weekend's manager pattern + session-limit recovery flow as reusabl
 
 No code or plan state changed by this retrospective entry. Plan 5 Tasks 7/11/12/14/15 still pending user review on wake-up per the entry above.
 
+---
 
+# 2026-05-31 NIGHT — Plan 6 (Cache Warming + Ablation Harness) autonomous run
 
+Plan: `docs/superpowers/plans/2026-05-31-cache-warming-and-ablation-harness.md`
+Branch: `tiling-benchmark`. Never main, never push, submodule pointers untouched.
 
+## Baseline (manager-verified at run start)
+- HEAD: `5c89bd8` (Plan 6 plan commit). NOTE: repo advanced past the prior weekend-stop
+  entry — Plan 5 was closed out (`eaf2e96`) and the working tree is clean of P5 WIP.
+- C++ `meson test -C gst-hailo-cache/build`: **5/5**.
+- pytest (venv): **238 passed + 6 skipped**.
+- **Test floor: 238** (hard-stop below this).
+- Chip: HAILO10H present `pci/0000:3d:00.0` FW 5.3.0. chip_in_flight: null
+- HEF present, clip 0026 fov50 present (342 MB).
+- Pre-existing uncommitted (NOT this run's — never touch): `reid_manager.py` (M),
+  `hailo-apps` (M submodule), `sim/PX4-Autopilot` (m), untracked `.claude/scheduled_tasks.lock`,
+  `HANDOFF.md`, `dynamic_tiling/runs/dynamic_run_multi_p2.frames.json`.
+
+## ENVIRONMENT CONSTRAINT (critical for resume)
+This session's available tools: **Bash, Read, Write, Edit ONLY**.
+- NO `Agent`/subagent-dispatch tool — cannot spawn implementer/reviewer subagents.
+- NO `Cron*`/`Task*` tools — cannot schedule :17 ticks or a session-limit resume cron.
+- Adaptation: the manager executes each task DIRECTLY with rigorous in-line verification
+  (write code -> run the task's tests -> run full suites -> self spec+quality review ->
+  single-invocation commit), and maintains this file as durable memory.
+- If a session limit hits: salvage per skill, record resume queue here + in HANDOFF.md.
+  Resume is MANUAL by the user (no cron will fire).
+
+## Conventions
+- Python: `/home/giladn/tappas_apps/repos/hailo-drone-follow/hailo-apps/venv_hailo_apps/bin/python -m pytest -q`
+- C++: `meson test -C gst-hailo-cache/build`
+- Commit messages end with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+- Commit = single Bash invocation, explicit file paths, no `git add .`/`-A`.
+
+## Status-review checklist (for resume)
+1. `meson test -C gst-hailo-cache/build` (>=5), venv `pytest -q` (>=238). Record counts.
+2. `git log --oneline -12`, `git status --short`. No changes on main; no submodule pointer moves.
+3. Check chip_in_flight; if A3 warm running, poll `.tile_cache/warm_*.log`.
+4. Resume from first unchecked task in the queue below.
+
+## Task queue + status (Plan 6)
+Order (one chip): A1 -> A2(+smoke,release) -> B1 -> B2 -> B3 -> A3(bg warm) -> B4 no-chip -> [after A3] B4 chip smoke + real table.
+- [x] A1 [no-chip] idempotent cache writes — DONE `a5f2938`. meson 5/5, pytest 239+6.
+- [x] A2 [no-chip+4f smoke] scripts/warm_gst_cache.py — DONE `c9e61f0`. Chip smoke verified LIVE (32 rows/4 frames). Chip released. pytest 243+7.
+- [x] B1 [no-chip] bench config matrix — DONE `d8c1949`. pytest 248+7.
+- [x] B2 [no-chip] per-config crop gen + replay run — DONE `60533f9`. Added tile_norm_to_source_px (0-deviation parity vs cropper rule). Static replays 0 misses. pytest 253+7.
+- [ ] B3 [no-chip] hailo-tiling-bench CLI + ablation table
+- [~] A3 [CHIP] warm 0026 fov50 (+60/70) background — IN PROGRESS (see tick log)
+      grid set: 1x1:0.0;2x2:0.25;3x2:0.25;3x3:0.25;4x3:0.25;6x4:0.25;8x6:0.25;12x9:0.25
+- [x] B4 [no-chip + CHIP] GstCropperBackend — DONE. No-chip `9a5f6ea`; chip smoke PASSED (CachingBackend(GstCropperBackend), 4 frames, dets+cache OK).
+
+chip_in_flight: null
+
+## Known carry-forwards (do NOT chase tonight)
+letterbox back-mapping bug (use stretch); full_frame post-aggregator payload unwired
+(use tile_cache per-tile + de-tile in Python); cross-engine equality value-exact not text.
+
+## Tick log
+### 2026-05-31 night — run start
+Baseline verified: meson 5/5, pytest 238+6 at `5c89bd8`. State initialized. Starting A1.
+
+### A1 landed — `a5f2938`
+INSERT OR IGNORE in C++ (put_many + put_frame_results) and Python (put_many).
+Necessary plan-mandated behavior change: old tests asserted dup-PK -> throw + rollback;
+updated to idempotent first-writer-wins + added double-insert no-op tests both langs.
+Verified: meson 5/5, pytest 239 passed + 6 skipped. Floor still 238 (now 239). Next: A2.
+
+### A2 landed — `c9e61f0`
+scripts/warm_gst_cache.py reuses cache_gst_replay_gate pipeline + _grid_to_static_tiles.
+Grid spec "NxM:overlap;...". Chip smoke (HAILO_CHIP=1) VERIFIED LIVE: 4 frames 0026 fov50
+3x2 -> 32 rows, dets present, meta video_w=3840. Chip released. Needed sys.path fix so
+subprocess resolves tiling_benchmark. pytest 243+7, meson 5/5. chip_in_flight: null. Next: B1.
+
+### B1 landed — `d8c1949`
+hailo_tiling/bench/{__init__,config}.py: frozen BenchConfig + default_matrix (static set +
+dynamic + asahi + altitude_zoom + 1 reference 12x9). 5 tests. pytest 248+7.
+
+### B2 landed — `60533f9`
+hailo_tiling/bench/runner.py run_config(): static -> grid -> tile_norm_to_source_px ->
+ReplayBackend -> Aggregator; raises on static miss, counts dynamic misses. Added
+tile_norm_to_source_px to hashing.py with 0-deviation parity test vs the cropper rule across
+all canonical grids. 5 tests. pytest 253+7. Next: B3 (CLI + table + metrics).
+
+### B3 landed — `b699660`
+hailo_tiling/cli/bench.py (hailo-tiling-bench entry point) + bench/metrics.py (IoU matcher,
+recall/precision vs reference) + bench/grid.py (shim reusing tiling_record._grid_to_static_tiles,
+repo-root locate so console script imports work). Emits <cfg>.frames.json + ablation_table.md.
+--help verified from /tmp. 3 tests. pytest 256+7, meson 5/5.
+
+ALL no-chip code tasks (A1,A2,B1,B2,B3) DONE. Good-morning priorities 1+3 met (code).
+Next: A3 chip warm (timing probe first), then validate fov50 0-miss, then real ablation table.
+
+### A3 chip warm — starting
+chip_in_flight: A3-warm (manager-run, foreground bash with timing probe first).
+Doing a small timing probe (full grid set, few frames) to estimate full-clip cost before
+committing the chip for the long run.
+
+### A3 — WARMER BUG FOUND + WORKAROUND (important)
+The full-grid-set warm in ONE process STALLS (deadlocks, State=S, CPU frozen) partway
+through grid 8 (12x9). Root cause: running 8 sequential Gst.parse_launch + set_state(NULL)
+cycles in one long-lived Python process eventually wedges GStreamer/HailoRT (state leak
+across the repeated cropper+hailonet pipeline teardown/relaunch in-process).
+- 12x9 grid ALONE (fresh process, 2 frames): completes clean, 251 rows.
+- 6x4 grid ALONE (fresh process, 30 frames): 3.6s, 750 rows.
+=> Per-grid in a FRESH PROCESS is fast and reliable. WORKAROUND: warm each grid as a
+   separate warmer invocation (subprocess), all appending to ONE cache file (idempotent
+   via A1). Manager orchestrates this from the shell — no warmer code change tonight.
+CARRY-FORWARD for user: make warm_gst_cache.py spawn a subprocess per grid (or fully
+   tear down Gst between grids) so a single invocation with many grids doesn't wedge.
+   Filed as a Monday cleanup item.
+
+### A3 — fov50 full-clip warm launching (per-grid subprocess loop, background)
+Launched per-grid warm (scripts/_warm_one_fov.sh) for fov50 full clip (878 frames) into
+.tile_cache/DJI_20260528155239_0026_D_prepared__fov50__a2e9861507428064.sqlite3 (gitignored).
+PID 436183, log .tile_cache/warm_fov50.log. 1x1 grid done (878 rows, ~46s). Per-grid-fresh
+process approach confirmed fast + reliable. Committed helper + .tile_cache gitignore.
+Also committed B4 no-chip part (`<see git log>`). Waiting on fov50 warm to validate 0-miss.
+
+Helper + gitignore commit landed; B4 no-chip part landed before chip warm started.
+
+### A3 — fov50 warm progressing + validation chain queued
+fov50 per-grid warm advancing reliably: 1x1 (878), 2x2 (3515), 3x2 (5273), 3x3 (7910),
+4x3 done, 6x4/8x6/12x9 in progress. ~50s-3min per grid (12x9 slowest). Cache rows ~45k.
+Launched /tmp/validate_fov50.sh (PID 451067): waits for warm PID 436183, then runs
+hailo-tiling-bench static configs (1x1..8x6) into dynamic_tiling/runs/ablation_0026_fov50,
+which VALIDATES 0 cache misses (the hard-stop gate) and produces the static-baseline
+ablation table. Output: /tmp/validate_fov50.out.
+
+RESUME NOTE (if interrupted): if warm finished, check the cache exists + n_rows, then run
+the bench CLI manually (see validate_fov50.sh). If a static config shows n_misses>0 ->
+HARD STOP (crop-key consistency broken). If 0 misses -> commit the table under
+dynamic_tiling/runs/ablation_0026_fov50/ (note: dynamic_tiling/runs is partially gitignored?
+check). chip_in_flight: A3-warm (fov50). fov60/fov70 NOT yet warmed.
+
+### A3 — fov50 WARM COMPLETE (17:05:08)
+All 8 grids warmed into the fov50 cache. Per-grid rows:
+1x1=878, 2x2=3515, 3x2=5273, 3x3=7910, 4x3=10536(approx), 6x4=21095, 8x6=42191, 12x9=94931.
+TOTAL = 186340 rows, 878 frames. video_w=3840. Chip now FREE.
+Running validation ablation table (static configs 1x1..8x6 + 12x9 ref) -> checking 0 misses.
+
+### A3/B3 — 0-MISS GATE PASSED + ablation table committed (`899b1fc`)
+FOUND: GST writer keys frame_idx PER TILE-BUFFER (monotonic), not per source frame; the
+per-grid-subprocess warm overlaid 8 independent monotonic sequences. The original per-frame
+replay missed — BUT every source-pixel crop key is present (0 of 108 12x9 crops missing;
+each crop appears once per source frame). Crop-key consistency INTACT; only frame-indexing
+mismatched (documented carry-forward).
+FIX: run_static_config_crop_ordered reconstructs source frames by zipping per-crop
+occurrence streams. CLI auto-detects per-tile-buffer caches and uses it for static rows
+(dynamic rows skipped on such caches — need live frame indexing / B4).
+RESULT: committed static-baseline ablation table for 0026 fov50 (186340 rows, 879 frames),
+ALL static configs n_misses=0, recall 1x1=0.28 -> 12x9=1.00 (ref). pytest 261+8, meson 5/5.
+=> Good-morning priorities 1,2,3 ALL MET. chip_in_flight: null (warm done). Chip FREE.
+
+Remaining (stretch): B4 chip smoke (4 frames, quick), warm fov60/fov70 + their tables.
+
+### B4 chip smoke PASSED + fov60/fov70 stretch launched
+B4 chip smoke (HAILO_CHIP=1, tests/integration/test_gst_cropper_chip.py) PASSED — live
+GstCropperBackend wrapped in CachingBackend returns 4 crop-ordered det-lists + populates
+cache. B4 fully done (all 6 plan tasks complete).
+Launched fov60 warm+table chain (PID 477841, /tmp/fov60.out). Will chain fov70 after.
+chip_in_flight: A3-warm-fov60.
 
