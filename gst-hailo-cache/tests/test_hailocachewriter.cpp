@@ -30,6 +30,12 @@
 #include <cstdlib>
 #include <string>
 
+#if defined(HAVE_GSTHAILOMETA)
+#include <gst/app/gstappsrc.h>
+#include <gst_hailo_meta.hpp>   // gst_buffer_add_hailo_meta
+#include <hailo_objects.hpp>    // HailoROI, HailoBBox, HailoDetection, HailoTileROI
+#endif
+
 namespace {
 
 class GstEnv : public ::testing::Environment {
@@ -382,6 +388,34 @@ static int count_frame_results(const std::string& path) {
     return n;
 }
 
+// Read the dets_json + tiles_json of the first frame_results row (by
+// frame_idx). Returns false if no row / SQLite error.
+static bool read_first_frame_result(const std::string& path,
+                                     std::string* dets_json,
+                                     std::string* tiles_json) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    sqlite3_stmt* stmt = nullptr;
+    bool ok = false;
+    if (sqlite3_prepare_v2(db,
+            "SELECT dets_json, tiles_json FROM frame_results "
+            "ORDER BY frame_idx LIMIT 1", -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const unsigned char* d = sqlite3_column_text(stmt, 0);
+            const unsigned char* t = sqlite3_column_text(stmt, 1);
+            if (dets_json)  *dets_json  = d ? reinterpret_cast<const char*>(d) : "";
+            if (tiles_json) *tiles_json = t ? reinterpret_cast<const char*>(t) : "";
+            ok = true;
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    return ok;
+}
+
 // Verify the `frame_results` table exists AND its columns match the
 // spec §7.8 schema EXACTLY (5 columns, the documented names + SQLite
 // types, no extras). Asserts pass-by-pass via gtest macros so any
@@ -541,5 +575,85 @@ TEST(RecordCacheHitsIgnoredInFullFrame, PipelineRunsCleanly) {
     ::unlink((out + "-wal").c_str());
     ::unlink((out + "-shm").c_str());
 }
+
+#if defined(HAVE_GSTHAILOMETA)
+// Phase 14 (C3) — full_frame mode writes a REAL dets_json + tiles_json from a
+// buffer whose HailoROI carries detections + a HailoTileROI sub-object. We push
+// such a buffer through appsrc -> hailocachewriter mode=full_frame -> appsink
+// and assert the recorded frame_results row is non-empty for both payloads.
+TEST(FullFramePayload, RecordsNonEmptyDetsAndTilesFromRoi) {
+    const std::string out = tmp_db_path("ff_payload");
+
+    GstElement* pipeline = gst_pipeline_new("ff_payload_pipeline");
+    GstElement* src    = gst_element_factory_make("appsrc", "src");
+    GstElement* writer = gst_element_factory_make("hailocachewriter", "writer");
+    GstElement* sink   = gst_element_factory_make("fakesink", "sink");
+    ASSERT_TRUE(pipeline && src && writer && sink);
+
+    GstCaps* caps = gst_caps_new_simple("video/x-raw",
+        "format", G_TYPE_STRING, "RGB",
+        "width",  G_TYPE_INT, 64,
+        "height", G_TYPE_INT, 64,
+        "framerate", GST_TYPE_FRACTION, 30, 1,
+        nullptr);
+    g_object_set(src, "caps", caps, "format", GST_FORMAT_TIME, nullptr);
+    gst_caps_unref(caps);
+    g_object_set(writer, "mode", 1 /* full_frame */,
+                 "output-file", out.c_str(), nullptr);
+    g_object_set(sink, "async", FALSE, "sync", FALSE, nullptr);
+
+    gst_bin_add_many(GST_BIN(pipeline), src, writer, sink, nullptr);
+    ASSERT_TRUE(gst_element_link_many(src, writer, sink, nullptr));
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+
+    // Build a buffer whose main ROI carries one detection (source-frame
+    // normalized coords) + one tile sub-ROI (a 3x2-style multi-scale tile).
+    const gsize sz = 64 * 64 * 3;
+    GstBuffer* buf = gst_buffer_new_allocate(nullptr, sz, nullptr);
+    GST_BUFFER_PTS(buf) = 0;
+    HailoROIPtr roi = std::make_shared<HailoROI>(HailoBBox(0.0f, 0.0f, 1.0f, 1.0f));
+    // A person-ish detection in source coords.
+    HailoDetectionPtr det = std::make_shared<HailoDetection>(
+        HailoBBox(0.30f, 0.40f, 0.10f, 0.20f), /*class_id=*/2,
+        "face", /*confidence=*/0.875f);
+    roi->add_object(det);
+    // A multi-scale tile sub-object.
+    HailoTileROIPtr tile = std::make_shared<HailoTileROI>(
+        HailoBBox(0.0f, 0.0f, 0.3333f, 0.5f), /*index=*/0,
+        /*overlap_x=*/0.0f, /*overlap_y=*/0.0f, /*layer=*/0, MULTI_SCALE);
+    roi->add_object(tile);
+    gst_buffer_add_hailo_meta(buf, roi);
+
+    ASSERT_EQ(gst_app_src_push_buffer(GST_APP_SRC(src), buf), GST_FLOW_OK);
+    gst_app_src_end_of_stream(GST_APP_SRC(src));
+
+    // Wait for EOS on the bus so the writer thread flushes.
+    GstBus* bus = gst_element_get_bus(pipeline);
+    GstMessage* msg = gst_bus_timed_pop_filtered(
+        bus, 10 * GST_SECOND,
+        (GstMessageType)(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+    if (msg) gst_message_unref(msg);
+    gst_object_unref(bus);
+
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(pipeline);
+
+    ASSERT_TRUE(file_exists(out));
+    EXPECT_EQ(count_frame_results(out), 1);
+    std::string dets, tiles;
+    ASSERT_TRUE(read_first_frame_result(out, &dets, &tiles));
+    // dets_json: non-empty, carries the seeded detection's class + coords.
+    EXPECT_NE(dets, "[]") << "full_frame dets_json should carry the ROI dets";
+    EXPECT_NE(dets.find("\"cls\":2"), std::string::npos) << dets;
+    EXPECT_NE(dets.find("0.3"), std::string::npos) << dets;
+    // tiles_json: non-empty, carries the tile rect + multi-scale mode.
+    EXPECT_NE(tiles, "[]") << "full_frame tiles_json should carry the tile layout";
+    EXPECT_NE(tiles.find("\"mode\":\"m\""), std::string::npos) << tiles;
+
+    ::unlink(out.c_str());
+    ::unlink((out + "-wal").c_str());
+    ::unlink((out + "-shm").c_str());
+}
+#endif  // HAVE_GSTHAILOMETA
 
 }  // namespace

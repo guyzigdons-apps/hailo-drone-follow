@@ -23,13 +23,16 @@ status to `done` and bump the next plan to `in flight`.
 
 ## Open follow-ups (tracked, not yet planned)
 
-- **Phase 14 — detiler `full_frame` payload (partial).** Plan 5/5b satisfied the cache-hit
-  bypass (wrapper element, no `hailofilter` patch) and per-tile crop provenance (reading the
-  cropper's existing `HailoTileROI`). Still open: the detiler per-detection CropRect provenance
-  + ROI-list pass-through so `hailocachewriter mode=full_frame` records non-empty
-  `dets_json`/`tiles_json` post-aggregator. Today `tile_cache` (per-tile) carries real
-  detections; `full_frame` records rows but empty payloads. Needed before the visualizer/overlay
-  (Phase 12) renders real aggregated detections from a `flight_record.sqlite3`.
+- **Phase 14 — detiler `full_frame` payload — RESOLVED (Night-2 C3, commit pending).** Plan 5/5b
+  satisfied the cache-hit bypass (wrapper element, no `hailofilter` patch) and per-tile crop
+  provenance (reading the cropper's existing `HailoTileROI`). Night-2 C3 wired the remaining piece:
+  `hailocachewriter mode=full_frame` now serializes the post-aggregator `HailoROI` detections
+  (source-frame coords, via `read_tile_dets_json_`) into `dets_json` AND the per-frame tile layout
+  (`HailoTileROI` sub-objects → `[{x,y,w,h,mode}]` via the new `read_tiles_json_`, `cache_keys`
+  field constants) into `tiles_json` — both non-empty when the upstream ROI carries them (no-chip
+  gtest `FullFramePayload.RecordsNonEmptyDetsAndTilesFromRoi` seeds an ROI + tile and verifies).
+  CHIP smoke (full_frame post-aggregator over real frames) is the last remaining validation step.
+  This unblocks the visualizer/overlay (Phase 12) on real `flight_record.sqlite3` data.
 - **`resize-mode=letterbox` back-mapping bug.** Added to `hailotilecropper_dynamic` in Plan 5b but
   the letterbox→`scaling_bbox`→aggregator back-mapping is offset (see
   `docs/superpowers/research/2026-05-31-resize-envelope-vs-stretch.md`); `stretch` is the

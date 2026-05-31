@@ -67,6 +67,16 @@ constexpr const char* kDetFieldY     = "y";
 constexpr const char* kDetFieldW     = "w";
 constexpr const char* kDetFieldH     = "h";
 
+// Tile-layout fields for full_frame mode's `tiles_json` payload (Phase 14).
+// One object per scheduled tile: its source-normalized rect + scale mode.
+// `kTileFieldX/Y/W/H` deliberately reuse the det x/y/w/h names; the two JSON
+// payloads live in SEPARATE columns so there is no collision.
+constexpr const char* kTileFieldX    = "x";
+constexpr const char* kTileFieldY    = "y";
+constexpr const char* kTileFieldW    = "w";
+constexpr const char* kTileFieldH    = "h";
+constexpr const char* kTileFieldMode = "mode";
+
 // Canonical crop rectangle. Distinct from TileCacheDb::CropKey only to
 // keep canonicalisation and DB lookup independently testable; callers
 // that already have a CropKey can construct one with `{x, y, w, h}`

@@ -62,10 +62,23 @@ cache_keys_cli = executable('cache_keys_cli',
 # gst_plugin_load_file(). The test passes the path through env var
 # GST_HAILOCACHE_PLUGIN_PATH; meson.build below sets it relative to the
 # build tree so `meson test` works straight after `ninja`.
+# Phase 14 (C3) — the full_frame dets/tiles payload test hand-crafts a buffer
+# carrying a HailoROI with detections + a tile sub-ROI, so (like the reader
+# test) it needs the TAPPAS meta headers/lib when available + gst-app for
+# appsrc. Guarded by HAVE_GSTHAILOMETA so a no-Hailo box still builds.
+test_writer_deps = [gtest_dep, gst_dep, gst_base_dep, gst_app_dep, sqlite3_dep]
+test_writer_cpp_args = []
+if have_tappas
+    test_writer_deps += tappas_dep
+    test_writer_cpp_args += '-DHAVE_GSTHAILOMETA=1'
+endif
+
 test_hailocachewriter = executable('test_hailocachewriter',
     'test_hailocachewriter.cpp',
     include_directories : gsthailocache_inc,
-    dependencies        : [gtest_dep, gst_dep, gst_base_dep, sqlite3_dep],
+    dependencies        : test_writer_deps,
+    cpp_args            : test_writer_cpp_args,
+    link_with           : gsthailocache_lib,
     install             : false,
 )
 

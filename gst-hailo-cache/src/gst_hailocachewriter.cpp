@@ -83,7 +83,8 @@
 // on a no-Hailo box.
 #if defined(HAVE_GSTHAILOMETA)
 #include <gst_hailo_meta.hpp>   // get_hailo_main_roi
-#include <hailo_objects.hpp>    // HailoROI, HailoBBox
+#include <hailo_objects.hpp>    // HailoROI, HailoBBox, HailoTileROI
+#include <hailo_common.hpp>     // hailo_common::get_hailo_tiles
 #endif
 
 GST_DEBUG_CATEGORY_STATIC(gst_hailocachewriter_debug);
@@ -485,6 +486,58 @@ std::string read_tile_dets_json_(GstBuffer* buf)
         std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.height());
         out += numbuf;
         out += "}";
+    }
+    out += "]";
+    return out;
+#else
+    (void)buf;
+    return "[]";
+#endif
+}
+
+// Phase 14 (full_frame mode) — serialize the per-frame TILE LAYOUT attached to
+// the buffer's main ROI as `HailoTileROI` sub-objects (the same channel
+// hailotilecropper_dynamic / the scheduler use). Shape, mirroring the Python
+// frame_tiles representation:
+//
+//   [{"x":<f>,"y":<f>,"w":<f>,"h":<f>,"mode":"s"|"m"}, ...]
+//
+// Coordinates are the tile's SOURCE-normalized bbox; `mode` is "s" for
+// SINGLE_SCALE, "m" for MULTI_SCALE (hailo_tiling_mode_t). Returns "[]" when no
+// tile sub-objects are present (e.g. a plain whole-frame ROI). Field names come
+// from cache_keys.hpp.
+std::string read_tiles_json_(GstBuffer* buf)
+{
+#if defined(HAVE_GSTHAILOMETA)
+    HailoROIPtr roi = get_hailo_main_roi(buf, /*create_if_missing=*/false);
+    if (!roi) return "[]";
+    std::vector<HailoTileROIPtr> tiles = hailo_common::get_hailo_tiles(roi);
+    if (tiles.empty()) return "[]";
+
+    std::string out = "[";
+    char numbuf[64];
+    bool first = true;
+    for (const auto& tile : tiles) {
+        if (!tile) continue;
+        HailoBBox bb = tile->get_bbox();
+        if (!first) out += ",";
+        first = false;
+        out += "{\"";
+        out += hailo_cache::kTileFieldX;  out += "\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.xmin()); out += numbuf;
+        out += ",\"";
+        out += hailo_cache::kTileFieldY;  out += "\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.ymin()); out += numbuf;
+        out += ",\"";
+        out += hailo_cache::kTileFieldW;  out += "\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.width()); out += numbuf;
+        out += ",\"";
+        out += hailo_cache::kTileFieldH;  out += "\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.height()); out += numbuf;
+        out += ",\"";
+        out += hailo_cache::kTileFieldMode;  out += "\":\"";
+        out += (tile->get_mode() == MULTI_SCALE) ? "m" : "s";
+        out += "\"}";
     }
     out += "]";
     return out;
@@ -1381,38 +1434,40 @@ gst_hailocachewriter_transform_ip(GstBaseTransform* trans, GstBuffer* buffer)
     }
 
     if (self->mode == GST_HAILOCACHEWRITER_MODE_FULL_FRAME) {
-        // Plan 5 Task 6 — frame_results row.
+        // Phase 14 — frame_results row with the REAL payload.
         //
-        // dets_json: TODO(Phase 14) — read source-frame-coord
-        // detections from the buffer's HailoROI (set by hailodetiler).
-        // For Task 6 we emit "[]".
+        // dets_json: read the post-aggregator HailoROI detections (already
+        // source-frame normalized coords) and serialize them with the same
+        // canonical %.9g emitter the tile_cache path uses (read_tile_dets_json_
+        // reads the buffer's main ROI regardless of coordinate space).
         //
-        // tiles_json: TODO(Phase 14) — read the tile-list metadata set
-        // upstream by hailotilecropper_dynamic (the same channel
-        // hailocachewriter mode=tile_cache will consume). When that
-        // metadata channel lands, this becomes
-        //   [{"x":..,"y":..,"w":..,"h":..,"mode":".."}, ...].
-        // Until then, emit "[]" and log a one-shot WARNING so it's
-        // obvious in test logs that the tile layout is missing.
-        static gboolean warned_no_tiles_once = FALSE;
-        if (!warned_no_tiles_once) {
-            warned_no_tiles_once = TRUE;
-            GST_WARNING_OBJECT(self,
-                "mode=full_frame: upstream tile-list metadata channel "
-                "is not yet wired (Phase 14). Emitting tiles_json='[]' "
-                "for every frame. The frame_results schema is correct; "
-                "only the tile-layout payload is empty.");
+        // tiles_json: serialize the per-frame tile layout from the ROI's
+        // HailoTileROI sub-objects (the channel hailotilecropper_dynamic /
+        // the scheduler attach), as [{x,y,w,h,mode}, ...].
+        //
+        // Either may be "[]" if the upstream ROI carries no dets / no tile
+        // sub-objects (e.g. a non-tiled pipeline) — log a one-shot WARNING in
+        // that case so a missing channel is obvious in test logs.
+        const std::string ff_dets_json  = read_tile_dets_json_(buffer);
+        const std::string ff_tiles_json = read_tiles_json_(buffer);
+        if (ff_tiles_json == "[]") {
+            static gboolean warned_no_tiles_once = FALSE;
+            if (!warned_no_tiles_once) {
+                warned_no_tiles_once = TRUE;
+                GST_WARNING_OBJECT(self,
+                    "mode=full_frame: buffer ROI carries no HailoTileROI "
+                    "sub-objects — emitting tiles_json='[]'. The "
+                    "frame_results schema + dets payload are still recorded.");
+            }
         }
-
-        const std::string ff_dets_json  = "[]";
-        const std::string ff_tiles_json = "[]";
         emit_frame_result_row_(self, frame_idx, kPpv,
                                ff_dets_json, ff_tiles_json, ts_epoch);
 
         GST_LOG_OBJECT(self,
             "buffer #%" G_GUINT64_FORMAT " frame_idx=%" G_GINT64_FORMAT
-            " full_frame (dets/tiles empty)",
-            self->buffer_count, (gint64)frame_idx);
+            " full_frame dets=%zuB tiles=%zuB",
+            self->buffer_count, (gint64)frame_idx,
+            ff_dets_json.size(), ff_tiles_json.size());
     } else {
         emit_tile_cache_row_(self, frame_idx, ts_epoch, cx, cy, cw, ch, kPpv, dets_json);
 
