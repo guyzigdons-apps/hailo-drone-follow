@@ -180,6 +180,16 @@ Per the user's guardrails (full autonomy through the weekend), I would normally 
 3. Three Plan 5 tasks remain after T12: T7, T11, T14 (all CHIP) + T15 (close-out).
 4. Optionally clean up the empty marker commit `84c0c03` and amend `bb632b8`'s misleading message.
 
+## 2026-05-31 — retrospective + agent formalisation
+
+Captured this weekend's manager pattern + session-limit recovery flow as reusable artifacts:
+
+- `~/.claude/agents/autonomous-project-manager.md` — agent definition for future `Agent({subagent_type: "autonomous-project-manager", ...})` dispatches. Covers mission, dispatch flow, hard stops, session-limit recovery, and named the five anti-patterns from this weekend (cross-agent index race, wrong-venv pytest, test-count drift, empty marker commits, stray .venv).
+- `.claude/skills/handling-anthropic-session-limits/SKILL.md` — focused skill on detecting the literal `session limit · resets HH:MM(am|pm) (TZ)` notification, salvage decision tree, cron-based resumption, and the concrete weekend example.
+- `.claude/memory/autonomous_weekend_runs.md` — standing conventions (cron :17, state-file path, chip serialization, Plans 6/8/9 out-of-scope, venv path, parallel-agent git rules).
+
+No code or plan state changed by this retrospective entry. Plan 5 Tasks 7/11/12/14/15 still pending user review on wake-up per the entry above.
+
 
 
 
