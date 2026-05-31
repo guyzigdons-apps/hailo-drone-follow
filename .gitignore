@@ -40,3 +40,6 @@ gstshark_*/
 tiling_benchmark/pxt_runs/
 tiling_benchmark/pxt_runs_clean/
 tiling_benchmark/pxt_runs_yolov8m/
+
+# Warmed tile caches (Plan 6) — large runtime artifacts, not source.
+.tile_cache/
