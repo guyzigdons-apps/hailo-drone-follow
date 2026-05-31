@@ -116,8 +116,12 @@ class SqliteCacheStore:
             ))
         try:
             self._con.execute("BEGIN")
+            # INSERT OR IGNORE: warming may re-record the same
+            # (frame_idx, crop, ppv) key across overlapping grids / re-runs.
+            # First-writer-wins; identical content per key, so this is
+            # semantics-preserving and makes warming idempotent (Plan 6 A1).
             self._con.executemany(
-                "INSERT INTO detections "
+                "INSERT OR IGNORE INTO detections "
                 "(frame_idx, crop_x, crop_y, crop_w, crop_h, ppv, dets_json, ts_epoch) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 prepared,

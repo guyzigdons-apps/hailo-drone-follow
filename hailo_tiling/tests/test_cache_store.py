@@ -135,17 +135,41 @@ def test_get_miss_returns_none(tmp_path):
         store.close()
 
 
-def test_put_many_is_one_transaction(tmp_path, monkeypatch):
+def test_put_many_duplicate_key_within_batch_is_first_writer_wins(tmp_path):
+    """Plan 6 A1: a duplicate (frame_idx, crop, ppv) key inside one batch no
+    longer raises (INSERT OR IGNORE) — the first row for the key wins and the
+    batch commits. The previous behaviour (raise + roll back the whole batch)
+    is intentionally replaced to make warming idempotent / re-runnable."""
     store = SqliteCacheStore.open(tmp_path / "tx.sqlite3")
     try:
         c_good = CropRect(x=0, y=0, w=640, h=480, mode="m")
+        first = [_det(0, 0.9, 0, 0, 0.1, 0.1)]
         rows = [
-            _row(0, c_good, 1, [_det(0, 0.9, 0, 0, 0.1, 0.1)]),
-            _row(0, c_good, 1, [_det(0, 0.1, 0, 0, 0.1, 0.1)]),
+            _row(0, c_good, 1, first),
+            _row(0, c_good, 1, [_det(0, 0.1, 0, 0, 0.1, 0.1)]),  # dup key, ignored
         ]
-        with pytest.raises(sqlite3.IntegrityError):
-            store.put_many(rows)
-        assert store.get(0, c_good, ppv=1) is None
+        store.put_many(rows)  # must not raise
+        # First-writer-wins: the stored dets are the first row's, count stays 1.
+        assert store.get(0, c_good, ppv=1) == first
+        assert store.stats()["n_rows"] == 1
+    finally:
+        store.close()
+
+
+def test_put_many_double_insert_is_idempotent(tmp_path):
+    """Plan 6 A1: re-recording the same row via a SECOND put_many call is a
+    no-op — the row count stays 1 and no exception is raised. This is the
+    re-runnable-warming guarantee on the Python side, mirroring the C++ test."""
+    store = SqliteCacheStore.open(tmp_path / "idem.sqlite3")
+    try:
+        c = CropRect(x=10, y=20, w=100, h=200, mode="m")
+        dets = [_det(0, 0.91, 0.1, 0.2, 0.3, 0.4)]
+        store.put_many([_row(0, c, 1, dets)])
+        assert store.stats()["n_rows"] == 1
+        # Second insert of the identical key — idempotent no-op.
+        store.put_many([_row(0, c, 1, dets)])
+        assert store.stats()["n_rows"] == 1
+        assert store.get(0, c, ppv=1) == dets
     finally:
         store.close()
 

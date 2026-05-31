@@ -1,14 +1,15 @@
 // gst-hailo-cache — unit tests for TileCacheDb.
 //
-// Plan 5 Task 2 + Task 6. Eight tests:
-//   1. open-empty → schema persists; reopen idempotent
-//   2. meta_put upsert (insert then update same key)
-//   3. put_many is one transaction (duplicate PK → rollback the WHOLE batch)
-//   4. get / get_many order preservation
-//   5. mismatched user_version raises
-//   6. open creates the frame_results table too (Task 6)
-//   7. put_frame_results inserts + duplicate-PK rolls back the batch (Task 6)
-//   8. detections + frame_results coexist in one DB (Task 6)
+// Plan 5 Task 2 + Task 6; Plan 6 Task A1 (idempotent writes). Tests:
+//   1.  open-empty → schema persists; reopen idempotent
+//   2.  meta_put upsert (insert then update same key)
+//   3.  put_many duplicate key is first-writer-wins, batch still commits (A1)
+//   3b. double put_many of identical row is an idempotent no-op (A1)
+//   4.  get / get_many order preservation
+//   5.  mismatched user_version raises
+//   6.  open creates the frame_results table too (Task 6)
+//   7.  put_frame_results dup key ignored, unique rows land (A1; was rollback)
+//   8.  detections + frame_results coexist in one DB (Task 6)
 
 #include "tile_cache_db.hpp"
 
@@ -86,6 +87,22 @@ int read_user_version(const std::string& path) {
     sqlite3_finalize(st);
     sqlite3_close(con);
     return uv;
+}
+
+int count_rows(const std::string& path, const char* table) {
+    sqlite3* con = nullptr;
+    if (sqlite3_open_v2(path.c_str(), &con, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        if (con) sqlite3_close(con);
+        return -1;
+    }
+    std::string sql = std::string("SELECT COUNT(*) FROM ") + table;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(con, sql.c_str(), -1, &st, nullptr);
+    int n = -1;
+    if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    sqlite3_close(con);
+    return n;
 }
 
 bool table_exists(const std::string& path, const char* name) {
@@ -171,41 +188,69 @@ TEST(TileCacheDb, MetaPutInsertsThenUpdates) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 — put_many is ONE transaction: a mid-batch failure rolls back
-//          ALL inserts in the batch (matches Python
-//          test_put_many_is_one_transaction).
+// Test 3 — put_many is idempotent on duplicate keys (Plan 6 Task A1).
 //
-// We trigger the failure by including two rows with the same primary
-// key in a single batch — the second INSERT fails with SQLITE_CONSTRAINT.
+// Warming may re-run / overlap grids, re-recording the same
+// (frame_idx, crop, ppv) key. With INSERT OR IGNORE a duplicate key is a
+// no-op (first-writer-wins) — it neither throws nor rolls back the batch's
+// other unique rows. The whole batch still commits atomically.
+//
+// (Replaces the previous "duplicate PK → throw + roll back the whole batch"
+//  contract, which is intentionally changed to make warming re-runnable.)
 // ---------------------------------------------------------------------------
-TEST(TileCacheDb, PutManyIsOneTransaction) {
+TEST(TileCacheDb, PutManyDuplicateKeyIsFirstWriterWins) {
     TmpFile tmp;
     hailo_cache::TileCacheDb db;
     db.open(tmp.str());
 
-    // Sanity: first put a valid row OUTSIDE the failing batch.
+    // Sanity: a valid row outside the batch under test.
     db.put_many({make_row(42, 1, 2, 3, 4, 1, "[\"existing\"]")});
     ASSERT_TRUE(db.get(42, 1, 2, 3, 4, 1).has_value());
 
-    // Now attempt a batch that contains a duplicate primary key
-    // between rows[0] and rows[1]. rows[2] is a UNIQUE good row that
-    // we want to confirm did NOT land — proving the rollback.
+    // A batch with a duplicate primary key between rows[0] and rows[1],
+    // plus a unique row[2]. With INSERT OR IGNORE: rows[0] lands, rows[1]
+    // is silently ignored (first-writer-wins), rows[2] lands. No throw.
     std::vector<hailo_cache::Row> rows = {
         make_row(100, 0, 0, 640, 480, 1, "[\"a\"]"),
-        make_row(100, 0, 0, 640, 480, 1, "[\"b\"]"),  // dup PK → fail
-        make_row(101, 0, 0, 640, 480, 1, "[\"c\"]"),  // never reached
+        make_row(100, 0, 0, 640, 480, 1, "[\"b\"]"),  // dup PK → ignored
+        make_row(101, 0, 0, 640, 480, 1, "[\"c\"]"),
     };
-    EXPECT_THROW(db.put_many(rows), std::runtime_error);
+    EXPECT_NO_THROW(db.put_many(rows));
 
-    // None of the batch's three rows should be visible. The
-    // pre-existing row 42 must still be there.
-    EXPECT_FALSE(db.get(100, 0, 0, 640, 480, 1).has_value());
-    EXPECT_FALSE(db.get(101, 0, 0, 640, 480, 1).has_value());
+    // rows[0] kept its first-writer value; rows[2] landed; row 42 intact.
+    auto a = db.get(100, 0, 0, 640, 480, 1);
+    ASSERT_TRUE(a.has_value());
+    EXPECT_EQ(a->dets_json, "[\"a\"]");  // first writer, not "[\"b\"]"
+    auto c = db.get(101, 0, 0, 640, 480, 1);
+    ASSERT_TRUE(c.has_value());
+    EXPECT_EQ(c->dets_json, "[\"c\"]");
     auto pre = db.get(42, 1, 2, 3, 4, 1);
     ASSERT_TRUE(pre.has_value());
     EXPECT_EQ(pre->dets_json, "[\"existing\"]");
 
+    // Row 42 + 100 + 101 = three distinct keys.
     db.close();
+    EXPECT_EQ(count_rows(tmp.str(), "detections"), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Test 3b — double put_many of the identical row is an idempotent no-op
+//           (the re-runnable-warming guarantee; mirrors the Python test).
+// ---------------------------------------------------------------------------
+TEST(TileCacheDb, PutManyDoubleInsertIsIdempotent) {
+    TmpFile tmp;
+    {
+        hailo_cache::TileCacheDb db;
+        db.open(tmp.str());
+        db.put_many({make_row(7, 10, 20, 100, 200, 1, "[\"x\"]")});
+        // Second insert of the identical key — must not throw, count stays 1.
+        EXPECT_NO_THROW(db.put_many({make_row(7, 10, 20, 100, 200, 1, "[\"x\"]")}));
+        auto r = db.get(7, 10, 20, 100, 200, 1);
+        ASSERT_TRUE(r.has_value());
+        EXPECT_EQ(r->dets_json, "[\"x\"]");
+        db.close();
+    }
+    EXPECT_EQ(count_rows(tmp.str(), "detections"), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -401,22 +446,31 @@ TEST(TileCacheDb, PutFrameResultsRoundTripAndRollback) {
     sqlite3_finalize(st);
     sqlite3_close(con);
 
-    // Now attempt a batch with a duplicate (frame_idx=0, ppv=1) — the
-    // primary key — and one good row that should NOT land due to rollback.
-    std::vector<hailo_cache::FrameResultRow> bad = {
-        make_fr(0, 1, "[]", "[]"),         // dup PK → fail
-        make_fr(2, 1, "[]", "[]"),         // would-be-good
+    // Now attempt a batch with a duplicate (frame_idx=0, ppv=1) primary key
+    // plus a unique frame_idx=2 row. With INSERT OR IGNORE (Plan 6 A1): the
+    // duplicate is silently ignored (first-writer-wins) and frame_idx=2 lands.
+    // No throw — warming is re-runnable.
+    std::vector<hailo_cache::FrameResultRow> dup_batch = {
+        make_fr(0, 1, "[\"ignored\"]", "[]"),  // dup PK → ignored, keeps "[]"
+        make_fr(2, 1, "[]", "[]"),             // unique → lands
     };
-    EXPECT_THROW(db.put_frame_results(bad), std::runtime_error);
+    EXPECT_NO_THROW(db.put_frame_results(dup_batch));
 
-    // Confirm frame_idx=2 didn't slip through (rolled-back batch).
+    // frame_idx=2 DID land; frame_idx=0 kept its original first-writer dets.
     ASSERT_EQ(sqlite3_open_v2(tmp.str().c_str(), &con,
                               SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_prepare_v2(
         con, "SELECT COUNT(*) FROM frame_results WHERE frame_idx=2",
         -1, &st, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
-    EXPECT_EQ(sqlite3_column_int(st, 0), 0) << "frame_idx=2 row should not have landed";
+    EXPECT_EQ(sqlite3_column_int(st, 0), 1) << "frame_idx=2 row should now land";
+    sqlite3_finalize(st);
+    sqlite3_prepare_v2(
+        con, "SELECT dets_json FROM frame_results WHERE frame_idx=0",
+        -1, &st, nullptr);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+    EXPECT_STREQ(reinterpret_cast<const char*>(sqlite3_column_text(st, 0)), "[]")
+        << "first-writer-wins: frame_idx=0 keeps original dets, not the ignored dup";
     sqlite3_finalize(st);
     sqlite3_close(con);
 

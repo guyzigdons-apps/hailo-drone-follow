@@ -55,13 +55,17 @@ constexpr const char* kCreateFrameResults =
     "    PRIMARY KEY (frame_idx, ppv)"
     ") WITHOUT ROWID;";
 
+// INSERT OR IGNORE: warming may re-run / overlap grids, re-recording the same
+// (frame_idx, ppv) / (frame_idx, crop, ppv) key. First-writer-wins; the content
+// is identical for a given key, so ignoring the duplicate is semantics-preserving
+// and makes warming idempotent / re-runnable (Plan 6 Task A1).
 constexpr const char* kInsertFrameResult =
-    "INSERT INTO frame_results "
+    "INSERT OR IGNORE INTO frame_results "
     "(frame_idx, ppv, dets_json, tiles_json, ts_epoch) "
     "VALUES (?, ?, ?, ?, ?)";
 
 constexpr const char* kInsertDetection =
-    "INSERT INTO detections "
+    "INSERT OR IGNORE INTO detections "
     "(frame_idx, crop_x, crop_y, crop_w, crop_h, ppv, dets_json, ts_epoch) "
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
 
