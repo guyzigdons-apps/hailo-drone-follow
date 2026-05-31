@@ -1,0 +1,153 @@
+{
+  "iou_thr": 0.3,
+  "by_tag": {
+    "fov50": {
+      "summary": {
+        "whole": {
+          "frames": 120,
+          "total_dets": 4,
+          "dets_per_frame": 0.033,
+          "mean_conf": 0.3894,
+          "median_conf": 0.3867,
+          "per_class": {
+            "1": 4
+          }
+        },
+        "dense_ref": {
+          "frames": 120,
+          "total_dets": 1064,
+          "dets_per_frame": 8.867,
+          "mean_conf": 0.5082,
+          "median_conf": 0.4938,
+          "per_class": {
+            "1": 50,
+            "2": 1014
+          }
+        },
+        "stretch": {
+          "frames": 120,
+          "total_dets": 29,
+          "dets_per_frame": 0.242,
+          "mean_conf": 0.4248,
+          "median_conf": 0.3994,
+          "per_class": {
+            "1": 1,
+            "2": 28
+          }
+        },
+        "letterbox": {
+          "frames": 120,
+          "total_dets": 15,
+          "dets_per_frame": 0.125,
+          "mean_conf": 0.4362,
+          "median_conf": 0.4067,
+          "per_class": {
+            "2": 15
+          }
+        }
+      },
+      "recall": {
+        "stretch_vs_dense": {
+          "ref_dets": 1064,
+          "cand_dets": 29,
+          "tp": 25,
+          "fn": 1039,
+          "fp": 4,
+          "recall": 0.0235,
+          "precision": 0.8621
+        },
+        "letterbox_vs_dense": {
+          "ref_dets": 1064,
+          "cand_dets": 15,
+          "tp": 0,
+          "fn": 1064,
+          "fp": 15,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        "whole_vs_dense": {
+          "ref_dets": 1064,
+          "cand_dets": 4,
+          "tp": 0,
+          "fn": 1064,
+          "fp": 4,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      }
+    },
+    "fov70": {
+      "summary": {
+        "whole": {
+          "frames": 60,
+          "total_dets": 0,
+          "dets_per_frame": 0.0,
+          "mean_conf": null,
+          "median_conf": null,
+          "per_class": {}
+        },
+        "dense_ref": {
+          "frames": 60,
+          "total_dets": 458,
+          "dets_per_frame": 7.633,
+          "mean_conf": 0.544,
+          "median_conf": 0.5392,
+          "per_class": {
+            "2": 458
+          }
+        },
+        "stretch": {
+          "frames": 60,
+          "total_dets": 38,
+          "dets_per_frame": 0.633,
+          "mean_conf": 0.3388,
+          "median_conf": 0.3272,
+          "per_class": {
+            "1": 29,
+            "2": 9
+          }
+        },
+        "letterbox": {
+          "frames": 60,
+          "total_dets": 35,
+          "dets_per_frame": 0.583,
+          "mean_conf": 0.359,
+          "median_conf": 0.3377,
+          "per_class": {
+            "1": 15,
+            "2": 20
+          }
+        }
+      },
+      "recall": {
+        "stretch_vs_dense": {
+          "ref_dets": 458,
+          "cand_dets": 38,
+          "tp": 8,
+          "fn": 450,
+          "fp": 30,
+          "recall": 0.0175,
+          "precision": 0.2105
+        },
+        "letterbox_vs_dense": {
+          "ref_dets": 458,
+          "cand_dets": 35,
+          "tp": 0,
+          "fn": 458,
+          "fp": 35,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        "whole_vs_dense": {
+          "ref_dets": 458,
+          "cand_dets": 0,
+          "tp": 0,
+          "fn": 458,
+          "fp": 0,
+          "recall": 0.0,
+          "precision": null
+        }
+      }
+    }
+  }
+}
