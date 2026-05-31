@@ -166,9 +166,33 @@ deterministic given the video.
 
 ## 5. Discussion
 
-*(Pending dynamic-vs-static rows.)* The static grid sweep establishes the
-recall-vs-compute Pareto front; the dynamic rows test whether track-guidance
-beats a uniform grid of equal mean tile count.
+**Static sweep.** The static grid rows establish the expected recall-vs-compute
+Pareto front: recall climbs monotonically with tile count (1x1 ≈ 0.26–0.32 →
+8x6 ≈ 0.53–0.61 → dense 12x9 = 1.0 by definition), while precision falls as
+finer grids split objects across tile boundaries. Higher synthetic FOV (more
+zoomed-in source crop) lifts recall at every budget, as expected for larger
+apparent target size.
+
+**Dynamic rows — a negative result on this clip, and what it teaches.** On clip
+0026 the track-guided dynamic configurations are *degenerate*: they spend only
+≈0.40 tiles/frame and recover **zero** reference detections (recall delta
+≈ −0.26…−0.32 vs the equal-budget 1x1 grid). The cause is not a harness defect
+(replay reports 0 cache misses; the schedule is deterministic) but a
+**seeding failure**: 0026's targets are small (the dominant class here is `face`,
+cls 2 — the clip contains no `person`), and the scheduler's coarse 3×2 discovery
+grid produces ~1440 px-wide tiles that are downscaled ~2.25× to the 640 px model
+input, below the detector's floor for these targets. With no discovery
+detections the tracker never locks, so the budget-saving ROI-zoom tiles — the
+whole point of the dynamic tiler — are never emitted.
+
+The practical lesson is that **track-guided tiling is only as good as its
+discovery stage**: a dynamic tiler must seed at a resolution fine enough to
+acquire the smallest target it intends to follow. A fix is to gate discovery
+grid density on apparent target size (or run discovery at the cadence with a
+denser grid) so the tracker can lock; that is a scheduler change, not a harness
+change, and is future work. The matched-compute methodology and the chip-free
+replay pipeline are validated and ready to quantify a properly-seeded dynamic
+tiler (and clips that contain larger, lockable targets).
 
 ## 6. Limitations
 
