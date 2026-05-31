@@ -28,8 +28,8 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst, GLib
 
-from drone_follow.follow_api.types import Detection
-from drone_follow.follow_api.state import SharedDetectionState, FollowTargetState
+from robot_follow.follow_api.types import Detection
+from robot_follow.follow_api.state import SharedDetectionState, FollowTargetState
 from .yolo_postprocess import extract_person_detections
 
 try:
@@ -37,7 +37,7 @@ try:
 except ImportError:
     ByteTracker = None
 
-LOGGER = logging.getLogger("drone_follow.app")
+LOGGER = logging.getLogger("robot_follow.app")
 
 # ---------------------------------------------------------------------------
 # Configuration defaults

@@ -24,7 +24,7 @@ case "$1" in
         echo "Starting $NAME (args: $DRONE_FOLLOW_ARGS)"
         cd /home/root
         start-stop-daemon --start --background --make-pidfile --pidfile $PIDFILE \
-            --exec /bin/sh -- -c "exec /usr/bin/python3 -m drone_follow.drone_follow_h15 $DRONE_FOLLOW_ARGS >> $LOGFILE 2>&1"
+            --exec /bin/sh -- -c "exec /usr/bin/python3 -m robot_follow.drone_follow_h15 $DRONE_FOLLOW_ARGS >> $LOGFILE 2>&1"
         ;;
     stop)
         echo "Stopping $NAME"

@@ -2,16 +2,19 @@
 """
 Drone Follow — Hailo15 entry point.
 
-Same as drone_follow_app.py but uses the Hailo15 native pipeline adapter
-instead of hailo_apps (which isn't available on the SoC).
+Same as robot_follow_app.py but uses the Hailo15 native pipeline adapter
+instead of hailo_apps (which isn't available on the SoC), and runs the
+new robot_api.orchestrator.run_robot_loop in a background thread with
+either a MavsdkDroneAdapter (live) or a _DryRunDroneAdapter (--dry-run).
 
 Usage:
-    python3 -m drone_follow.drone_follow_h15 --serial
+    python3 -m robot_follow.drone_follow_h15 --serial /dev/ttyACM0
 """
 
 import argparse
 import asyncio
 import logging
+import math
 import os
 import signal
 import threading
@@ -32,14 +35,53 @@ def _ensure_protobuf_runtime_version():
 
 _ensure_protobuf_runtime_version()
 
-from drone_follow.follow_api import ControllerConfig, SharedDetectionState
-from drone_follow.follow_api.state import FollowTargetState
-from drone_follow.drone_api import run_live_drone
-from drone_follow.drone_api.mavsdk_drone import add_drone_args
-from drone_follow.servers import FollowServer
-from drone_follow.servers.web_server import SharedUIState, WebServer, _WebHandler
+from robot_follow.follow_api import ControllerConfig, SharedDetectionState
+from robot_follow.follow_api.state import FollowTargetState
+from robot_follow.follow_api.types import RobotCommand, SafetyContext
+from robot_follow.robot_api.adapters.mavsdk_drone import (
+    DRONE_CAPS,
+    MavsdkDroneAdapter,
+    _reap_mavsdk_server,
+    add_drone_args,
+)
+from robot_follow.robot_api.orchestrator import run_robot_loop
+from robot_follow.servers import FollowServer
+from robot_follow.servers.web_server import SharedUIState, WebServer, _WebHandler
 
-LOGGER = logging.getLogger("drone_follow.app")
+LOGGER = logging.getLogger("robot_follow.app")
+
+
+class _DryRunDroneAdapter:
+    """Minimal Robot-protocol implementation that logs commands instead of
+    sending them. Preserves the H15 --dry-run debugging behavior under the
+    new run_robot_loop architecture (replaces the old VelocityCommandAPI(None,...)
+    + live_control_loop(None,...) pattern from plan 03-07)."""
+
+    def __init__(self, target_altitude_m: float = 0.0):
+        self.caps = DRONE_CAPS
+        self._target_altitude_m = target_altitude_m
+
+    async def connect(self) -> None:
+        LOGGER.info("[dry-run] connect (no wire)")
+
+    async def start_session(self) -> None:
+        LOGGER.info("[dry-run] start_session (no offboard)")
+
+    async def send_command(self, cmd: RobotCommand, safety_ctx: SafetyContext) -> None:
+        if safety_ctx.target_lost:
+            return
+        LOGGER.info("[dry-run] cmd forward=%.2f m/s yaw=%.2f deg/s down=%.2f m/s",
+                    cmd.forward_m_s, cmd.yaw_rate, cmd.down_m_s)
+
+    async def send_zero(self) -> None:
+        LOGGER.info("[dry-run] send_zero (quiescent)")
+
+    async def on_target_lost(self, last_detection) -> None:
+        # Old behavior was yaw-spin to search; dry-run just notes the state.
+        LOGGER.info("[dry-run] target lost — would search")
+
+    async def shutdown(self) -> None:
+        LOGGER.info("[dry-run] shutdown")
 
 
 def _configure_logging(verbosity: str) -> None:
@@ -229,7 +271,7 @@ def main():
         else:
             LOGGER.info("[app] Recording video to %s", record_path)
 
-    from drone_follow.pipeline_adapter.hailo15_pipeline import create_h15_app
+    from robot_follow.pipeline_adapter.hailo15_pipeline import create_h15_app
 
     app = create_h15_app(
         shared_state, target_state=target_state, eos_reached=eos_reached,
@@ -290,44 +332,54 @@ def main():
         _quit_pipeline()
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
-    if getattr(args, "dry_run", False):
-        from drone_follow.drone_api.mavsdk_drone import live_control_loop, VelocityCommandAPI
-
-        def run_dry():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                vel_api = VelocityCommandAPI(None, controller_config)
-                loop.run_until_complete(
-                    live_control_loop(None, shared_state, controller_config,
-                                      shutdown, altitude_cache={"m": args.target_altitude}))
-            except Exception:
-                LOGGER.warning("[dry-run] Control loop error", exc_info=True)
-            finally:
-                loop.close()
-
-        drone_thread = threading.Thread(target=run_dry, daemon=True)
-        drone_thread.start()
-        LOGGER.info("[app] Dry-run control loop started (no drone connection)")
-    else:
-        def run_drone():
+    def run_robot():
+        """Run the new robot_api orchestrator in a background thread with
+        its own asyncio loop. Mirrors robot_follow_app.py:run_robot, sans
+        the rover branch (H15 is drone-only) and adapted for --dry-run."""
+        if getattr(args, "dry_run", False):
+            adapter = _DryRunDroneAdapter(
+                target_altitude_m=getattr(args, "target_altitude", 0.0))
+            LOGGER.info("[app] Dry-run control loop (no drone connection)")
+        else:
+            adapter = MavsdkDroneAdapter(args, controller_config)
             LOGGER.info("[drone] Thread started, connection=%s", args.connection)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(
-                    run_live_drone(args, shared_state, shutdown,
-                                   config=controller_config, ui_state=None))
-            except Exception:
-                LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.",
-                               exc_info=True)
-            finally:
-                LOGGER.info("[drone] Thread exiting")
-                loop.close()
 
-        drone_thread = threading.Thread(target=run_drone, daemon=True)
-        drone_thread.start()
-        LOGGER.info("[app] Drone control started in background thread")
+        async def _main():
+            duration = getattr(args, "mission_duration", math.inf)
+            loop_task = asyncio.create_task(
+                run_robot_loop(adapter, shared_state, controller_config,
+                               shutdown, ui_state=ui_state))
+            deadline_task = asyncio.create_task(asyncio.sleep(duration))
+            try:
+                await asyncio.wait(
+                    [loop_task, deadline_task],
+                    return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for t in (loop_task, deadline_task):
+                    if not t.done():
+                        t.cancel()
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            LOGGER.warning("[robot] background task raised on shutdown",
+                                           exc_info=True)
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_main())
+        except Exception:
+            LOGGER.warning("[robot] Control loop failed — pipeline continues without drone control.",
+                           exc_info=True)
+        finally:
+            LOGGER.info("[robot] Thread exiting")
+            loop.close()
+
+    drone_thread = threading.Thread(target=run_robot, daemon=True)
+    drone_thread.start()
+    LOGGER.info("[app] Robot control started in background thread")
 
     def on_signal(*_):
         if not shutdown.is_set():
@@ -348,8 +400,15 @@ def main():
     finally:
         if not shutdown.is_set():
             shutdown.set()
-        # _land_safely does an 8s sleep after issuing land(); give it room
+        # Wait for robot thread to finish cleanly. _land_safely does an 8s
+        # sleep after issuing land(), so allow generous time.
         drone_thread.join(timeout=20.0)
+        if drone_thread.is_alive():
+            # Robot thread is stuck (typically a MAVSDK land/offboard timeout).
+            # Its `with DetachedMavsdkServer` __exit__ won't run, so the
+            # mavsdk_server child process would survive us and keep UDP 14540
+            # + TCP 50051 bound, blocking the next run. Reap by name.
+            _reap_mavsdk_server()
         follow_server.stop()
         web_server.stop()
 

@@ -12,7 +12,7 @@ from typing import List
 
 import numpy as np
 
-from drone_follow.follow_api.types import Detection
+from robot_follow.follow_api.types import Detection
 
 # COCO class index for "person"
 PERSON_CLASS_ID = 0

@@ -1,13 +1,13 @@
 #!/bin/bash
-# Build the React UI (drone_follow/ui/build/).
-# Run this whenever drone_follow/ui/src/ changes.
+# Build the React UI (robot_follow/ui/build/).
+# Run this whenever robot_follow/ui/src/ changes.
 #
 # Usage: ./build_ui.sh
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-UI_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)/drone_follow/ui"
+UI_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)/robot_follow/ui"
 
 if [ ! -d "$UI_DIR/src" ]; then
     echo "Error: $UI_DIR/src not found"

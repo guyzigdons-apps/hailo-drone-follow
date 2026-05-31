@@ -11,8 +11,8 @@ Reference for running `drone_follow_h15` on the Hailo15 target.
 | `/etc/rcS.d/S99drone-follow` | Symlink for auto-start at boot |
 | `/var/log/drone-follow.log` | Service stdout/stderr (appended each run) |
 | `/var/run/drone-follow.pid` | PID file while service is running |
-| `/home/root/drone_follow/` | Synced Python package |
-| `/home/root/drone_follow/ui/build/` | Built React UI |
+| `/home/root/robot_follow/` | Synced Python package |
+| `/home/root/robot_follow/ui/build/` | Built React UI |
 | `/home/root/recordings/` | Video recordings (`.mkv`) + detection logs (`.jsonl`) |
 | `/home/root/df_config.json` | Saved controller config (if "Save Config" pressed in UI) |
 
@@ -25,15 +25,15 @@ cd hailo-drone-follow/scripts/h15_boot
 ./install.sh root@<ip>                # custom target
 TARGET=root@<ip> ./install.sh         # via env var
 
-./build_ui.sh                         # just rebuild React UI (drone_follow/ui/build/)
-./install_app.sh                      # just sync drone_follow/ code (assumes UI already built)
+./build_ui.sh                         # just rebuild React UI (robot_follow/ui/build/)
+./install_app.sh                      # just sync robot_follow/ code (assumes UI already built)
 ./install_service.sh                  # just install/refresh init service
 ./uninstall.sh                        # remove service files (keeps log)
 ./install_usb_automount.sh            # one-time setup of USB auto-mount at /mnt/usb
 ```
 
 The full `install.sh` runs `build_ui.sh`, then `install_app.sh`, then `install_service.sh`.
-Run `build_ui.sh` standalone whenever you change `drone_follow/ui/src/`.
+Run `build_ui.sh` standalone whenever you change `robot_follow/ui/src/`.
 
 ## Service control (on target)
 
@@ -104,7 +104,7 @@ If you want to run the app manually (e.g., to see live logs):
 /etc/init.d/drone-follow stop
 
 # Run manually
-PYTHONPATH=/home/root python3 -m drone_follow.drone_follow_h15 --serial /dev/ttyACM0
+PYTHONPATH=/home/root python3 -m robot_follow.drone_follow_h15 --serial /dev/ttyACM0
 ```
 
 ## Viewing live
@@ -217,11 +217,11 @@ Run a recorded `.mkv` back through the H15's live inference + tracker pipeline. 
 
 **Run replay:**
 ```bash
-PYTHONPATH=/home/root python3 -m drone_follow.drone_follow_h15 \
+PYTHONPATH=/home/root python3 -m robot_follow.drone_follow_h15 \
     -i /home/root/recordings/drone_xxx.mkv
 
 # Loop the file continuously
-PYTHONPATH=/home/root python3 -m drone_follow.drone_follow_h15 \
+PYTHONPATH=/home/root python3 -m robot_follow.drone_follow_h15 \
     -i /home/root/recordings/drone_xxx.mkv --loop
 ```
 
@@ -230,7 +230,7 @@ The replay runs at native source speed (throttled by an `identity sync=true` ele
 **Save the new detections to a `.jsonl` sidecar:**
 ```bash
 # Auto-named: /home/root/recordings/drone_<ts>_replay.jsonl
-PYTHONPATH=/home/root python3 -m drone_follow.drone_follow_h15 \
+PYTHONPATH=/home/root python3 -m robot_follow.drone_follow_h15 \
     -i /home/root/recordings/drone_xxx.mkv --record
 
 # Then overlay the new detections on the ORIGINAL video (on PC w/ OpenCV):
@@ -253,7 +253,7 @@ tail -200 /var/log/drone-follow.log
 
 ```bash
 /etc/init.d/drone-follow status
-ps aux | grep drone_follow
+ps aux | grep robot_follow
 netstat -tln | grep 5001                  # WebServer
 tail /var/log/drone-follow.log
 ```

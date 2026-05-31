@@ -75,6 +75,12 @@ class Detection:
     center_y: float      # 0.0 to 1.0
     bbox_height: float   # 0.0 to 1.0
     timestamp: float
+    bbox_width: float = 0.0   # 0.0 to 1.0. Required by the H15 pipeline
+                              # (IoU match, tracker remap, UI bbox draw);
+                              # the controller path ignores it. Defaulted
+                              # so consumers that don't populate it
+                              # (hailo_drone_detection_manager) remain
+                              # unaffected.
 
 
 @dataclass(frozen=True)
