@@ -29,9 +29,7 @@ from ..cache.hashing import tile_norm_to_source_px
 from ..cache.store import SqliteCacheStore
 from ..types import CropRect, Det
 from .config import BenchConfig
-
-# Single source of truth for normalized grid -> tiles (shared with the warmer).
-from tiling_benchmark.tiling_record import _grid_to_static_tiles
+from .grid import grid_to_static_tiles
 
 
 @dataclass
@@ -66,7 +64,7 @@ class ConfigResult:
 
 def _static_crops(cfg: BenchConfig, src_w: int, src_h: int) -> list[CropRect]:
     """Source-pixel crops for a static grid row (constant across frames)."""
-    rects = _grid_to_static_tiles(cfg.tiles_x, cfg.tiles_y, cfg.overlap, cfg.overlap)
+    rects = grid_to_static_tiles(cfg.tiles_x, cfg.tiles_y, cfg.overlap, cfg.overlap)
     crops: list[CropRect] = []
     for r in rects:
         parts = r.split(",")
