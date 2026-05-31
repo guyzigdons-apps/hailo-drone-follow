@@ -128,6 +128,59 @@ Plan 7 Task 9's report flagged: "my Plan 7 Task 9 files were already `git add`-e
 
 **Future preventive note for skill:** when dispatching multiple no-chip implementers in parallel, they share `.git/index`. The subagent-driven-development skill should warn that implementers MUST `git add` and `git commit` as a single atomic sequence in one Bash invocation, OR each implementer should `git stash`/`git stash pop` around its commits to isolate the index. Adding to `.claude/memory/` candidates list.
 
+## **2026-05-31 (Sunday morning) — STOP DISPATCH, anthropic session limit reached**
+
+Both still-in-flight subagents — Plan 5 Task 7 [CHIP] (`a6da4cf4919234243`) and Plan 5 Task 12 (`a62d17abd17d44b0c`) — returned identical termination messages: *"You've hit your session limit · resets 11:40am (Asia/Jerusalem)"*. They did NOT complete cleanly.
+
+**State at termination:**
+
+- HEAD = `cbf29d5` (Plan 7 closeout). Plan 7 is fully done and reviewed.
+- **No new commits** from either P5 T7 or P5 T12.
+- **Uncommitted working tree contains the P5 T12 (bypass wrapper) work-in-progress:**
+  - `M gst-hailo-cache/README.md` (probably documents the new element)
+  - `M gst-hailo-cache/src/meson.build` (adds bypass source)
+  - `M gst-hailo-cache/src/plugin.cpp` (registers bypass element)
+  - `M gst-hailo-cache/tests/meson.build` (registers bypass test)
+  - `?? gst-hailo-cache/src/gst_hailocachebypass.{cpp,hpp}` (new files)
+  - `?? gst-hailo-cache/tests/test_hailocachebypass.cpp` (new test file)
+- **P5 T7 [CHIP] left no committed work and no observable working tree changes.** The chip-side run-with-real-pipeline may have produced SQLite files in `/tmp` or `tiling_benchmark/runs/`, but those aren't tracked in git. Effectively: T7 is in unknown state.
+
+**Manager decision: STOP DISPATCH.**
+
+Per the user's guardrails (full autonomy through the weekend), I would normally dispatch more work. But:
+1. The session-limit message implies the user's Anthropic account has burned its weekend budget.
+2. My own next tool calls may fail with the same error — pushing dispatches that immediately fail is wasteful.
+3. The uncommitted P5 T12 work needs a HUMAN review-and-commit before more work happens on top.
+4. P5 T7 needs to be re-dispatched once chip-time is available again.
+
+**What's left in Plan 5:**
+- T7 [CHIP] — live populate (needs full re-dispatch, status unknown).
+- T11 [CHIP] — bit-exact gate via reader+full_frame.
+- T12 — bypass wrapper (work-in-progress in tree, needs review+commit).
+- T14 [CHIP] — final E2E smoke.
+- T15 — close-out (INDEX flip, MEMORY note, spec retro).
+
+**What's done in Plan 5: Tasks 1-6, 8-10, 13** (10 of 15, ~67%).
+
+**What's done in Plan 7: ALL 10 tasks.** Plan 7 is fully complete and reviewed.
+
+**Summary of overnight + weekend completion:**
+- Plan 1: pre-existing.
+- Plans 2-4: complete (overnight).
+- Plan 5: 10/15 (Saturday + Sunday morning).
+- Plan 6: not started (deliberately deferred).
+- Plan 7: 10/10 (Saturday + Sunday morning).
+- Plans 8-10: deliberately deferred.
+
+**Test suite at HEAD `cbf29d5`: 235 + 3 skipped.** No regressions.
+
+**Action items for user (Sunday morning review):**
+1. Inspect uncommitted bypass wrapper code in working tree. If it builds + tests pass, commit it as Plan 5 Task 12. If not, debug.
+2. Decide whether to re-dispatch Plan 5 Task 7 [CHIP] once rate limit resets.
+3. Three Plan 5 tasks remain after T12: T7, T11, T14 (all CHIP) + T15 (close-out).
+4. Optionally clean up the empty marker commit `84c0c03` and amend `bb632b8`'s misleading message.
+
+
 
 
 
