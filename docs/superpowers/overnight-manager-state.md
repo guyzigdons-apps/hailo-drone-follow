@@ -359,3 +359,49 @@ n_misses=0, recall 1x1=0.32 -> 12x9=1.00. Launched fov70 chain (PID 511512, /tmp
 chip_in_flight: A3-warm-fov70 (last FOV). After fov70: all 3 FOVs warmed + tables = full
 A3 acceptance met.
 
+### fov70 DONE + committed — ALL 3 FOVs WARMED. chip_in_flight: null
+fov70 warm complete (879 frames, all 8 grids). Table committed (`e4ce677`): all static
+configs n_misses=0, recall 1x1=0.26 -> 12x9=1.00. ALL plan tasks + all 3 FOV tables done.
+
+## Wake-up summary (2026-05-31 ~17:35)
+
+### Plan done this run
+- Plan 6 (Cache Warming + Ablation Harness): **ALL 6 tasks landed + reviewed (self spec+quality),
+  all 3 FOV ablation tables committed.** Branch tiling-benchmark, head `e4ce677`.
+  - A1 `a5f2938` idempotent cache writes (INSERT OR IGNORE) C++ + Python.
+  - A2 `c9e61f0` warm_gst_cache.py (chip smoke verified live).
+  - B1 `d8c1949` bench config matrix.
+  - B2 `60533f9` bench runner + tile_norm_to_source_px (0-deviation parity).
+  - B3 `b699660` hailo-tiling-bench CLI + table + IoU metrics.
+  - B4 `9a5f6ea` GstCropperBackend (no-chip) + chip smoke PASSED.
+  - A3: warmed 0026 fov50/60/70 (each ~186k rows, 879 frames, full 8-grid set);
+    crop-ordered replay fix `899b1fc`; tables `899b1fc`(fov50)/`1af34a5`(fov60)/`e4ce677`(fov70).
+
+### Ablation results (static-baseline, recall vs 12x9 GT, IoU>=0.5, all n_misses=0)
+- fov50: 1x1=0.28 .. 6x4=0.44 .. 8x6=0.53 -> 12x9=1.00
+- fov60: 1x1=0.32 .. 6x4=0.45 .. 8x6=0.55 -> 12x9=1.00
+- fov70: 1x1=0.26 .. 6x4=0.54 .. 8x6=0.61 -> 12x9=1.00
+Tables: dynamic_tiling/runs/ablation_0026_fov{50,60,70}/ablation_table.md
+
+### Cleanup needed before next dispatch (Monday)
+- warm_gst_cache.py wedges if given MANY grids in one invocation (in-process GStreamer/HailoRT
+  state leak across 8 pipeline teardown/relaunch cycles). WORKAROUND used: per-grid subprocess
+  via scripts/_warm_one_fov.sh. FIX: make the warmer spawn a subprocess per grid (or fully
+  reset Gst between grids). Low risk, ~30 min.
+- GST hailocachewriter keys frame_idx PER TILE-BUFFER (monotonic), not per source frame. The
+  bench auto-detects this and uses crop-ordered replay for static rows. The proper long-term
+  fix is to have the writer stamp the source frame index (or the bench read it from buffer
+  PTS). Documented; not blocking the static tables.
+
+### Decisions for you
+- Dynamic / lever ablation rows (dynamic, +asahi, +altitude_zoom) are NOT in the tables:
+  they need live ROI-tile warming via CachingBackend(GstCropperBackend) (B4 path) because ROI
+  tiles can't be pre-warmed, AND need live frame indexing. This was the documented stretch goal.
+  Next session: run the dynamic rows through the live GstCropperBackend path to extend the tables.
+- The .tile_cache/ caches (~13MB x3) are gitignored (regenerable via _warm_one_fov.sh). Keep or
+  delete as you like.
+
+### Test suite
+- 261 passed + 8 skipped (pytest, venv); meson 5/5. Floor was 238. No regressions.
+- No changes on main; no submodule pointer moves; pre-existing uncommitted files untouched.
+
