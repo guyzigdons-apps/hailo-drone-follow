@@ -353,3 +353,9 @@ cache. B4 fully done (all 6 plan tasks complete).
 Launched fov60 warm+table chain (PID 477841, /tmp/fov60.out). Will chain fov70 after.
 chip_in_flight: A3-warm-fov60.
 
+### fov60 DONE + committed; fov70 launched
+fov60 warm complete (186340 rows, 879 frames). Ablation table committed: all static configs
+n_misses=0, recall 1x1=0.32 -> 12x9=1.00. Launched fov70 chain (PID 511512, /tmp/fov70.out).
+chip_in_flight: A3-warm-fov70 (last FOV). After fov70: all 3 FOVs warmed + tables = full
+A3 acceptance met.
+
