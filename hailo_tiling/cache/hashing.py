@@ -32,6 +32,42 @@ def file_sha256(path: str | Path) -> str:
     return h.hexdigest()
 
 
+def tile_norm_to_source_px(
+    xmin: float,
+    ymin: float,
+    width: float,
+    height: float,
+    src_w: int,
+    src_h: int,
+    mode: str = "s",
+) -> CropRect:
+    """Convert a normalized tile (xmin, ymin, width, height in [0,1]) to a
+    source-pixel :class:`CropRect`, mirroring the C++ cropper / cache-key rule
+    EXACTLY (truncate-then-clamp — the TAPPAS convention):
+
+        x = int(xmin  * src_w)
+        y = int(ymin  * src_h)
+        w = clamp(int(width  * src_w), 0, src_w - x)
+        h = clamp(int(height * src_h), 0, src_h - y)
+
+    This is the Python counterpart of ``cache_keys::tile_crop_to_source_px``
+    (and of ``scripts/cache_gst_replay_gate.py:_tile_crop_px``). Plan-5b proved
+    the cropper's recorded source-pixel crop equals this computation with 0
+    deviations, so feeding the SAME normalized tiles through this helper
+    reproduces exactly the keys the GStreamer warmer wrote — the foundation of
+    the chip-free replay path (Plan 6 B2).
+    """
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError(f"src_w/src_h must be positive (got {src_w}x{src_h})")
+    x = int(xmin * src_w)
+    y = int(ymin * src_h)
+    w = int(width * src_w)
+    h = int(height * src_h)
+    w = max(0, min(w, src_w - x))
+    h = max(0, min(h, src_h - y))
+    return CropRect(x=x, y=y, w=w, h=h, mode=mode)
+
+
 def canonicalize_crop(
     crop_rect: CropRect,
     quantise: int | None = None,
