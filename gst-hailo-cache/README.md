@@ -79,6 +79,92 @@ later tasks).
 
 ## Canonical pipeline placement
 
+### Two recording scenarios (where to put the writer, and why)
+
+The aggregator (`hailotileaggregator` / `hailodetiler`) runs **NMS** and drops
+detections. So **where** you place `hailocachewriter` decides *what* you are
+recording — and there are exactly two scenarios:
+
+| Scenario | Mode | Placement | Records | Why this placement |
+| --- | --- | --- | --- | --- |
+| **Validate the CACHE** | `tile_cache` | **PRE-aggregator** — on the cropped branch, after `hailofilter`, before `agg.sink_1` | per-tile detections keyed by **source-pixel crop rect** (`frame_idx, crop_x/y/w/h, ppv, dets_json`), tile-local coords | NMS hasn't run yet, so this is the raw per-tile inference stream. This is the layer the bit-exact gate compares (live vs cached). |
+| **Review the SOLUTION** | `full_frame` | **POST-aggregator** — after `hailotileaggregator`/`hailodetiler` | per-frame **aggregated** detections (`frame_results`: `frame_idx, ppv, dets_json, tiles_json, ts_epoch`), source-frame coords | This is the final post-NMS detection set — the "whole solution" a visualizer/overlay would render. |
+
+**Canonical cache-test** is the per-tile, pre-aggregator path, driven by
+[`scripts/cache_gst_replay_gate.py`](../scripts/cache_gst_replay_gate.py)
+(Plan `2026-05-31-gst-cache-source-pixel-provenance` Task 6): it replays the
+**same** GStreamer pipeline twice — live `hailonet` vs
+`hailocachereader`+`hailocachebypass` — and diffs per-tile detections **before**
+the aggregator. Use `tile_cache` here.
+
+**Solution-review recorder** is the post-aggregator `full_frame` writer: it
+records the final aggregated, post-NMS detections per frame for offline review.
+
+**Both placements in one pipeline:**
+
+```
+... ! hailotilecropper_dynamic name=tc ... \
+    tc. ! queue ! agg.sink_0 \
+    tc. ! video/x-raw,format=RGB ! queue ! videoconvert ! \
+      hailonet hef-path=...hef ! \
+      hailofilter so-path=...so ! \
+      hailocachewriter mode=tile_cache  output-file=cache.sqlite3 \
+                       source-width=3840 source-height=2160 \
+                       resize-mode=stretch hef-sha=<sha> ! \   # PRE-aggregator (per-tile, pre-NMS)
+      queue ! agg.sink_1 \
+    hailotileaggregator name=agg ... ! \
+    hailocachewriter mode=full_frame output-file=flight_record.sqlite3 ! \  # POST-aggregator (post-NMS)
+    hailooverlay_community ! videoconvert ! ...
+```
+
+**Source-pixel + resize envelope (this plan).** In `tile_cache` mode set
+`source-width`/`source-height` to the **source video** dimensions so crop keys
+land in source pixels (normalized `HailoROI` bbox × source dims, TAPPAS
+truncate-then-clamp rule), and set `resize-mode` (`stretch`|`letterbox`) +
+`hef-sha`. The writer stamps the envelope into the cache `meta` table once at
+start: `video_w`, `video_h`, `resize_mode`, `dst_w`, `dst_h`,
+`interpolation=linear`, `hef_sha`. (`dst_w`/`dst_h` default to the
+cropped-branch caps — i.e. the network input dims the cropper resized to.)
+
+**Element ordering caveats (verified):**
+- `hailocachewriter` is a **passthrough** `GstBaseTransform`, so it links
+  **directly** after the aggregator src pad — no `videoconvert` needed in
+  front of it. (Verified: aggregator → `hailocachewriter` → `fakesink` runs to
+  EOS.)
+- A **caps-querying sink** after the aggregator (a real overlay/encoder/display)
+  still needs `hailooverlay_community ! videoconvert` first — documented in
+  `.claude/memory/hailotilecropper_dynamic.md`. `hailocachewriter` is unaffected
+  because it negotiates passthrough caps.
+
+**Full-frame post-aggregator smoke (no chip, evidence).** `videotestsrc` through
+`hailotilecropper_dynamic` + `hailotileaggregator`, then
+`hailocachewriter mode=full_frame` directly after the aggregator (plugin loaded
+from `gst-hailo-cache/build/src` via `GST_PLUGIN_PATH`):
+
+```bash
+gst-launch-1.0 -e videotestsrc num-buffers=10 ! video/x-raw,width=1280,height=720,format=RGB ! \
+  hailotilecropper_dynamic name=tc tiles-static="0,0,0.5,1.0;0.5,0,0.5,1.0" \
+  hailotileaggregator name=agg \
+  tc. ! queue ! agg.sink_0 \
+  tc. ! queue ! agg.sink_1 \
+  agg. ! hailocachewriter mode=full_frame output-file=/tmp/ff.sqlite3 ! \
+  fakesink sync=false
+# → EOS, exit 0
+
+sqlite3 /tmp/ff.sqlite3 "SELECT count(*) FROM frame_results;"
+# → 10        (one row per buffer)
+```
+
+10 buffers in → **10 `frame_results` rows** (`record-empty` defaults TRUE, so a
+row is written per frame even when `dets_json`/`tiles_json` are `[]`). Note:
+with `videotestsrc` (and at this plan's stage) the `full_frame` writer emits
+`dets_json='[]'` / `tiles_json='[]'` — the aggregated-detection and tile-list
+**payload** channels are wired in a later (Phase 14) task; the `frame_results`
+**schema and row-per-frame recording are confirmed working** here. To get
+non-empty `dets_json` you need a real detection pipeline (chip `hailonet` +
+`hailofilter`/`hailodetiler` upstream of the aggregator) once those payload
+channels land.
+
 ### Writer — spec §7.8 (`hailodet_record`)
 
 The writer is intended to be instantiated **twice in a single pipeline**:
