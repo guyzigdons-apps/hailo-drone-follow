@@ -12,6 +12,19 @@ including the live ones, runs through GStreamer.
 
 Pipeline-string construction (which crops -> which ``tiles-static``, element
 order) is pure and chip-free; ``infer`` requires a Hailo chip.
+
+Per-frame dynamic ROI injection (Night-2 B1)
+--------------------------------------------
+The plan's preferred mechanism was upstream ``HailoTileROI`` injection via the
+cropper's ``identity signal-handoffs=true`` hook. That path was **never landed
+in the installed ``hailotilecropper_dynamic`` C++** — it supports ONLY the
+``tiles-static`` property (verified: KB note ``hailotilecropper_dynamic``). So
+this backend takes the plan's documented **per-frame-relaunch fallback**:
+``infer`` builds a fresh cropper pipeline per call with that frame's crop list
+expressed as ``tiles-static`` (``build_pipeline_string``), so an arbitrary,
+frame-specific set of dynamic ROIs is cropped each frame. Slower than a single
+long-lived pipeline with injected ROIs, but correct and exactly reproduces the
+warmed source-pixel crop keys.
 """
 from __future__ import annotations
 

@@ -61,3 +61,54 @@ def test_tiles_static_requires_source_dims():
 def test_infer_empty_crops_returns_empty():
     be = GstCropperBackend(hef="/m.hef", source_w=_W, source_h=_H)
     assert be.infer(None, [], 0) == []
+
+
+def test_gst_cropper_injects_per_frame_rois():
+    """Night-2 B1 (per-frame-relaunch fallback).
+
+    The installed ``hailotilecropper_dynamic`` supports ONLY ``tiles-static``
+    (the ``HailoTileROI``-via-``identity signal-handoffs`` injection path was
+    never landed in the C++ — see KB note ``hailotilecropper_dynamic``). So the
+    dynamic per-frame ROIs are injected by RE-BUILDING the cropper pipeline per
+    frame with that frame's ROI list as ``tiles-static`` — exactly what
+    ``build_pipeline_string`` does. This test pins that contract: a per-frame
+    crop list produces a pipeline whose ``tiles-static`` carries EXACTLY that
+    frame's ROI count and rects, and two different frames yield two different
+    pipelines (the relaunch)."""
+    be = GstCropperBackend(hef="/m.hef", post_so="/p.so", source_w=_W, source_h=_H)
+
+    # Frame A: a 2-ROI dynamic frame (an arbitrary tracker ROI + one discovery
+    # tile) — NOT a regular grid.
+    frame_a = [
+        tile_norm_to_source_px(0.31, 0.42, 0.18, 0.24, _W, _H),  # tracker ROI
+        tile_norm_to_source_px(0.0, 0.0, 0.5, 0.5, _W, _H),      # discovery tile
+    ]
+    # Frame B: a 4-ROI dynamic frame.
+    frame_b = [
+        tile_norm_to_source_px(0.10, 0.10, 0.20, 0.20, _W, _H),
+        tile_norm_to_source_px(0.55, 0.20, 0.20, 0.20, _W, _H),
+        tile_norm_to_source_px(0.30, 0.60, 0.20, 0.20, _W, _H),
+        tile_norm_to_source_px(0.70, 0.70, 0.25, 0.25, _W, _H),
+    ]
+
+    pa = be.build_pipeline_string("/clip.mp4", frame_a)
+    pb = be.build_pipeline_string("/clip.mp4", frame_b)
+
+    # The injected ROI count for each frame == that frame's crop count.
+    def _n_tiles(pipe: str) -> int:
+        import re
+        m = re.search(r'tiles-static="([^"]*)"', pipe)
+        assert m, "no tiles-static in pipeline"
+        return len([t for t in m.group(1).split(";") if t.strip()])
+
+    assert _n_tiles(pa) == 2
+    assert _n_tiles(pb) == 4
+    # Per-frame relaunch: different ROI sets => different pipelines.
+    assert pa != pb
+    # The exact tracker-ROI rect from frame A is present (round-trips to its
+    # warmed crop key — the backend feeds normalized tiles re-derived from the
+    # source-pixel crop).
+    assert crop_to_norm_tile(frame_a[0], _W, _H) in pa
+    # Frame B's first ROI is present in pb but not pa.
+    assert crop_to_norm_tile(frame_b[0], _W, _H) in pb
+    assert crop_to_norm_tile(frame_b[0], _W, _H) not in pa

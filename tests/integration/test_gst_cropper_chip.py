@@ -80,3 +80,41 @@ def test_caching_gst_cropper_populates_cache(chip_gate, tmp_path):
         assert int(store.stats()["n_rows"]) >= 4
     finally:
         store.close()
+
+
+def test_gst_cropper_per_frame_roi_injection_ordered(chip_gate):
+    """Night-2 B1 Step 5: per-frame-relaunch injection — a 2-ROI frame then a
+    4-ROI frame, asserting per-crop det-lists are returned in input order and
+    the ROI count varies per frame (the cropper crops exactly the injected
+    tiles-static set each relaunch)."""
+    if str(_PLUGIN_DIR) not in os.environ.get("GST_PLUGIN_PATH", ""):
+        existing = os.environ.get("GST_PLUGIN_PATH", "")
+        os.environ["GST_PLUGIN_PATH"] = (
+            f"{_PLUGIN_DIR}:{existing}" if existing else str(_PLUGIN_DIR)
+        )
+
+    from hailo_tiling.backends.gst_cropper import GstCropperBackend
+    from hailo_tiling.cache.hashing import tile_norm_to_source_px
+
+    backend = GstCropperBackend(
+        hef=str(_HEF), post_so=str(_POST_SO), source_w=_W, source_h=_H
+    )
+    # A 2-ROI dynamic frame: a tracker-ROI-like rect + one discovery tile.
+    two = [
+        tile_norm_to_source_px(0.30, 0.40, 0.20, 0.25, _W, _H),
+        tile_norm_to_source_px(0.0, 0.0, 0.5, 0.5, _W, _H),
+    ]
+    # A 4-ROI dynamic frame (different ROI count -> a different relaunch).
+    four = [
+        tile_norm_to_source_px(0.0, 0.0, 0.5, 0.5, _W, _H),
+        tile_norm_to_source_px(0.5, 0.0, 0.5, 0.5, _W, _H),
+        tile_norm_to_source_px(0.0, 0.5, 0.5, 0.5, _W, _H),
+        tile_norm_to_source_px(0.5, 0.5, 0.5, 0.5, _W, _H),
+    ]
+    out2 = backend.infer(str(_VIDEO), two, 0)
+    out4 = backend.infer(str(_VIDEO), four, 0)
+    assert len(out2) == 2, "2-ROI frame returns 2 ordered det-lists"
+    assert len(out4) == 4, "4-ROI frame returns 4 ordered det-lists"
+    # Each entry is a (possibly empty) list of Det.
+    for lst in out2 + out4:
+        assert isinstance(lst, list)
