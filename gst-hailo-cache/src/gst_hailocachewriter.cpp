@@ -417,6 +417,65 @@ bool read_tile_crop_rect_(GstBuffer* buf,
 #endif
 }
 
+// Serialize the per-tile HailoROI detections attached by the upstream
+// `hailofilter` into the canonical cache `dets_json` shape used by the
+// Python cache layer (hailo_tiling/cache/store.py:_dets_to_json):
+//
+//   [{"cls":<int>,"score":<float>,"x":<float>,"y":<float>,"w":<float>,"h":<float>}, ...]
+//
+// Coordinates are the detection's TILE-LOCAL normalized bbox (xmin, ymin,
+// width, height in [0,1] relative to the tile), exactly as `hailofilter`
+// produced them — i.e. the per-tile, pre-aggregator detection stream the
+// bit-exact gate (Task 6) compares. Floats are formatted with %.9g so the
+// round-trip through SQLite is lossless to the ~32-bit precision the chip
+// emits. Returns "[]" when no detections (or no Hailo metadata) are present.
+std::string read_tile_dets_json_(GstBuffer* buf)
+{
+#if defined(HAVE_GSTHAILOMETA)
+    HailoROIPtr roi = get_hailo_main_roi(buf, /*create_if_missing=*/false);
+    if (!roi) return "[]";
+    std::vector<HailoObjectPtr> dets = roi->get_objects_typed(HAILO_DETECTION);
+    if (dets.empty()) return "[]";
+
+    // Deterministic ordering: HailoROI preserves insertion order, which is
+    // the order hailofilter added detections; we keep it as-is so two runs
+    // over the same tensors serialize identically.
+    std::string out = "[";
+    char numbuf[64];
+    bool first = true;
+    for (const auto& obj : dets) {
+        auto det = std::dynamic_pointer_cast<HailoDetection>(obj);
+        if (!det) continue;
+        HailoBBox bb = det->get_bbox();
+        if (!first) out += ",";
+        first = false;
+        out += "{\"cls\":";
+        out += std::to_string(det->get_class_id());
+        out += ",\"score\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)det->get_confidence());
+        out += numbuf;
+        out += ",\"x\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.xmin());
+        out += numbuf;
+        out += ",\"y\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.ymin());
+        out += numbuf;
+        out += ",\"w\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.width());
+        out += numbuf;
+        out += ",\"h\":";
+        std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.height());
+        out += numbuf;
+        out += "}";
+    }
+    out += "]";
+    return out;
+#else
+    (void)buf;
+    return "[]";
+#endif
+}
+
 }  // namespace
 
 // -- Class boilerplate ------------------------------------------------------
@@ -1274,10 +1333,16 @@ gst_hailocachewriter_transform_ip(GstBaseTransform* trans, GstBuffer* buffer)
         }
     }
 
-    // (c) Detections: empty for Task 5. Task 7 will read
-    //     `HailoROI` children attached to each crop by upstream
-    //     `hailofilter`.
-    const std::string dets_json = "[]";
+    // (c) Detections: read the per-tile `HailoROI` detections attached by
+    //     the upstream `hailofilter` and serialize them (tile-local
+    //     normalized coords) into the canonical dets_json shape. This is
+    //     the per-tile, pre-aggregator detection stream the bit-exact gate
+    //     (Task 6) records and replays. Empty -> "[]" (full_frame mode
+    //     still emits "[]" below; only tile_cache mode records dets).
+    const std::string dets_json =
+        (self->mode != GST_HAILOCACHEWRITER_MODE_FULL_FRAME)
+            ? read_tile_dets_json_(buffer)
+            : std::string("[]");
 
     // (d) `ppv` — read from the cache `meta` table via Open Question 3
     //     fallback: env var, default 1.
