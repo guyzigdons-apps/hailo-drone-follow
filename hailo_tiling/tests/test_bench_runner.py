@@ -1,10 +1,15 @@
-"""Tests for the ablation bench runner (Plan 6 Task B2)."""
+"""Tests for the ablation bench runner (Plan 6 Task B2 + Night-2 B2)."""
 from __future__ import annotations
 
 import pytest
 
 from hailo_tiling.bench.config import BenchConfig
-from hailo_tiling.bench.runner import run_config, run_static_config_crop_ordered
+from hailo_tiling.bench.runner import (
+    run_config,
+    run_dynamic_config,
+    run_static_config_crop_ordered,
+)
+from hailo_tiling.backends.backend import MockBackend
 from hailo_tiling.backends.replay import CacheMissError
 from hailo_tiling.cache.hashing import tile_norm_to_source_px
 from hailo_tiling.cache.store import SqliteCacheStore
@@ -161,6 +166,97 @@ def test_dynamic_config_counts_misses_without_raising(tmp_path):
         # Off-cadence frame emits no tiles.
         f1 = next(f for f in res.frames if f.frame_idx == 1)
         assert f1.n_tiles == 0
+        assert res.n_misses_total == 6
+    finally:
+        store.close()
+
+
+def test_dynamic_runner_produces_per_frame_tiles():
+    """Night-2 B2: the stateful dynamic runner drives TileScheduler + the
+    production ByteTracker per frame, fed by the per-frame backend detections,
+    and the emitted tile set VARIES across frames (discovery on cadence, then a
+    tracker ROI once a target is locked). Aggregated dets are returned per
+    frame. Backend-agnostic (MockBackend here)."""
+    # GT-consistent backend (batched ABC): for every crop covering the GT
+    # centre, emit a single person whose tile-local coords map back to GT in
+    # source space — so the tracker locks onto the GT-seeded target and an ROI
+    # tile appears on subsequent frames. Mirrors dynamic_tiling's own
+    # _AnyCropBackend, adapted to the batched infer signature.
+    gt_at = lambda fi: (0.40 + 0.01 * fi, 0.40, 0.08, 0.20)
+
+    class _GtConsistentBackend(MockBackend):
+        def infer(self, frame, crops, frame_idx):
+            self.calls.append({"frame_idx": frame_idx, "crops": list(crops)})
+            gx, gy, gw, gh = gt_at(frame_idx)
+            gcx = (gx + gw / 2) * _W
+            gcy = (gy + gh / 2) * _H
+            out = []
+            for c in crops:
+                if c.x <= gcx <= c.x + c.w and c.y <= gcy <= c.y + c.h:
+                    lx = (gcx - c.x) / c.w
+                    ly = (gcy - c.y) / c.h
+                    lw = gw * _W / c.w
+                    lh = gh * _H / c.h
+                    out.append([Det(cls=0, score=0.9, x=lx - lw / 2, y=ly - lh / 2,
+                                    w=lw, h=lh)])
+                else:
+                    out.append([])
+            return out
+
+    backend = _GtConsistentBackend()
+    # discovery_period=1 so the tracker is fed every frame and reaches TRACKING
+    # within a couple of frames; once TRACKING the scheduler prepends an ROI
+    # tile, so the per-frame tile set differs from the pure discovery grid.
+    cfg = BenchConfig(
+        name="dynamic",
+        kind="dynamic",
+        scheduler_kwargs={"discovery_period": 1, "discovery_grid": (3, 2),
+                          "recovery_grid": (3, 3), "max_zoom": 2.0},
+    )
+    # GT trajectory: target drifting slightly each frame, present every frame,
+    # so the lock seeds as soon as ByteTracker activates a track.
+    gt_traj = {fi: gt_at(fi) for fi in range(6)}
+    res = run_dynamic_config(
+        cfg, backend, {"src_w": _W, "src_h": _H}, list(range(6)),
+        gt_traj=gt_traj, fps=30.0,
+    )
+
+    assert res.kind == "dynamic"
+    assert len(res.frames) == 6
+    # The scheduler was driven (and emitted tiles) once per frame.
+    assert [c["frame_idx"] for c in backend.calls] == list(range(6))
+    # Frame 0: discovery grid only (lock not yet TRACKING) -> 6 tiles.
+    assert res.frames[0].n_tiles == 6
+    # Once locked, later frames emit ROI + discovery grid -> MORE than 6 tiles.
+    later = [f.n_tiles for f in res.frames[1:]]
+    assert any(n > 6 for n in later), f"expected an ROI tile to appear: {later}"
+    # Crops genuinely vary frame-to-frame (not a constant grid).
+    crop_sets = {tuple((c.x, c.y, c.w, c.h) for c in call["crops"]) for call in backend.calls}
+    assert len(crop_sets) > 1, "dynamic tiles must vary across frames"
+
+
+def test_dynamic_runner_counts_replay_misses(tmp_path):
+    """The dynamic runner over a ReplayBackend counts per-crop cache misses into
+    n_misses (does not raise), so a partially-warmed dynamic cache is surfaced
+    rather than crashing the table."""
+    from hailo_tiling.backends.replay import ReplayBackend
+
+    store = SqliteCacheStore.open(tmp_path / "empty_dyn.sqlite3")
+    try:
+        backend = ReplayBackend(store, ppv=1)
+        cfg = BenchConfig(
+            name="dynamic", kind="dynamic",
+            scheduler_kwargs={"discovery_period": 15, "discovery_grid": (3, 2),
+                              "recovery_grid": (3, 3), "max_zoom": 2.0},
+        )
+        gt_traj = {0: (0.4, 0.4, 0.2, 0.2)}
+        res = run_dynamic_config(
+            cfg, backend, {"src_w": _W, "src_h": _H}, [0],
+            gt_traj=gt_traj, fps=30.0,
+        )
+        # Frame 0 on cadence -> 6 discovery tiles, none warmed -> 6 misses.
+        assert res.frames[0].n_tiles == 6
+        assert res.frames[0].n_misses == 6
         assert res.n_misses_total == 6
     finally:
         store.close()

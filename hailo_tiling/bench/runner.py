@@ -201,6 +201,108 @@ def run_static_config_crop_ordered(
     return result
 
 
+def run_dynamic_config(
+    cfg: BenchConfig,
+    backend,
+    video_meta: dict,
+    frames: Sequence[int],
+    *,
+    gt_traj: dict | None = None,
+    fps: float = 30.0,
+    budget: float | None = None,
+    person_cls: int = 0,
+    ppv: int = 1,
+) -> ConfigResult:
+    """Stateful dynamic-config runner (Night-2 B2).
+
+    Drives ``dynamic_tiling.scheduler.TileScheduler`` fed by a per-frame
+    ``TargetLock`` (the production ByteTracker) over ``frames``, producing the
+    real per-frame ROI/discovery/recovery tiles — NOT the no-lock placeholder
+    of :func:`run_config`. Each frame:
+
+      1. ``crops = scheduler.decide(lock.state, fi, meter)`` (uses the lock
+         state carried from the previous frame).
+      2. ``dets_per_crop = backend.infer(frame, crops, fi)`` — one batched call.
+         The backend is ``CachingBackend(GstCropperBackend)`` for the on-chip
+         warm pass (A3) or ``ReplayBackend`` for the chip-free replay (B3); a
+         per-crop ``CacheMissError`` is counted into ``n_misses`` (replay path)
+         rather than raised, so a partially-warmed dynamic cache is surfaced.
+      3. Aggregate to source-frame dets, charge the budget meter, and step the
+         lock with the person detections (GT-seeded while unlocked).
+
+    Determinism: ByteTracker is deterministic given the same per-frame detection
+    sequence, so the warm pass and the chip-free replay request the SAME crops
+    in the SAME order — the warmed cache therefore contains exactly the crops
+    the replay looks up (the paper's matched-warm guarantee).
+
+    ``frame`` passed to the backend is the source frame index ``fi`` (the
+    GstCropperBackend decodes the video itself and selects ``frame_idx``; the
+    ReplayBackend ignores the frame argument).
+    """
+    if cfg.kind != "dynamic":
+        raise ValueError("run_dynamic_config is for dynamic configs only")
+
+    from dynamic_tiling.scheduler import TileScheduler
+    from dynamic_tiling.target_lock import TargetLock
+
+    from ..budget import BudgetMeter
+
+    src_w = int(video_meta["src_w"])
+    src_h = int(video_meta["src_h"])
+    gt_traj = gt_traj or {}
+
+    sched = TileScheduler(src_w, src_h, **cfg.scheduler_kwargs)
+    lock = TargetLock()
+    # budget None / cfg.budget None => effectively unbounded (huge cap).
+    eff_budget = budget if budget is not None else (cfg.budget if cfg.budget is not None else 1e9)
+    meter = BudgetMeter(budget_inf_per_s=float(eff_budget) * fps, fps=fps)
+    agg = _make_aggregator(cfg)
+    result = ConfigResult(name=cfg.name, kind=cfg.kind)
+
+    for fi in frames:
+        crops = sched.decide(lock.state, fi, meter)
+        meter.charge(len(crops), fi)
+
+        hit_crops: list[CropRect] = []
+        hit_dets: list[list[Det]] = []
+        n_misses = 0
+        if crops:
+            # One batched backend call; on a ReplayBackend a missing crop raises
+            # CacheMissError, so fall back to per-crop lookups to count misses
+            # without losing the hits.
+            try:
+                dets_per_crop = backend.infer(fi, crops, fi)
+                hit_crops = list(crops)
+                hit_dets = list(dets_per_crop)
+            except CacheMissError:
+                for c in crops:
+                    try:
+                        dets = backend.infer(fi, [c], fi)[0]
+                    except CacheMissError:
+                        n_misses += 1
+                        continue
+                    hit_crops.append(c)
+                    hit_dets.append(dets)
+
+        final = agg.aggregate(fi, hit_crops, hit_dets, src_w, src_h)
+
+        # Step the lock with this frame's person detections; GT-seed while the
+        # lock has not yet acquired a track (mirrors dynamic_tiling.replay.run).
+        persons = [d for d in final if d.cls == person_cls]
+        gt_box = gt_traj.get(fi)
+        if lock.track_id is None and gt_box is not None:
+            lock.step(persons, gt_bbox_norm=gt_box)
+        else:
+            lock.step(persons)
+
+        result.frames.append(
+            FrameResult(frame_idx=fi, dets=final, n_tiles=len(crops), n_misses=n_misses)
+        )
+        result.n_misses_total += n_misses
+
+    return result
+
+
 def _dynamic_crops(cfg: BenchConfig, src_w: int, src_h: int, frame_idx: int) -> list[CropRect]:
     """Per-frame source-pixel crops for a dynamic row.
 
