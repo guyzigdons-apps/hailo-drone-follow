@@ -9,7 +9,8 @@ Tracks the decomposed plans derived from the master spec:
 | 2   | `2026-05-28-telemetry-modifiers-backends.md`          | 3, 4, 5     | done       |
 | 3   | `2026-05-28-fov-emulation-source-data-prep.md`        | 6           | done       |
 | 4   | `2026-05-28-cache-schema-and-python-cache-layer.md`   | 7           | done       |
-| 5   | `2026-05-28-gst-cache-plugins.md`                     | 8, 14       | in flight   |
+| 5   | `2026-05-28-gst-cache-plugins.md`                     | 8, 14       | in flight (T7/T11/T14 superseded by Plan 5b) |
+| 5b  | `2026-05-31-gst-cache-source-pixel-provenance.md`     | 8, 14       | done       |
 | 6   | GstCropperBackend + ablation harness                  | 9, 10       | not started |
 | 7   | `2026-05-28-telemetry-import-visualizer.md`           | 11, 12      | done        |
 | 8   | Drone-follow migration + RPI-GS data collection       | 13, 16      | not started |

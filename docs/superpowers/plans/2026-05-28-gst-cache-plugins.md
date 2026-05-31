@@ -109,6 +109,15 @@ hailo-apps/                       # touched only if Task 12 cannot avoid it
 **Bit-exact gate:** N/A for `full_frame` (not a tile cache; not replay-keyed); for the `tile_cache` half: rerun the bit-exact pytest as in Task 5.
 
 ### Task 7 — `[CHIP]` — wire writer into the canonical pipeline, populate a real cache
+> **[SUPERSEDED / SATISFIED]** by `docs/superpowers/plans/2026-05-31-gst-cache-source-pixel-provenance.md`.
+> The canonical-pipeline writer run + bit-exact gate now use **source-video-pixel** crop
+> keys and a **per-tile GST-live-vs-GST-cached** diff (pre-aggregator), instead of comparing
+> GST crops against a Python `ReplayBackend` baseline in cropped-caps space. The Python
+> baseline diff is value-exact at float32 only (not byte-text-identical — `%.9g` vs Python
+> shortest-repr), so the byte-equal `dets_json` acceptance below is replaced by the GST-vs-GST
+> gate (`scripts/cache_gst_replay_gate.py`, `tests/integration/test_cache_gst_replay_gate.py`).
+> Kept here for history; not re-run as written.
+
 **Depends on:** 6.
 **Description:** Run the spec §7.8 canonical pipeline against ONE FOV variant (`FOV-70` is fine — 5-minute clip is plenty) end-to-end on the Hailo board: `filesrc ! decodebin ! videoconvert ! hailotilecropper_dynamic ! hailonet ! hailofilter ! hailocachewriter mode=tile_cache output-file=run_tile.sqlite3 ! hailodetiler ! hailocachewriter mode=full_frame output-file=run_full.sqlite3 ! fakesink`. Capture both SQLite files. Use the existing tilecropper grid (`3x2`) so the cache content overlaps the Plan 4 warmed cache.
 **Acceptance:** Both files exist, are non-empty, `n_rows ≥ 5*6` (30 frames × 6 tiles minimum). `sqlite3 run_tile.sqlite3 "PRAGMA user_version"` returns `1`. No bus errors during the run.
@@ -137,6 +146,13 @@ Wire as a meson `benchmark()` (so `meson test --benchmark` runs it). Make failur
 **Bit-exact gate:** N/A.
 
 ### Task 11 — `[CHIP]` — bit-exact gate: GST reader replay vs Python ReplayBackend, full pipeline
+> **[SUPERSEDED / SATISFIED]** by `docs/superpowers/plans/2026-05-31-gst-cache-source-pixel-provenance.md`.
+> The decisive correctness gate is now **GST live vs GST cached**, per-tile, pre-aggregator
+> (same pipeline run twice — live `hailonet` vs `hailocachereader`+`hailocachebypass`), which
+> sidesteps the cross-engine float-formatting mismatch this task's "byte-for-byte vs Python
+> ReplayBackend" acceptance would have hit. Cross-engine equality remains **value-exact at
+> float32**, not byte-text-identical. Gate passes with 0 deviations.
+
 **Depends on:** 7, 9, 10.
 **Description:** The decisive end-to-end correctness gate. Compose the §7.9 replay pipeline with the production-equivalent post-process layout, using the Task-7 cache: `filesrc ! decodebin ! videoconvert ! hailotilecropper_dynamic ! hailocachereader cache-file=run_tile.sqlite3 hef-path=<same.hef> ! hailofilter bypass-on-cache-hit=true ! hailocachewriter mode=full_frame output-file=replay_full.sqlite3 ! fakesink`. (If `bypass-on-cache-hit` is not yet wired — see Task 12 — substitute a `hailofilter`-bypass wrapper for now and add a TODO; the gate still measures reader correctness.) Independently, run the Python `ReplayBackend` over the SAME cache + same crop sequence and dump per-frame detection lists.
 **Acceptance:** `tests/integration/test_cache_bit_exact_e2e.py --gst-replay=replay_full.sqlite3 --python-replay=<baseline>` reports 0 diffs across every frame in the clip.
@@ -159,6 +175,13 @@ Run a small experiment first: build option (1) and test against the Task-7 cache
 **Bit-exact gate:** N/A.
 
 ### Task 14 — `[CHIP]` — end-to-end smoke: live → cache → replay → bit-exact diff
+> **[SUPERSEDED / SATISFIED]** by `docs/superpowers/plans/2026-05-31-gst-cache-source-pixel-provenance.md`.
+> The end-to-end live→cache→replay→diff loop is now realized by the per-tile GST-vs-GST
+> replay gate (`tests/integration/test_cache_gst_replay_gate.py`, `HAILO_CHIP=1`), which
+> proves the cached pass reproduces the live pass exactly at the per-tile (pre-NMS) point.
+> The `live_full == replay_full` byte-equal assertion against a Python baseline is replaced
+> by that GST-vs-GST gate; the Python path is value-exact (float32), not text-identical.
+
 **Depends on:** 11, 12, 13.
 **Description:** The big stitching task. Reuse `tests/integration/test_cache_bit_exact_e2e.py` as the driver. Sequence: (a) run live pipeline against a 30-second clip on the chip, producing `live_tile.sqlite3` + `live_full.sqlite3`; (b) run replay pipeline against `live_tile.sqlite3`, producing `replay_full.sqlite3`; (c) run Python `ReplayBackend` over `live_tile.sqlite3` independently, producing `python_replay.json`; (d) assert `live_full.sqlite3 == replay_full.sqlite3` (frame-level, dets_json byte-equal) AND `replay_full.sqlite3 ≡ python_replay.json` (detection-level, JSON canonicalised). Add a `make e2e` Makefile target wiring it. No new C++ — this is integration glue.
 **Acceptance:** `make e2e` exits 0. The pytest's HTML/markdown summary lists the per-frame diff count: must be 0. Add a one-paragraph results note to `gst-hailo-cache/README.md` ("verified on \<chip-arch> with \<hef> against \<clip>").

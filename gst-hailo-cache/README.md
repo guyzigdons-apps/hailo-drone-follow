@@ -29,17 +29,33 @@ into the system GStreamer plugin directory resolved via
 
 ## Status
 
-**Task 1 of Plan 5** — scaffold only. The plugin currently registers an empty
-description (no elements yet). Elements land in later tasks:
+**Functional.** The plugin registers three elements — `hailocachewriter`,
+`hailocachereader`, `hailocachebypass` — backed by the SQLite `tile_cache` /
+`full_frame` schema. Source-pixel crop provenance + the resize envelope are
+recorded by the writer, and the per-tile **live-vs-cached bit-exact gate**
+(`scripts/cache_gst_replay_gate.py`,
+`tests/integration/test_cache_gst_replay_gate.py`, `HAILO_CHIP=1`) passes with
+0 deviations. See `docs/superpowers/plans/2026-05-31-gst-cache-source-pixel-provenance.md`
+(source-pixel provenance, resize contract, bit-exact gate) and the older
+`docs/superpowers/plans/2026-05-28-gst-cache-plugins.md` for the full task list.
 
-- Task 4 — `hailocachewriter` element skeleton
-- Task 5 — writer thread + `tile_cache` mode
-- Task 6 — `full_frame` mode + `frame_results` schema
-- Task 8 — `hailocachereader` element skeleton
-- Task 9 — `hailocachereader` lookup + cache-hit semantics
+## Known limitations
 
-See `docs/superpowers/plans/2026-05-28-gst-cache-plugins.md` for the full task
-list.
+1. **`letterbox` resize-mode has a back-mapping offset bug** — there is a
+   systematic positional offset when detections are mapped back from a
+   letterboxed tile (Task 7; see
+   `docs/superpowers/research/2026-05-31-resize-envelope-vs-stretch.md`).
+   `stretch` is the production default and the only mode that is fully
+   validated; `letterbox` is **not production-ready**.
+2. **`full_frame` mode `dets_json`/`tiles_json` payloads are unwired** — in
+   `full_frame` (post-aggregator) mode the writer still emits `"[]"` for both
+   columns pending the Phase-14 source-frame-coord payload wiring. Only the
+   `tile_cache` (pre-aggregator) mode serializes real per-tile detections.
+3. **Cross-engine cache equality is value-exact, not byte-text-identical** —
+   the per-tile GST-vs-GST gate is bit-exact, but the Python reader path is
+   value-lossless at float32 only: serialized JSON differs textually
+   (`%.9g` in C++ vs Python shortest-repr) while round-tripping to identical
+   float32 values.
 
 ## Build & install
 

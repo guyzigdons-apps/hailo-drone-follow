@@ -27,9 +27,12 @@
 //     When no per-tile ROI is present (non-tiled pipeline, videotestsrc,
 //     or a whole-frame (0,0,1,1) ROI) we fall back to the full-frame crop
 //     (0, 0, frame_w, frame_h), preserving the original behaviour.
-//   - `dets_json` is currently always `"[]"` (no detection extraction
-//     wired yet — Task 5 only needs to prove the writer path is
-//     correct end-to-end; Task 7 wires real detections behind the chip).
+//   - `dets_json` holds the REAL per-tile detections serialized from the
+//     tile HailoROI (`[{cls,score,x,y,w,h}]`, tile-local normalized coords;
+//     field names shared via `cache_keys.hpp`). When no detections are
+//     present the row is emitted with `"[]"`. (Only full_frame mode below
+//     still always emits `"[]"` — its post-aggregator payload is the
+//     remaining Phase-14 TODO.)
 //   - `record-empty=false` skips empty rows; `record-cache-hits=false`
 //     skips buffers carrying the `hailo-cache-hit` meta (Task 9 sets it).
 //

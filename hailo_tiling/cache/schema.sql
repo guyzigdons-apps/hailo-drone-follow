@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS detections (
 --                    "stretch"   — anisotropic scale, no padding
 --                    "letterbox" — aspect-preserving scale + symmetric pad
 --   dst_w          network input width in pixels (e.g. "640")
---   dst_h          network input height in pixels (e.g. "640")
+--   dst_h          network input height in pixels (e.g. "480")
 --   interpolation  resize filter used; currently "linear"
 --   hef_sha        hex SHA of the HEF that produced these detections
 -- Any of these keys may be absent in older / partial caches; readers must
