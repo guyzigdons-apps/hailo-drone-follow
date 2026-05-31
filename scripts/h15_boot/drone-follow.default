@@ -1,0 +1,11 @@
+# Configuration for drone-follow service
+# Edit this file and restart: /etc/init.d/drone-follow restart
+
+# Command-line arguments for drone_follow_h15
+# Real drone via Pixhawk serial:
+DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0"
+
+# Other examples:
+# DRONE_FOLLOW_ARGS=""                                       # PX4 SITL over UDP
+# DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0 --auto-offboard"  # bench testing
+# DRONE_FOLLOW_ARGS="--dry-run"                              # no drone connection
