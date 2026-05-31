@@ -2,4 +2,10 @@
 from .backend import InferenceBackend, MockBackend  # noqa: F401
 from .caching import CachingBackend  # noqa: F401
 from .hef import HefBackend  # noqa: F401
-from .replay import CacheMissError, ReplayBackend  # noqa: F401
+from .replay import (  # noqa: F401
+    CacheMissError,
+    ReplayBackend,
+    SourceTile,
+    map_dets_to_source,
+    read_source_coord_detections,
+)
