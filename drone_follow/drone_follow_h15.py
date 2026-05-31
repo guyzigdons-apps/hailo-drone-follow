@@ -187,17 +187,40 @@ def main():
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = "_replay" if replay_path else ""
         filename = f"drone_{ts}{suffix}.mkv"
+        fallback_dir = "/home/root/recordings"
+
         if record_path == "auto":
-            record_path = f"/home/root/recordings/{filename}"
-        elif os.path.isdir(record_path) or record_path.endswith(os.sep) or not record_path.endswith(".mkv"):
+            record_dir = fallback_dir
+        elif record_path.endswith(".mkv"):
+            record_dir = os.path.dirname(record_path)
+            filename = os.path.basename(record_path)
+        else:
             # Treat as a directory; auto-name the file inside it
-            record_path = os.path.join(record_path, filename)
-        os.makedirs(os.path.dirname(record_path), exist_ok=True)
+            record_dir = record_path
+
+        # If the user asked for a path under /mnt or /media but nothing is
+        # actually mounted there, fall back to internal storage. Otherwise
+        # we'd silently fill the rootfs at the unmounted mount point.
+        if record_dir.startswith(("/mnt/", "/media/")):
+            mounted = False
+            probe = record_dir
+            while probe and probe != "/":
+                if os.path.ismount(probe):
+                    mounted = True
+                    break
+                probe = os.path.dirname(probe)
+            if not mounted:
+                LOGGER.warning("[app] %s is not mounted — recording to %s instead",
+                               record_dir, fallback_dir)
+                record_dir = fallback_dir
+
+        record_path = os.path.join(record_dir, filename)
+        os.makedirs(record_dir, exist_ok=True)
         # Warn (don't fail) if the target volume looks too small.
-        free_gb = shutil.disk_usage(os.path.dirname(record_path)).free / (1024**3)
+        free_gb = shutil.disk_usage(record_dir).free / (1024**3)
         if free_gb < 1.0:
             LOGGER.warning("[app] Only %.2f GB free at %s — recording may be truncated",
-                           free_gb, os.path.dirname(record_path))
+                           free_gb, record_dir)
         else:
             LOGGER.info("[app] Recording target has %.1f GB free", free_gb)
         if replay_path:
@@ -318,8 +341,6 @@ def main():
 
     # Run the GStreamer pipeline on the main thread
     LOGGER.info("[app] Starting Hailo15 pipeline on main thread")
-    LOGGER.info("[app] View stream: gst-launch-1.0 udpsrc port=5002 ! "
-                "\"application/x-rtp,encoding-name=H264\" ! rtph264depay ! decodebin ! autovideosink")
     try:
         app.run()
     except (SystemExit, KeyboardInterrupt):

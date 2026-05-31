@@ -47,6 +47,8 @@ MEDIALIB_TOP_CONFIG_CANDIDATES = [
     "/etc/imaging/cfg/medialib_configs/ai_example_medialib_config.json",
 ]
 YOLO_HEF_CANDIDATES = [
+    "/home/root/apps/shared/resources/hailo_yolov8s_384_640.hef",
+    "/home/root/apps/shared/resources/hailo_yolov8n_384_640.hef",
     "/home/root/apps/face_landmarks/resources/hailo_yolov8s_384_640.hef",
     "/home/root/apps/face_landmarks/resources/hailo_yolov8n_384_640.hef",
     "/home/root/apps/ai_example_app/resources/hailo_yolov8s_384_640.hef",
