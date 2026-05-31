@@ -449,21 +449,36 @@ std::string read_tile_dets_json_(GstBuffer* buf)
         HailoBBox bb = det->get_bbox();
         if (!first) out += ",";
         first = false;
-        out += "{\"cls\":";
+        // Field names come from cache_keys.hpp (the single source of truth
+        // shared with the reader's parser). The emitted TEXT is unchanged:
+        // same names, same order, same %.9g formatting.
+        out += "{\"";
+        out += hailo_cache::kDetFieldCls;
+        out += "\":";
         out += std::to_string(det->get_class_id());
-        out += ",\"score\":";
+        out += ",\"";
+        out += hailo_cache::kDetFieldScore;
+        out += "\":";
         std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)det->get_confidence());
         out += numbuf;
-        out += ",\"x\":";
+        out += ",\"";
+        out += hailo_cache::kDetFieldX;
+        out += "\":";
         std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.xmin());
         out += numbuf;
-        out += ",\"y\":";
+        out += ",\"";
+        out += hailo_cache::kDetFieldY;
+        out += "\":";
         std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.ymin());
         out += numbuf;
-        out += ",\"w\":";
+        out += ",\"";
+        out += hailo_cache::kDetFieldW;
+        out += "\":";
         std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.width());
         out += numbuf;
-        out += ",\"h\":";
+        out += ",\"";
+        out += hailo_cache::kDetFieldH;
+        out += "\":";
         std::snprintf(numbuf, sizeof(numbuf), "%.9g", (double)bb.height());
         out += numbuf;
         out += "}";

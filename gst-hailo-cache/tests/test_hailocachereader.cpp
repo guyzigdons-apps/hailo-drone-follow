@@ -773,4 +773,118 @@ TEST(HailoCacheReaderTask5, SourcePixelCropFromTileRoiHits) {
     std::remove(db_path.c_str());
 }
 
+// ---------------------------------------------------------------------------
+// Reader robustness — a cache row with a malformed score must NOT crash the
+// streaming thread.
+//
+// The TAPPAS HailoDetection ctor calls assure_normal(confidence), which
+// THROWS std::invalid_argument for a score outside [0,1]. A corrupted /
+// hand-edited / foreign cache row could carry such a score (or a NaN). The
+// reader must drop the offending detection and keep going — never propagate
+// the exception out of transform_ip on the streaming thread.
+//
+// We seed a row whose dets_json contains: one VALID det (score 0.5), one
+// out-of-range det (score 1.5), and one NaN det. We push a buffer that HITs
+// the row (matching source-pixel crop key) and assert:
+//   * no bus error / no crash (pipeline reaches the appsink),
+//   * the buffer is flagged HIT (the row exists),
+//   * the restored ROI contains exactly the ONE valid detection.
+TEST(HailoCacheReaderTask1, BadCachedScoreDoesNotCrashAndIsDropped) {
+    std::string db_path = tmp_db_path("bad_score");
+
+    // dets_json with a valid + an out-of-range (1.5) + a NaN score. Field
+    // order/precision mirror the writer's %.9g emitter; the parser is
+    // order-insensitive so the exact text only needs to be well-formed.
+    const std::string kBadDetsJson =
+        "[{\"cls\":0,\"score\":0.5,\"x\":0.1,\"y\":0.2,\"w\":0.3,\"h\":0.4},"
+        "{\"cls\":1,\"score\":1.5,\"x\":0.1,\"y\":0.1,\"w\":0.2,\"h\":0.2},"
+        "{\"cls\":2,\"score\":nan,\"x\":0.3,\"y\":0.3,\"w\":0.2,\"h\":0.2}]";
+
+    {
+        hailo_cache::TileCacheDb db;
+        db.open(db_path, /*create_if_missing=*/true);
+        db.meta_put("ppv", "1");
+        hailo_cache::Row r;
+        r.frame_idx = 0;
+        // Source-pixel crop for a (0,0,0.4,0.5) tile over 3840x2160.
+        r.crop_x = 0; r.crop_y = 0; r.crop_w = 1536; r.crop_h = 1080;
+        r.ppv = 1;
+        r.dets_json = kBadDetsJson;
+        r.ts_epoch  = 1700000000.0;
+        db.put_many(std::vector<hailo_cache::Row>{r});
+        db.close();
+    }
+
+    GstElement* pipeline = gst_pipeline_new("task1_pipeline");
+    GstElement* src    = gst_element_factory_make("appsrc", "src");
+    GstElement* reader = gst_element_factory_make("hailocachereader", "reader");
+    GstElement* sink   = gst_element_factory_make("appsink", "sink");
+    ASSERT_TRUE(pipeline && src && reader && sink);
+
+    GstCaps* caps = gst_caps_new_simple("video/x-raw",
+        "format", G_TYPE_STRING, "RGB",
+        "width",  G_TYPE_INT, 640,
+        "height", G_TYPE_INT, 480,
+        "framerate", GST_TYPE_FRACTION, 30, 1,
+        nullptr);
+    g_object_set(src, "caps", caps, "format", GST_FORMAT_TIME, nullptr);
+    gst_caps_unref(caps);
+
+    g_object_set(reader,
+        "cache-file", db_path.c_str(),
+        "on-miss", 0 /* error */,
+        "source-width", 3840u,
+        "source-height", 2160u,
+        nullptr);
+    g_object_set(sink, "async", FALSE, "sync", FALSE,
+                 "emit-signals", FALSE, nullptr);
+
+    gst_bin_add_many(GST_BIN(pipeline), src, reader, sink, nullptr);
+    ASSERT_TRUE(gst_element_link_many(src, reader, sink, nullptr));
+
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+
+    const gsize sz = 640 * 480 * 3;
+    GstBuffer* buf = gst_buffer_new_allocate(nullptr, sz, nullptr);
+    GST_BUFFER_PTS(buf) = 0;
+    attach_tile_roi(buf, 0.0f, 0.0f, 0.4f, 0.5f);
+
+    GstFlowReturn fr = gst_app_src_push_buffer(GST_APP_SRC(src), buf);
+    EXPECT_EQ(fr, GST_FLOW_OK)
+        << "push_buffer failed — reader likely crashed on the bad score";
+    gst_app_src_end_of_stream(GST_APP_SRC(src));
+
+    GQuark q_hit = g_quark_from_static_string(GST_HAILO_CACHE_HIT_QDATA_KEY);
+
+    int hit_flag = -1;
+    int n_dets = -1;
+    GstSample* sample = gst_app_sink_try_pull_sample(
+        GST_APP_SINK(sink), 5 * GST_SECOND);
+    ASSERT_NE(sample, nullptr)
+        << "reader produced no buffer — it likely crashed / errored on the "
+           "malformed score instead of dropping the bad detection";
+    GstBuffer* out = gst_sample_get_buffer(sample);
+    ASSERT_NE(out, nullptr);
+    gpointer p = gst_mini_object_get_qdata(GST_MINI_OBJECT(out), q_hit);
+    if (p) hit_flag = GPOINTER_TO_INT(p);
+
+    // Inspect the restored ROI: only the single valid detection should
+    // survive; the out-of-range and NaN ones must have been dropped.
+    HailoROIPtr roi = get_hailo_main_roi(out, /*create_if_missing=*/false);
+    if (roi) {
+        n_dets = (int)roi->get_objects_typed(HAILO_DETECTION).size();
+    }
+    gst_sample_unref(sample);
+
+    EXPECT_EQ(hit_flag, GST_HAILO_CACHE_HIT_VALUE_HIT)
+        << "row exists; buffer should be flagged HIT";
+    EXPECT_EQ(n_dets, 1)
+        << "expected exactly the one valid detection to survive (the score=1.5 "
+           "and score=NaN detections must be dropped); got " << n_dets;
+
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(pipeline);
+    std::remove(db_path.c_str());
+}
+
 #endif  // HAVE_GSTHAILOMETA

@@ -39,6 +39,34 @@ typedef struct _GstBuffer GstBuffer;
 
 namespace hailo_cache {
 
+// ---------------------------------------------------------------------------
+// dets_json detection-object field names — SINGLE SOURCE OF TRUTH.
+//
+// The cache's `dets_json` column holds a JSON array of detection objects in
+// the shape [{cls,score,x,y,w,h}, ...] (tile-local normalized coords). These
+// constants are the ONE place those field names are spelled out; they are
+// shared by:
+//   * the C++ writer's emitter  (gst_hailocachewriter.cpp:read_tile_dets_json_)
+//   * the C++ reader's parser    (gst_hailocachereader.cpp:extract_number_field)
+// so a field rename can't silently drift one side away from the other and
+// drop detections. The Python equivalent is
+// hailo_tiling/cache/store.py:_dets_to_json — keep these names in sync with it.
+//
+// This header is intentionally TAPPAS-free, so both elements (and their
+// TAPPAS-guarded code paths) can include it unconditionally.
+//
+// NOTE on the reader's parser assumptions: it locates each field via a
+// `find("<name>":")` substring search over the object text. That is only
+// reliable because (a) no field name here is a substring of another and
+// (b) all values are numbers (no string values whose contents could contain
+// a `"<name>":` token). Preserve both invariants if adding fields.
+constexpr const char* kDetFieldCls   = "cls";
+constexpr const char* kDetFieldScore = "score";
+constexpr const char* kDetFieldX     = "x";
+constexpr const char* kDetFieldY     = "y";
+constexpr const char* kDetFieldW     = "w";
+constexpr const char* kDetFieldH     = "h";
+
 // Canonical crop rectangle. Distinct from TileCacheDb::CropKey only to
 // keep canonicalisation and DB lookup independently testable; callers
 // that already have a CropKey can construct one with `{x, y, w, h}`

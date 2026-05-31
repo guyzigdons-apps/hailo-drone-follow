@@ -59,8 +59,6 @@ from gi.repository import GLib, Gst  # noqa: E402
 
 import hailo  # noqa: E402
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-
 # Canonical post-process .so + function for the 4-class yolov8 VGA HEF
 # (yolov8 → libyolo_hailortpp_postprocess.so + 'filter'; see
 # tiling_benchmark/run_pxt_yolov8m.py and the HEF auto-detect convention).
