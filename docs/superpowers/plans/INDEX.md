@@ -11,7 +11,8 @@ Tracks the decomposed plans derived from the master spec:
 | 4   | `2026-05-28-cache-schema-and-python-cache-layer.md`   | 7           | done       |
 | 5   | `2026-05-28-gst-cache-plugins.md`                     | 8, 14       | done (via Plan 5b; T7/T11/T14 superseded) |
 | 5b  | `2026-05-31-gst-cache-source-pixel-provenance.md`     | 8, 14       | done       |
-| 6   | `2026-05-31-cache-warming-and-ablation-harness.md` (warmer + GstCropperBackend + `hailo-tiling-bench`) | 9, 10 | **in flight — autonomous overnight (warm 0026 + build harness)** |
+| 6   | `2026-05-31-cache-warming-and-ablation-harness.md` (warmer + GstCropperBackend + `hailo-tiling-bench`) | 9, 10 | done (Night 1: harness + 0026 static tables, 0 misses) |
+| 6b  | `2026-05-31-dynamic-ablation-and-scaling.md` (dynamic rows + scaling + paper scaffold) | 9, 10, 15 | **in flight — autonomous Night 2** |
 | 7   | `2026-05-28-telemetry-import-visualizer.md`           | 11, 12      | done        |
 | 8   | Drone-follow migration + RPI-GS data collection       | 13, 16      | not started (needs flights / ops) |
 | 9   | Paper-with-code artifacts                             | 15          | not started |
