@@ -18,11 +18,15 @@
 //       ▼
 //   SQLite file on disk
 //
-// What gets written PER BUFFER in tile_cache mode (this task):
-//   - One row per upstream crop. If upstream crop-list metadata is
-//     unavailable (Phase 14 not yet landed), we emit a single row with
-//     the full-frame crop (0, 0, frame_w, frame_h) — see the TODO in
-//     `build_rows_for_buffer_()`.
+// What gets written PER BUFFER in tile_cache mode:
+//   - One row per crop buffer. On the cropped branch (after hailofilter,
+//     before hailotileaggregator.sink_1) each buffer carries a single
+//     tile HailoROI; Phase 14 reads that ROI's normalized bbox and records
+//     the REAL source-pixel crop rect (normalized * frame-dim, using the
+//     cropper's exact truncate+clamp rule — see `read_tile_crop_rect_`).
+//     When no per-tile ROI is present (non-tiled pipeline, videotestsrc,
+//     or a whole-frame (0,0,1,1) ROI) we fall back to the full-frame crop
+//     (0, 0, frame_w, frame_h), preserving the original behaviour.
 //   - `dets_json` is currently always `"[]"` (no detection extraction
 //     wired yet — Task 5 only needs to prove the writer path is
 //     correct end-to-end; Task 7 wires real detections behind the chip).
@@ -69,6 +73,15 @@
 
 #include "cache_keys.hpp"
 #include "tile_cache_db.hpp"
+
+// Crop provenance (Phase 14): when built against TAPPAS core, read each
+// tile-crop's HailoROI bbox and record the REAL source-pixel crop rect
+// (instead of the full-frame fallback). Guarded so the lib still builds
+// on a no-Hailo box.
+#if defined(HAVE_GSTHAILOMETA)
+#include <gst_hailo_meta.hpp>   // get_hailo_main_roi
+#include <hailo_objects.hpp>    // HailoROI, HailoBBox
+#endif
 
 GST_DEBUG_CATEGORY_STATIC(gst_hailocachewriter_debug);
 #define GST_CAT_DEFAULT gst_hailocachewriter_debug
@@ -317,6 +330,80 @@ bool buffer_has_cache_hit_meta_(GstBuffer* buf)
     GType t = cache_hit_meta_api_type_();
     if (t == 0) return false;  // reader hasn't registered the meta yet
     return gst_buffer_get_meta(buf, t) != nullptr;
+}
+
+// Crop provenance (Phase 14).
+//
+// In mode=tile_cache the writer sits on the CROPPED branch (after
+// hailofilter, before hailotileaggregator.sink_1). Each buffer there is a
+// single tile crop carrying a HailoROI whose normalized bbox IS the tile
+// rect in source-frame coords (verified empirically: a 3x2 grid yields the
+// six normalized rects {0,0,1/3,1/2}, {1/3,0,1/3,1/2}, ... in order).
+//
+// We convert that normalized bbox to absolute source pixels using the
+// EXACT rule the cropper used to cut the pixels the HEF saw — TAPPAS
+// `HailoMat::get_bounding_rect` (hailomat.cpp):
+//
+//     rect.x      = CLAMP(xmin   * W, 0, W)
+//     rect.y      = CLAMP(ymin   * H, 0, H)
+//     rect.width  = CLAMP(width  * W, 0, W - rect.x)
+//     rect.height = CLAMP(height * H, 0, H - rect.y)
+//
+// `hailo_rect_t` fields are `int`, so the float->int is C truncation
+// toward zero; bbox components are >= 0 so this equals floor(). Width and
+// height come from `width*W` / `height*H` INDEPENDENTLY of x/y (not
+// xmax-xmin), then clamp to the residual frame extent. Replicating this
+// rule byte-for-byte is what makes the writer's crop key match the pixels
+// the model actually received.
+//
+// Returns true and fills cx/cy/cw/ch on success; false if no tile ROI is
+// present (caller keeps the full-frame fallback) — e.g. videotestsrc
+// round-trip with no Hailo metadata, or the whole-frame (0,0,1,1) ROI.
+bool read_tile_crop_rect_(GstBuffer* buf,
+                          std::int32_t frame_w, std::int32_t frame_h,
+                          std::int32_t* cx, std::int32_t* cy,
+                          std::int32_t* cw, std::int32_t* ch)
+{
+#if defined(HAVE_GSTHAILOMETA)
+    if (frame_w <= 0 || frame_h <= 0) return false;
+    HailoROIPtr roi = get_hailo_main_roi(buf, /*create_if_missing=*/false);
+    if (!roi) return false;
+
+    HailoBBox bb = roi->get_bbox();
+    const float xmin = bb.xmin();
+    const float ymin = bb.ymin();
+    const float w    = bb.width();
+    const float h    = bb.height();
+
+    // A whole-frame ROI (the cropper's own "is whole buffer" case, and the
+    // default ROI attached to a non-cropped buffer) carries no per-tile
+    // provenance — let the caller use its (0,0,W,H) fallback so behaviour
+    // is identical to the pre-Phase-14 writer for non-tiled pipelines.
+    if (xmin == 0.0f && ymin == 0.0f && w == 1.0f && h == 1.0f) {
+        return false;
+    }
+
+    auto clampi = [](double v, std::int32_t lo, std::int32_t hi) -> std::int32_t {
+        // Truncate toward zero (matches int-field assignment in TAPPAS),
+        // then CLAMP to [lo, hi] exactly as get_bounding_rect does.
+        std::int32_t t = (std::int32_t)v;
+        if (t < lo) return lo;
+        if (t > hi) return hi;
+        return t;
+    };
+
+    const std::int32_t rx = clampi((double)xmin * frame_w, 0, frame_w);
+    const std::int32_t ry = clampi((double)ymin * frame_h, 0, frame_h);
+    const std::int32_t rw = clampi((double)w * frame_w, 0, frame_w - rx);
+    const std::int32_t rh = clampi((double)h * frame_h, 0, frame_h - ry);
+
+    *cx = rx; *cy = ry; *cw = rw; *ch = rh;
+    return true;
+#else
+    (void)buf; (void)frame_w; (void)frame_h;
+    (void)cx; (void)cy; (void)cw; (void)ch;
+    return false;
+#endif
 }
 
 }  // namespace
@@ -1020,14 +1107,24 @@ gst_hailocachewriter_transform_ip(GstBaseTransform* trans, GstBuffer* buffer)
     const std::int64_t frame_idx =
         hailo_cache::frame_id_from_buffer(buffer, src, self->counter_state);
 
-    // (b) Build crop list. TODO(Phase 14): consult the upstream
-    //     `GstHailoBaseCropperDyn` provenance metadata (or the
-    //     identity-signal channel) to recover per-tile crop rects.
-    //     For Task 5 we emit a SINGLE crop covering the whole frame.
-    const std::int32_t cx = 0;
-    const std::int32_t cy = 0;
-    const std::int32_t cw = self->frame_width;
-    const std::int32_t ch = self->frame_height;
+    // (b) Build crop rect (Phase 14). On the cropped branch each buffer is
+    //     a single tile carrying a HailoROI whose normalized bbox is the
+    //     tile rect; convert it to absolute source pixels with the cropper's
+    //     exact rounding rule (see read_tile_crop_rect_). If no per-tile ROI
+    //     is present (non-tiled pipeline / videotestsrc / whole-frame ROI),
+    //     fall back to the full-frame crop (0,0,W,H) — identical to the
+    //     pre-Phase-14 behaviour, so the existing no-crop tests still pass.
+    std::int32_t cx = 0;
+    std::int32_t cy = 0;
+    std::int32_t cw = self->frame_width;
+    std::int32_t ch = self->frame_height;
+    if (self->mode != GST_HAILOCACHEWRITER_MODE_FULL_FRAME) {
+        std::int32_t tx, ty, tw, th;
+        if (read_tile_crop_rect_(buffer, self->frame_width, self->frame_height,
+                                 &tx, &ty, &tw, &th)) {
+            cx = tx; cy = ty; cw = tw; ch = th;
+        }
+    }
 
     // (c) Detections: empty for Task 5. Task 7 will read
     //     `HailoROI` children attached to each crop by upstream
