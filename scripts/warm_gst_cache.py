@@ -119,22 +119,26 @@ def default_cache_filename(video: str | Path, fov: str, hef: str | Path) -> str:
 # warming
 # --------------------------------------------------------------------------
 
-def warm(
+def _warm_one_grid_in_process(
     video: str,
     hef: str,
     out_cache: str,
-    grids: list[tuple[int, int, float]],
+    grid: tuple[int, int, float],
     source_width: int,
     source_height: int,
     max_frames: int = 0,
     post_so: str | None = None,
     post_fn: str | None = None,
 ) -> dict:
-    """Warm ``out_cache`` by running the canonical cropper pipeline once per
-    grid. Returns a summary dict with per-grid row counts + total.
+    """Warm a SINGLE grid into ``out_cache`` in THIS process.
 
-    All grids write into the SAME cache file (append; idempotent via A1). The
-    ``meta`` table is stamped once (first grid). Progress is logged per grid.
+    This is the in-process unit of work. Running more than one grid per
+    process wedges GStreamer/HailoRT (state leak across repeated cropper +
+    hailonet pipeline teardown/relaunch — Plan 6 A3 finding), so :func:`warm`
+    spawns a fresh subprocess per grid and each child invokes exactly this.
+
+    Returns a per-grid summary dict (no meta stamp — meta is stamped by the
+    parent once all grids are done).
     """
     import gi
 
@@ -145,20 +149,10 @@ def warm(
 
     post_so = post_so or gate._DEFAULT_POST_SO
     post_fn = post_fn or gate._DEFAULT_POST_FN
-    # 0 / negative => no cap. The gate's run loop stops after
-    # max_frames * n_tiles buffers, so use a large cap for "all frames".
     frame_cap = max_frames if max_frames and max_frames > 0 else 10_000_000
 
     out_path = Path(out_cache)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    per_grid: list[dict] = []
-    print(
-        f"[warm] video={video}\n[warm] out-cache={out_cache}\n"
-        f"[warm] src={source_width}x{source_height} grids={len(grids)} "
-        f"max_frames={max_frames or 'ALL'}",
-        flush=True,
-    )
 
     def _row_count() -> int:
         store = SqliteCacheStore.open(out_path)
@@ -167,44 +161,152 @@ def warm(
         finally:
             store.close()
 
-    rows_before_total = _row_count() if out_path.exists() else 0
+    nx, ny, overlap = grid
+    tiles_static = grid_to_tiles_static(nx, ny, overlap)
+    n_tiles = len([r for r in tiles_static.split(";") if r.strip()])
+    rows_before = _row_count() if out_path.exists() else 0
 
-    for (nx, ny, overlap) in grids:
+    inner = gate._inner_live(
+        hef, post_so, post_fn, str(out_path), source_width, source_height
+    )
+    pipe = gate._build_pipeline(video, gate._cropper_subgraph(inner, tiles_static))
+    label = f"{nx}x{ny}:{overlap}"
+    print(f"[warm] grid={label} tiles={n_tiles} ...", flush=True)
+    result = gate._run_pass(pipe, source_width, source_height, frame_cap, n_tiles)
+    if result.error:
+        raise RuntimeError(f"grid {label} pipeline error: {result.error}")
+
+    rows_after = _row_count()
+    added = rows_after - rows_before
+    print(
+        f"[warm] grid={label} rows_added={added} rows_total={rows_after}",
+        flush=True,
+    )
+    return {
+        "grid": label,
+        "tiles_per_frame": n_tiles,
+        "tiles_buffers_seen": len(result.records),
+        "rows_added": added,
+        "rows_after": rows_after,
+    }
+
+
+def _default_subprocess_runner(
+    grid: tuple[int, int, float],
+    *,
+    video: str,
+    hef: str,
+    out_cache: str,
+    source_width: int,
+    source_height: int,
+    max_frames: int,
+    post_so: str | None,
+    post_fn: str | None,
+) -> None:
+    """Spawn a fresh ``python warm_gst_cache.py --_single-grid-child`` for ONE
+    grid. A fresh process per grid is the fix for the in-process multi-grid
+    GStreamer/HailoRT teardown deadlock (Plan 6 A3). Raises on non-zero exit."""
+    nx, ny, overlap = grid
+    cmd = [
+        sys.executable,
+        str(_THIS_DIR / "warm_gst_cache.py"),
+        "--_single-grid-child",
+        "--video", str(video),
+        "--hef", str(hef),
+        "--out-cache", str(out_cache),
+        "--grids", f"{nx}x{ny}:{overlap}",
+        "--source-width", str(source_width),
+        "--source-height", str(source_height),
+        "--max-frames", str(max_frames),
+    ]
+    if post_so:
+        cmd += ["--post-so", str(post_so)]
+    if post_fn:
+        cmd += ["--post-function", str(post_fn)]
+    import subprocess
+
+    subprocess.run(cmd, check=True)
+
+
+def warm(
+    video: str,
+    hef: str,
+    out_cache: str,
+    grids: list[tuple[int, int, float]],
+    source_width: int,
+    source_height: int,
+    max_frames: int = 0,
+    post_so: str | None = None,
+    post_fn: str | None = None,
+    subprocess_runner=None,
+) -> dict:
+    """Warm ``out_cache`` by warming each grid in a FRESH SUBPROCESS.
+
+    Running N grids in one long-lived process wedges GStreamer/HailoRT (state
+    leak across repeated cropper + hailonet pipeline teardown/relaunch — Plan 6
+    A3 finding). So the parent spawns one child per grid (each child does
+    exactly one :func:`_warm_one_grid_in_process`), all appending to the SAME
+    cache file (idempotent via A1 INSERT OR IGNORE). Meta is stamped once by the
+    parent after all grids complete.
+
+    ``subprocess_runner`` is the per-grid spawn callable (one positional ``grid``
+    arg + keyword args); defaults to :func:`_default_subprocess_runner`. Tests
+    inject a recording stub. Row counts are read from the cache after each child
+    so the summary is accurate regardless of how the child ran.
+    """
+    runner = subprocess_runner or _default_subprocess_runner
+
+    out_path = Path(out_cache)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print(
+        f"[warm] video={video}\n[warm] out-cache={out_cache}\n"
+        f"[warm] src={source_width}x{source_height} grids={len(grids)} "
+        f"max_frames={max_frames or 'ALL'} (subprocess-per-grid)",
+        flush=True,
+    )
+
+    def _row_count() -> int:
+        if not out_path.exists():
+            return 0
+        store = SqliteCacheStore.open(out_path)
+        try:
+            return int(store.stats()["n_rows"])
+        finally:
+            store.close()
+
+    rows_before_total = _row_count()
+
+    per_grid: list[dict] = []
+    for grid in grids:
+        nx, ny, overlap = grid
+        label = f"{nx}x{ny}:{overlap}"
+        rows_before = _row_count()
+        print(f"[warm] grid={label} (fresh subprocess) ...", flush=True)
+        runner(
+            grid,
+            video=video,
+            hef=hef,
+            out_cache=str(out_path),
+            source_width=source_width,
+            source_height=source_height,
+            max_frames=max_frames,
+            post_so=post_so,
+            post_fn=post_fn,
+        )
+        rows_after = _row_count()
         tiles_static = grid_to_tiles_static(nx, ny, overlap)
         n_tiles = len([r for r in tiles_static.split(";") if r.strip()])
-        rows_before = _row_count() if out_path.exists() else 0
-
-        inner = gate._inner_live(
-            hef, post_so, post_fn, str(out_path), source_width, source_height
-        )
-        pipe = gate._build_pipeline(
-            video, gate._cropper_subgraph(inner, tiles_static)
-        )
-        label = f"{nx}x{ny}:{overlap}"
-        print(f"[warm] grid={label} tiles={n_tiles} ...", flush=True)
-        result = gate._run_pass(
-            pipe, source_width, source_height, frame_cap, n_tiles
-        )
-        if result.error:
-            raise RuntimeError(f"grid {label} pipeline error: {result.error}")
-
-        rows_after = _row_count()
-        added = rows_after - rows_before
         per_grid.append(
             {
                 "grid": label,
                 "tiles_per_frame": n_tiles,
-                "tiles_buffers_seen": len(result.records),
-                "rows_added": added,
+                "rows_added": rows_after - rows_before,
                 "rows_after": rows_after,
             }
         )
-        print(
-            f"[warm] grid={label} rows_added={added} rows_total={rows_after}",
-            flush=True,
-        )
 
-    # Stamp meta once (idempotent meta_put upsert).
+    # Stamp meta once, after all grid children have written (idempotent upsert).
     store = SqliteCacheStore.open(out_path)
     try:
         store.meta_put("video_path", str(video))
@@ -260,6 +362,12 @@ def _build_argparser() -> argparse.ArgumentParser:
                     help="Cap frames (0 = all).")
     ap.add_argument("--post-so", default=None)
     ap.add_argument("--post-function", default=None)
+    ap.add_argument(
+        "--_single-grid-child",
+        action="store_true",
+        help="INTERNAL: run exactly one grid in-process (spawned by the "
+        "subprocess-per-grid parent). Not for direct use.",
+    )
     return ap
 
 
@@ -272,6 +380,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             "plugins live in gst-hailo-cache/build/src. Set it before running.",
             file=sys.stderr,
         )
+    if getattr(args, "_single_grid_child", False):
+        # Child invocation: warm exactly one grid in this fresh process.
+        if len(grids) != 1:
+            raise SystemExit(
+                "--_single-grid-child requires exactly one grid, got "
+                f"{len(grids)}"
+            )
+        _warm_one_grid_in_process(
+            video=args.video,
+            hef=args.hef,
+            out_cache=args.out_cache,
+            grid=grids[0],
+            source_width=args.source_width,
+            source_height=args.source_height,
+            max_frames=args.max_frames,
+            post_so=args.post_so,
+            post_fn=args.post_function,
+        )
+        return 0
     warm(
         video=args.video,
         hef=args.hef,

@@ -99,6 +99,71 @@ def test_default_cache_filename_strips_fov_and_uses_hef_sha(tmp_path):
     assert len(sha_part) == 16
 
 
+def test_warmer_spawns_subprocess_per_grid(tmp_path, monkeypatch):
+    """warm() must spawn one child per grid (fresh process each), NOT run all
+    grids in one in-process loop (which wedges GStreamer/HailoRT — Plan 6 A3).
+
+    Inject a recording subprocess_runner stub that writes one detection row per
+    invocation; assert exactly len(grids) invocations, one per grid, and that
+    meta is stamped once by the parent.
+    """
+    warmer = _load_warmer()
+    from hailo_tiling.cache.store import SqliteCacheStore
+
+    out_cache = tmp_path / "multi.sqlite3"
+    hef = tmp_path / "model.hef"
+    hef.write_bytes(b"abc")
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"vid")
+
+    calls: list[tuple[int, int, float]] = []
+
+    from hailo_tiling.types import CropRect
+
+    def fake_runner(grid, **kw):
+        # Each child appends a distinct detection row into the shared cache so
+        # the parent's per-grid row-count accounting sees growth per grid.
+        calls.append(grid)
+        store = SqliteCacheStore.open(Path(kw["out_cache"]))
+        try:
+            nx, ny, _ = grid
+            store.put_many(
+                [
+                    {
+                        "frame_idx": len(calls),
+                        "crop_rect": CropRect(x=nx, y=ny, w=1, h=1),
+                        "ppv": 0,
+                        "dets": [],
+                    }
+                ]
+            )
+        finally:
+            store.close()
+
+    grids = [(1, 1, 0.0), (3, 2, 0.25), (6, 4, 0.25)]
+    summary = warmer.warm(
+        video=str(video),
+        hef=str(hef),
+        out_cache=str(out_cache),
+        grids=grids,
+        source_width=3840,
+        source_height=2160,
+        max_frames=4,
+        subprocess_runner=fake_runner,
+    )
+
+    # One child per grid, in order — NOT one in-process multi-grid loop.
+    assert calls == grids, f"expected one subprocess per grid, got {calls}"
+    assert len(summary["grids"]) == 3
+    # Meta stamped once by the parent (after all children).
+    store = SqliteCacheStore.open(out_cache)
+    try:
+        assert store.meta_get("video_w") == "3840"
+        assert store.meta_get("grid_spec") == "1x1:0.0;3x2:0.25;6x4:0.25"
+    finally:
+        store.close()
+
+
 # --------------------------------------------------------------------------
 # Chip-gated smoke
 # --------------------------------------------------------------------------
