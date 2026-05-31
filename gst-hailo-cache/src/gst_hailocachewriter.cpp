@@ -394,7 +394,8 @@ bool read_tile_crop_rect_(GstBuffer* buf,
     // default ROI attached to a non-cropped buffer) carries no per-tile
     // provenance — let the caller use its (0,0,W,H) fallback so behaviour
     // is identical to the pre-Phase-14 writer for non-tiled pipelines.
-    if (xmin == 0.0f && ymin == 0.0f && w == 1.0f && h == 1.0f) {
+    if (hailo_cache::is_whole_frame_bbox((double)xmin, (double)ymin,
+                                         (double)w, (double)h)) {
         return false;
     }
 
@@ -865,9 +866,9 @@ writer_thread_main_(GstHailoCacheWriter* self)
         if (meta_stamped) return;
         meta_stamped = true;
         const std::int32_t meta_video_w =
-            (self->source_width  > 0) ? (std::int32_t)self->source_width  : self->frame_width;
+            hailo_cache::pick_dim(self->source_width,  self->frame_width);
         const std::int32_t meta_video_h =
-            (self->source_height > 0) ? (std::int32_t)self->source_height : self->frame_height;
+            hailo_cache::pick_dim(self->source_height, self->frame_height);
         const std::int32_t meta_dst_w =
             (self->dst_width  > 0) ? (std::int32_t)self->dst_width  : self->frame_width;
         const std::int32_t meta_dst_h =
@@ -1257,9 +1258,9 @@ gst_hailocachewriter_transform_ip(GstBaseTransform* trans, GstBuffer* buffer)
     // source-video pixels); otherwise fall back to the cropped-branch caps
     // dims — byte-identical to the pre-Task-4 writer.
     const std::int32_t conv_w =
-        (self->source_width  > 0) ? (std::int32_t)self->source_width  : self->frame_width;
+        hailo_cache::pick_dim(self->source_width,  self->frame_width);
     const std::int32_t conv_h =
-        (self->source_height > 0) ? (std::int32_t)self->source_height : self->frame_height;
+        hailo_cache::pick_dim(self->source_height, self->frame_height);
 
     std::int32_t cx = 0;
     std::int32_t cy = 0;

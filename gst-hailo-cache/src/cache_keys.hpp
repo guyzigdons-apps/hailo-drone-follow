@@ -90,6 +90,22 @@ CanonicalCrop tile_crop_to_source_px(double xmin, double ymin,
                                      double width, double height,
                                      std::int32_t W, std::int32_t H);
 
+// True when a normalized ROI bbox is the whole-frame default (0,0,1,1).
+// Such a bbox carries no per-tile provenance — both writer and reader use
+// this to fall back to the full-frame (0,0,W,H) crop for non-tiled
+// pipelines, so their behaviour stays byte-identical.
+//
+// Exact float equality (no epsilon) is DELIBERATE and shared by both call
+// sites: the default ROI is constructed with bit-exact literal `1.0f`
+// (and 0.0f) components, so the comparison is reliable and an epsilon
+// would only risk swallowing a genuine near-whole-frame tile. Callers pass
+// the four bbox components widened to double; the comparison result is
+// identical to comparing the original floats against 0.0f/1.0f.
+inline bool is_whole_frame_bbox(double xmin, double ymin,
+                                double w, double h) {
+    return xmin == 0.0 && ymin == 0.0 && w == 1.0 && h == 1.0;
+}
+
 enum class FrameIdSource {
     COUNTER,
     PTS,

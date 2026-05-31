@@ -656,7 +656,8 @@ gst_hailo_cache_reader_transform_ip(GstBaseTransform* trans, GstBuffer* buf)
             // A whole-frame ROI (0,0,1,1) carries no per-tile provenance —
             // treat it like "no tile ROI" so behaviour matches the writer's
             // full-frame fallback for non-tiled pipelines.
-            if (!(xmin == 0.0f && ymin == 0.0f && w == 1.0f && h == 1.0f)) {
+            if (!hailo_cache::is_whole_frame_bbox((double)xmin, (double)ymin,
+                                                  (double)w, (double)h)) {
                 hailo_cache::CanonicalCrop r =
                     hailo_cache::tile_crop_to_source_px(
                         (double)xmin, (double)ymin, (double)w, (double)h,
