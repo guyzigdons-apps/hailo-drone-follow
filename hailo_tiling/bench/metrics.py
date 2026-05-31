@@ -97,3 +97,25 @@ def recall_precision_vs_reference(
     recall = tp_total / n_ref_total if n_ref_total else 0.0
     precision = tp_total / n_pred_total if n_pred_total else 0.0
     return recall, precision, n_ref_total
+
+
+def matched_compute_delta(
+    dynamic_mean_tiles: float,
+    dynamic_recall: float,
+    static_rows: Sequence[dict],
+) -> tuple[str | None, float | None]:
+    """Pair a dynamic row with the static grid of the closest mean tiles/frame
+    and return ``(static_name, recall_delta)`` where
+    ``recall_delta = dynamic_recall - static_recall`` at matched compute.
+
+    ``static_rows`` is a list of ``{"name", "mean_tiles", "recall"}`` dicts (the
+    static + reference rows). The match is the static row minimising
+    ``|mean_tiles - dynamic_mean_tiles|``. Returns ``(None, None)`` if there are
+    no static rows. The delta is the paper's headline: recall gained/lost vs a
+    uniform grid of equal budget.
+    """
+    candidates = [r for r in static_rows if r.get("recall") is not None]
+    if not candidates:
+        return None, None
+    best = min(candidates, key=lambda r: abs(r["mean_tiles"] - dynamic_mean_tiles))
+    return best["name"], dynamic_recall - best["recall"]

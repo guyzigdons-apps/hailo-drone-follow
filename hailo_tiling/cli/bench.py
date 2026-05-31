@@ -23,8 +23,13 @@ from pathlib import Path
 from typing import Sequence
 
 from ..bench.config import BenchConfig, default_matrix
-from ..bench.metrics import recall_precision_vs_reference
-from ..bench.runner import ConfigResult, run_config, run_static_config_crop_ordered
+from ..bench.metrics import matched_compute_delta, recall_precision_vs_reference
+from ..bench.runner import (
+    ConfigResult,
+    run_config,
+    run_dynamic_config,
+    run_static_config_crop_ordered,
+)
 from ..cache.store import SqliteCacheStore
 from ..types import Det
 
@@ -111,21 +116,94 @@ def _write_frames_json(out_dir: Path, res: ConfigResult) -> Path:
     return path
 
 
-def _format_table(rows: list[dict]) -> str:
-    header = (
+def _format_table(rows: list[dict], *, matched_compute: bool = False) -> str:
+    cols = (
         "| config | kind | mean_tiles_per_frame | n_dets | "
-        "recall_vs_reference | precision_vs_reference | n_misses |\n"
-        "|---|---|---:|---:|---:|---:|---:|\n"
+        "recall_vs_reference | precision_vs_reference | n_misses"
     )
+    sep = "|---|---|---:|---:|---:|---:|---:"
+    if matched_compute:
+        cols += " | matched_static | recall_delta_at_matched_budget"
+        sep += "|---|---:"
+    header = cols + " |\n" + sep + "|\n"
     lines = []
     for r in rows:
         rec = "—" if r["recall"] is None else f"{r['recall']:.4f}"
         prec = "—" if r["precision"] is None else f"{r['precision']:.4f}"
-        lines.append(
+        line = (
             f"| {r['name']} | {r['kind']} | {r['mean_tiles']:.2f} | "
-            f"{r['n_dets']} | {rec} | {prec} | {r['n_misses']} |"
+            f"{r['n_dets']} | {rec} | {prec} | {r['n_misses']}"
         )
+        if matched_compute:
+            ms = r.get("matched_static")
+            md = r.get("matched_delta")
+            ms_s = "—" if ms is None else str(ms)
+            md_s = "—" if md is None else f"{md:+.4f}"
+            line += f" | {ms_s} | {md_s}"
+        lines.append(line + " |")
     return header + "\n".join(lines) + "\n"
+
+
+def _dynamic_rows_from_cache(
+    dynamic_cache: str,
+    ref: str,
+    video_meta: dict,
+    ref_map: dict,
+    static_rows: list[dict],
+    out_dir: Path,
+    *,
+    target_cls: int,
+    iou_thr: float,
+    ppv: int,
+) -> list[dict]:
+    """Replay the dynamic configs from a per-source-frame dynamic cache (warmed
+    by scripts/warm_dynamic_cache.py) and build their table rows with a
+    matched-compute delta vs the closest-budget static grid (Night-2 B3).
+
+    The dynamic schedule is reproduced via the deterministic tracker driven by
+    the same GT trajectory used to warm; replay must report 0 misses."""
+    import sys
+
+    from ..backends.replay import ReplayBackend
+
+    # The warmer lives in scripts/; import its GT-trajectory helper by path.
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from warm_dynamic_cache import gt_traj_from_reference  # type: ignore
+
+    gt = gt_traj_from_reference(Path(ref), target_cls)
+    ref_doc = json.loads(Path(ref).read_text())
+    frames = list(range(len(ref_doc.get("frames", []))))
+
+    dyn_cfgs = [c for c in default_matrix() if c.kind == "dynamic"]
+    rows: list[dict] = []
+    store = SqliteCacheStore.open(dynamic_cache)
+    try:
+        backend = ReplayBackend(store, ppv=ppv)
+        for cfg in dyn_cfgs:
+            res = run_dynamic_config(
+                cfg, backend, video_meta, frames,
+                gt_traj=gt, fps=30.0, person_cls=target_cls, ppv=ppv,
+            )
+            _write_frames_json(out_dir, res)
+            recall, precision, _ = recall_precision_vs_reference(
+                _frame_dets_map(res), ref_map, iou_thr=iou_thr
+            )
+            ms, md = matched_compute_delta(
+                res.mean_tiles_per_frame, recall, static_rows
+            )
+            rows.append({
+                "name": cfg.name, "kind": cfg.kind,
+                "mean_tiles": res.mean_tiles_per_frame,
+                "n_dets": res.n_dets_total,
+                "recall": recall, "precision": precision,
+                "n_misses": res.n_misses_total,
+                "matched_static": ms, "matched_delta": md,
+            })
+    finally:
+        store.close()
+    return rows
 
 
 def run(
@@ -136,6 +214,9 @@ def run(
     max_frames: int = 0,
     ppv: int = 1,
     iou_thr: float = 0.5,
+    dynamic_cache: str | None = None,
+    ref: str | None = None,
+    target_cls: int = 2,
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     store = SqliteCacheStore.open(cache)
@@ -222,14 +303,39 @@ def run(
                 }
             )
 
+        # Merge dynamic rows from a per-source-frame dynamic cache (Night-2 B3),
+        # paired with the closest-budget static grid (matched compute).
+        dynamic_rows: list[dict] = []
+        if dynamic_cache and ref:
+            dynamic_rows = _dynamic_rows_from_cache(
+                dynamic_cache, ref, video_meta, ref_map, table_rows, out_dir,
+                target_cls=target_cls, iou_thr=iou_thr, ppv=ppv,
+            )
+        has_dynamic = bool(dynamic_rows)
+        # Static rows first, dynamic rows next, reference row last (it is the
+        # final static row already; keep order: non-ref static, dynamic, ref).
+        ref_row = table_rows[-1]
+        static_non_ref = table_rows[:-1]
+        ordered_rows = static_non_ref + dynamic_rows + [ref_row]
+
+        dyn_note = ""
+        if has_dynamic:
+            dyn_note = (
+                f"- dynamic cache: `{dynamic_cache}` (per-source-frame; "
+                f"target class {target_cls})\n"
+                f"- `recall_delta_at_matched_budget` = dynamic recall − the "
+                f"closest-mean-tiles static grid's recall.\n"
+            )
         table_md = (
             f"# Ablation table\n\n"
             f"- cache: `{cache}`\n- video: `{video}`\n"
             f"- source: {video_meta['src_w']}x{video_meta['src_h']}\n"
             f"- frames: {len(frames)}\n"
             f"- reference: `{ref_cfg.name}` ({ref_cfg.tiles_x}x{ref_cfg.tiles_y}), "
-            f"IoU>={iou_thr}\n\n"
-            + _format_table(table_rows)
+            f"IoU>={iou_thr}\n"
+            + dyn_note
+            + "\n"
+            + _format_table(ordered_rows, matched_compute=has_dynamic)
         )
         table_path = out_dir / "ablation_table.md"
         table_path.write_text(table_md)
@@ -239,8 +345,8 @@ def run(
             "out_dir": str(out_dir),
             "table": str(table_path),
             "n_frames": len(frames),
-            "configs": [r["name"] for r in table_rows],
-            "rows": table_rows,
+            "configs": [r["name"] for r in ordered_rows],
+            "rows": ordered_rows,
         }
     finally:
         store.close()
@@ -256,6 +362,16 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--ppv", type=int, default=1)
     ap.add_argument("--iou-thr", type=float, default=0.5)
+    ap.add_argument("--dynamic-cache", default=None,
+                    help="Per-source-frame dynamic cache (warmed by "
+                    "scripts/warm_dynamic_cache.py) to add dynamic rows + a "
+                    "matched-compute column.")
+    ap.add_argument("--ref", default=None,
+                    help="12x9 reference frames.json (GT-trajectory source for "
+                    "the dynamic tracker). Required with --dynamic-cache.")
+    ap.add_argument("--target-class", type=int, default=2,
+                    help="Single-target class for the dynamic tracker "
+                    "(default 2 = face; clip 0026 has no person/cls0).")
     return ap
 
 
@@ -269,6 +385,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_frames=args.max_frames,
         ppv=args.ppv,
         iou_thr=args.iou_thr,
+        dynamic_cache=args.dynamic_cache,
+        ref=args.ref,
+        target_cls=args.target_class,
     )
     return 0
 
