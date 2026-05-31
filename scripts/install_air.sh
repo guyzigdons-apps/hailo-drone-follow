@@ -2,16 +2,24 @@
 ################################################################################
 # Air Unit — Full Install Script
 #
-# Target: Raspberry Pi 5 (or RPi4) with a Hailo-8L M.2 mounted on the drone.
-# Installs hailo-all, builds OpenHD + OpenHD-SysUtils + WiFi driver, sets up the
-# drone-follow venv + UI, and deploys df_params.json. QOpenHD is NOT installed
-# here — the air unit doesn't need it.
+# Targets:
+#   Raspberry Pi 5 / RPi4 with a Hailo-8L M.2 mounted on the drone (PRIMARY).
+#   Ubuntu x86_64 dev box with a USB rtl88x2bu WiFi stick (DEV — same WFB stack,
+#                                                          no /boot/openhd/ flag,
+#                                                          no hailo-all apt
+#                                                          package — HailoRT
+#                                                          deb installed
+#                                                          manually beforehand).
+#
+# Installs (RPi): hailo-all + OpenHD + SysUtils + WiFi driver + drone-follow UI.
+# Installs (x86): OpenHD + SysUtils + WiFi driver only — Hailo install is
+#                 driver-deb on x86, the parent ./install.sh handles drone-follow.
 #
 # Clones (or updates) OpenHD + OpenHD-SysUtils into the drone-follow repo root —
 # no cloning into the home directory.
 #
 # Usage:
-#   sudo ./install_air.sh [--platform <rpi|rpi5>] [--mode <stream|shm>]
+#   sudo ./install_air.sh [--platform <rpi|rpi5|ubuntu-x86>] [--mode <stream|shm>]
 #                         [--camera-type <N>] [--generate-key]
 #
 # If --platform is not given, auto-detects from /proc/device-tree/model.
@@ -83,10 +91,11 @@ while [[ $# -gt 0 ]]; do
         --generate-key) GENERATE_KEY=true; shift ;;
         --help|-h)
             cat <<EOF
-Usage: sudo $0 [--platform <rpi|rpi5>] [--mode <stream|shm>]
+Usage: sudo $0 [--platform <rpi|rpi5|ubuntu-x86>] [--mode <stream|shm>]
               [--camera-type <N>] [--generate-key]
 
-  --platform       Override auto-detected platform.
+  --platform       Override auto-detected platform. Auto-detect: aarch64 →
+                   rpi/rpi5 (from /proc/device-tree/model), x86_64 → ubuntu-x86.
   --mode           Camera integration:
                      stream (default) — Mode A, drone-follow owns the camera
                                         (primary_camera_type=5).
@@ -110,24 +119,36 @@ case "$MODE" in
     *) echo "ERROR: --mode must be 'stream' or 'shm' (got: $MODE)"; exit 1 ;;
 esac
 
-# Auto-detect RPi platform
+# Auto-detect platform
 if [ -z "$PLATFORM" ]; then
     ARCH="$(uname -m)"
-    if [ "$ARCH" = "aarch64" ]; then
-        MODEL="$(cat /proc/device-tree/model 2>/dev/null || echo "")"
-        case "$MODEL" in
-            *"Raspberry Pi 5"*) PLATFORM="rpi5" ;;
-            *"Raspberry Pi"*)   PLATFORM="rpi"  ;;
-            *) echo "ERROR: Unknown aarch64 device: $MODEL"; exit 1 ;;
-        esac
-    else
-        echo "ERROR: install_air.sh is for the RPi air unit (got $ARCH)."
-        echo "       For an x86_64 dev machine, run ./install.sh directly."
-        exit 1
-    fi
+    case "$ARCH" in
+        aarch64)
+            MODEL="$(cat /proc/device-tree/model 2>/dev/null || echo "")"
+            case "$MODEL" in
+                *"Raspberry Pi 5"*) PLATFORM="rpi5" ;;
+                *"Raspberry Pi"*)   PLATFORM="rpi"  ;;
+                *) echo "ERROR: Unknown aarch64 device: $MODEL"; exit 1 ;;
+            esac
+            ;;
+        x86_64) PLATFORM="ubuntu-x86" ;;
+        *)
+            echo "ERROR: install_air.sh: unsupported arch '$ARCH'." >&2
+            echo "       Pass --platform <rpi|rpi5|ubuntu-x86> to override." >&2
+            exit 1
+            ;;
+    esac
 fi
 
-echo "Platform: $PLATFORM"
+# Boolean for guards below. x86 is a dev-mode air unit — same WFB stack and
+# OpenHD daemon as the Pi, but no /boot/openhd/ flag file, no hailo-all apt
+# package (HailoRT comes from the Hailo Developer Zone .deb instead).
+IS_RPI=false
+case "$PLATFORM" in
+    rpi|rpi5) IS_RPI=true ;;
+esac
+
+echo "Platform: $PLATFORM   (is_rpi=$IS_RPI)"
 
 # Pin the OpenHD release branches. The "*-hailo" branches are the canonical
 # release branches for the drone-follow integration; they are based on the
@@ -246,7 +267,17 @@ echo "=========================================="
 echo " Step 1/7: Install Hailo + system prerequisites"
 echo "=========================================="
 apt-get update
-apt-get install -y dkms iw git hailo-all
+# On the Pi the hailo-all meta-package brings in the driver + runtime + tappas.
+# On x86_64 hailo-all isn't in apt; the operator installs the HailoRT .deb
+# from the Hailo Developer Zone before running this script. Same shared deps
+# (dkms iw git) on both.
+if [ "$IS_RPI" = true ]; then
+    apt-get install -y dkms iw git hailo-all
+else
+    apt-get install -y dkms iw git
+    echo "  x86_64 platform — skipping hailo-all (install HailoRT .deb from"
+    echo "  the Hailo Developer Zone manually if not done already)."
+fi
 
 # Verify the Hailo device is reachable. Fresh hailo-all installs sometimes
 # need a reboot before the driver loads, so don't fail hard — warn and continue.
@@ -254,9 +285,15 @@ if hailortcli fw-control identify >/dev/null 2>&1; then
     echo "Hailo device detected."
 else
     echo "WARNING: hailortcli fw-control identify failed."
-    echo "         A reboot may be required after a fresh 'hailo-all' install."
-    echo "         If the build/install completes but drone-follow can't see the"
-    echo "         Hailo device, reboot and re-run scripts/start_air.sh."
+    if [ "$IS_RPI" = true ]; then
+        echo "         A reboot may be required after a fresh 'hailo-all' install."
+        echo "         If the build/install completes but drone-follow can't see"
+        echo "         the Hailo device, reboot and re-run scripts/start_air.sh."
+    else
+        echo "         On x86_64 this is expected if the HailoRT driver .deb"
+        echo "         hasn't been installed yet, or the PCIe card isn't seated."
+        echo "         Driver-side fix: sudo modprobe hailo_pci"
+    fi
 fi
 
 # Pipeline reads JSON configs from here — make sure they're world-readable.
@@ -319,8 +356,8 @@ fi
 # left root-owned. We deliberately don't chown the whole APP_ROOT —
 # git-tracked files were already user-owned and we don't want to touch
 # unrelated files the user has staged.
-chown_back "${APP_ROOT}/drone_follow/ui/node_modules"
-chown_back "${APP_ROOT}/drone_follow/ui/build"
+chown_back "${APP_ROOT}/robot_follow/ui/node_modules"
+chown_back "${APP_ROOT}/robot_follow/ui/build"
 for egg in "${APP_ROOT}"/*.egg-info; do
     [ -e "$egg" ] && chown_back "$egg"
 done
@@ -400,7 +437,15 @@ fi
 # Mode B requires the hailo.txt flag file to make OpenHD tee raw frames to SHM.
 # In Mode A it must be absent (otherwise OpenHD still tees, even when
 # drone-follow isn't reading SHM, wasting CPU on the air unit).
-HAILO_FLAG="/boot/openhd/hailo.txt"
+#
+# x86_64 has no /boot/openhd/ tree (Pi-specific path served by the firmware
+# partition). OpenHD on x86 reads the same flag from
+# /usr/local/share/openhd/hailo.txt as a fallback. Use whichever exists.
+if [ "$IS_RPI" = true ]; then
+    HAILO_FLAG="/boot/openhd/hailo.txt"
+else
+    HAILO_FLAG="/usr/local/share/openhd/hailo.txt"
+fi
 case "$MODE" in
     stream)
         if [ -f "$HAILO_FLAG" ]; then

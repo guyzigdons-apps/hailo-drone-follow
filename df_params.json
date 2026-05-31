@@ -395,7 +395,7 @@
       "group": "video",
       "order": 1,
       "label": "Bitrate (kbps)",
-      "description": "x264 encoder bitrate for the drone-follow video stream. Updated by variable-bitrate automatically.",
+      "description": "x264 encoder bitrate for the robot-follow video stream. Updated by variable-bitrate automatically.",
       "read_only": false
     },
     {
@@ -406,7 +406,7 @@
       "group": "rec",
       "order": 1,
       "label": "Air-side recording",
-      "description": "Toggle air-side recording (post-overlay frames \u2192 drone_follow/recordings/*.mp4 on the drone). Available whenever drone-follow runs with --openhd-stream. Air-side recordings have fewer compression artifacts than ground-side and survive RF dropouts.",
+      "description": "Toggle air-side recording (post-overlay frames \u2192 robot_follow/recordings/*.mp4 on the drone). Available whenever robot-follow runs with --openhd-stream. Air-side recordings have fewer compression artifacts than ground-side and survive RF dropouts.",
       "read_only": false
     },
     {
@@ -417,7 +417,7 @@
       "group": "config",
       "order": 1,
       "label": "Save config (air)",
-      "description": "Momentary trigger \u2014 set to ON to save the current controller values to df_config.json on the air unit. The toggle returns to OFF automatically once the save completes. The saved JSON is persisted on the drone's SD card and can be loaded on next boot via `drone-follow --config <path>`.",
+      "description": "Momentary trigger \u2014 set to ON to save the current controller values to df_config.json on the air unit. The toggle returns to OFF automatically once the save completes. The saved JSON is persisted on the drone's SD card and can be loaded on next boot via `robot-follow --config <path>`.",
       "read_only": false
     },
     {
@@ -428,7 +428,7 @@
       "group": "config",
       "order": 2,
       "label": "Load config (air)",
-      "description": "Momentary trigger \u2014 set to ON to live-reload controller values from df_config.json on the air unit into the running drone-follow. All sliders refresh from the reloaded values. Toggle returns to OFF when complete. Does nothing if no saved file exists.",
+      "description": "Momentary trigger \u2014 set to ON to live-reload controller values from df_config.json on the air unit into the running robot-follow. All sliders refresh from the reloaded values. Toggle returns to OFF when complete. Does nothing if no saved file exists.",
       "read_only": false
     },
     {

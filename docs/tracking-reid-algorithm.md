@@ -8,9 +8,9 @@ loop inside the detection callback.
 
 The implementation lives in:
 
-- [`drone_follow/pipeline_adapter/hailo_drone_detection_manager.py`](../drone_follow/pipeline_adapter/hailo_drone_detection_manager.py)
+- [`robot_follow/pipeline_adapter/hailo_drone_detection_manager.py`](../robot_follow/pipeline_adapter/hailo_drone_detection_manager.py)
   — per-frame callback that branches into the sub-flows below.
-- [`drone_follow/pipeline_adapter/reid_manager.py`](../drone_follow/pipeline_adapter/reid_manager.py)
+- [`robot_follow/pipeline_adapter/reid_manager.py`](../robot_follow/pipeline_adapter/reid_manager.py)
   — `update_gallery`, `_reacquire`, `try_reidentify`, `score_visible_persons`.
 - [`reid_analysis/gallery_strategies.py`](../reid_analysis/gallery_strategies.py)
   — `MultiEmbeddingStrategy` (per-person gallery storage + similarity probe).
@@ -76,7 +76,7 @@ The implementation lives in:
 
 Runs on the first locked frame and every `update_interval` (default 30)
 frames thereafter while ByteTracker is successfully holding the target
-(see `should_update()` in [`reid_manager.py`](../drone_follow/pipeline_adapter/reid_manager.py)).
+(see `should_update()` in [`reid_manager.py`](../robot_follow/pipeline_adapter/reid_manager.py)).
 Bands are configurable via CLI: `--reid-drift-threshold` (default 0.6),
 `--reid-duplicate-threshold` (0.9), `--reid-refresh-every` (5).
 
@@ -237,5 +237,5 @@ crop → embed → max-similarity probe against the gallery.
 | `--reid-timeout` | 20.0 | Seconds to keep searching with the gallery before giving up and returning to auto. |
 
 Tracker-side knobs (currently constants in
-[`hailo_drone_detection_manager.py`](../drone_follow/pipeline_adapter/hailo_drone_detection_manager.py),
+[`hailo_drone_detection_manager.py`](../robot_follow/pipeline_adapter/hailo_drone_detection_manager.py),
 no CLI flags yet): `track_thresh=0.4`, `track_buffer=90`, `match_thresh=0.5`.

@@ -82,7 +82,7 @@ graph LR
         OHD_BRIDGE["openhd_bridge.py<br/>OpenHDBridge<br/>UDP JSON 5510/5511"]
     end
 
-    ENTRY["drone_follow_app.py<br/>main() — composition root"]
+    ENTRY["robot_follow_app.py<br/>main() — composition root"]
 
     ENTRY --> DET_MGR
     ENTRY --> MAVSDK_DRV
@@ -119,7 +119,7 @@ graph LR
 | `pipeline_adapter/` | follow_api, hailo, gi.repository.Gst, numpy, scipy | Hailo SDK, GStreamer |
 | `drone_api/` | follow_api, mavsdk | MAVSDK |
 | `servers/` | follow_api, stdlib HTTP/socket | None |
-| `drone_follow_app.py` | All of the above | — |
+| `robot_follow_app.py` | All of the above | — |
 
 **No circular imports.** The dependency graph is a strict DAG with `follow_api/` at the bottom.
 
@@ -464,7 +464,7 @@ graph TB
 | `pipeline_adapter/` | `hailo`, `gi.repository.Gst`, `gi.repository.GLib`, numpy, scipy |
 | `drone_api/` | `mavsdk` |
 | `servers/` | stdlib (`http.server`, `socket`, `json`) |
-| `drone_follow_app.py` | All of the above |
+| `robot_follow_app.py` | All of the above |
 
 ### 8.3 Installation Flow
 
@@ -477,7 +477,7 @@ flowchart TD
     D -->|yes| E["2. sudo hailo-apps/install.sh<br/>(one-time: C++ postprocess,<br/>HEF models to /usr/local/hailo/)"]
     E --> F["3. ./install.sh<br/>(creates ./venv/, editable pip install,<br/>builds React UI)"]
     F --> G["source setup_env.sh"]
-    G --> H["drone-follow --help"]
+    G --> H["robot-follow --help"]
 
     style A fill:#e63946,color:#fff
     style E fill:#457b9d,color:#fff
@@ -552,7 +552,7 @@ flowchart TD
     CONF -->|no| SKIP["Exit (no-op)"]
     CONF -->|yes| AIR["scripts/start_air.sh"]
     AIR --> OHD["Start OpenHD --air<br/>(background)"]
-    AIR --> DF["drone-follow<br/>--input rpi --openhd<br/>--connection tcpout://127.0.0.1:5760"]
+    AIR --> DF["robot-follow<br/>--input rpi --openhd<br/>--connection tcpout://127.0.0.1:5760"]
 ```
 
 ### Execution Modes
@@ -560,9 +560,9 @@ flowchart TD
 | Mode | Command | Use case |
 |------|---------|----------|
 | Real drone + OpenHD | `scripts/start_air.sh` | Flight (RPi air unit) |
-| Dev machine + USB camera | `drone-follow --input usb --serial --webui` | Bench testing |
-| Simulation | `sim/start_sim.sh` + `drone-follow --input udp://... --takeoff-landing --webui` | Development |
-| Headless OpenHD | `drone-follow --input rpi --openhd` | SSH sessions |
+| Dev machine + USB camera | `robot-follow --input usb --serial --webui` | Bench testing |
+| Simulation | `sim/start_sim.sh` + `robot-follow --input udp://... --takeoff-landing --webui` | Development |
+| Headless OpenHD | `robot-follow --input rpi --openhd` | SSH sessions |
 
 ---
 
@@ -570,18 +570,18 @@ flowchart TD
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `drone_follow/drone_follow_app.py` | ~270 | Composition root, CLI, threading |
-| `drone_follow/follow_api/types.py` | ~35 | Domain primitives |
-| `drone_follow/follow_api/config.py` | ~230 | ControllerConfig (all parameters) |
-| `drone_follow/follow_api/controller.py` | ~170 | Pure control math |
-| `drone_follow/follow_api/state.py` | ~100 | Thread-safe shared state |
-| `drone_follow/drone_api/mavsdk_drone.py` | ~780 | MAVSDK adapter, control loop, flight lifecycle |
-| `drone_follow/pipeline_adapter/hailo_drone_detection_manager.py` | ~820 | GStreamer pipeline, detection callback |
-| `drone_follow/pipeline_adapter/byte_tracker.py` | ~500 | Multi-object tracker |
-| `drone_follow/servers/web_server.py` | ~440 | Web UI server |
-| `drone_follow/servers/follow_server.py` | ~130 | REST target selection |
-| `drone_follow/servers/openhd_bridge.py` | ~370 | OpenHD parameter bridge |
-| `drone_follow/ui/src/App.jsx` | ~600 | React frontend |
+| `robot_follow/robot_follow_app.py` | ~270 | Composition root, CLI, threading |
+| `robot_follow/follow_api/types.py` | ~35 | Domain primitives |
+| `robot_follow/follow_api/config.py` | ~230 | ControllerConfig (all parameters) |
+| `robot_follow/follow_api/controller.py` | ~170 | Pure control math |
+| `robot_follow/follow_api/state.py` | ~100 | Thread-safe shared state |
+| `robot_follow/drone_api/mavsdk_drone.py` | ~780 | MAVSDK adapter, control loop, flight lifecycle |
+| `robot_follow/pipeline_adapter/hailo_drone_detection_manager.py` | ~820 | GStreamer pipeline, detection callback |
+| `robot_follow/pipeline_adapter/byte_tracker.py` | ~500 | Multi-object tracker |
+| `robot_follow/servers/web_server.py` | ~440 | Web UI server |
+| `robot_follow/servers/follow_server.py` | ~130 | REST target selection |
+| `robot_follow/servers/openhd_bridge.py` | ~370 | OpenHD parameter bridge |
+| `robot_follow/ui/src/App.jsx` | ~600 | React frontend |
 
 ---
 

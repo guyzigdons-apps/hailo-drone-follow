@@ -1,10 +1,17 @@
-# Drone Follow
+# Robot Follow
 
-AI-powered person-following drone application using Hailo NPU for real-time detection, ByteTracker for multi-object tracking, and MAVSDK for PX4 flight control. Includes ReID (re-identification) to recover a lost target by appearance.
+AI-powered person-following robot application using Hailo NPU for real-time detection, ByteTracker for multi-object tracking, and a pluggable robot-adapter layer for control. Ships with two adapters out of the box:
+
+- **`--robot drone`** *(default)* — MAVSDK over USB serial / UDP to a PX4 flight controller (e.g. Cube Orange+).
+- **`--robot rover`** — `geometry_msgs/Twist` on `/cmd_vel` for a skid-steer rover via ROS 2.
+
+Includes ReID (re-identification) to recover a lost target by appearance.
 
 Runs on Raspberry Pi 5 + Hailo-8L or on an x86_64 dev machine with a Hailo-8 PCIe card.
 
 For complete setup and deployment instructions with OpenHD, see [SETUP_GUIDE.md](SETUP_GUIDE.md).
+
+> **Note:** As of v1.1 the Python package is `robot_follow` (formerly `drone_follow`) and the primary CLI is `robot-follow`. The `--robot {drone,rover}` flag selects which adapter to load (default `drone`). The `drone-follow` console-script alias is preserved permanently — it maps to the same `main()` entry point so the boot service, `~/Desktop/drone-follow.conf`, and existing field deployments keep working unchanged. Both `robot-follow --help` and `drone-follow --help` produce identical output.
 
 ## Installation
 
@@ -63,14 +70,14 @@ Flags:
 
 ```bash
 source setup_env.sh              # activates ./hailo-apps/venv_hailo_apps, loads .env
-drone-follow --help
+robot-follow --help
 ```
 
 To run the test suite (optional, dev-only — `pytest` is not in the default venv):
 
 ```bash
 pip install pytest
-pytest drone_follow/tests/
+pytest robot_follow/tests/
 ```
 
 ### Step 5: OpenHD radio link (air + ground)
@@ -122,13 +129,13 @@ These remove `/usr/local/bin/openhd`, `/usr/local/bin/openhd_sys_utils`, `/usr/l
 source setup_env.sh
 
 # Dev machine with USB camera + flight controller over serial:
-drone-follow --input usb --serial --webui
+robot-follow --input usb --serial --webui
 
 # RPi with camera + Cube Orange+ over USB serial:
-drone-follow --input rpi --serial --webui
+robot-follow --input rpi --serial --webui
 
 # Simulation (Gazebo camera + PX4 SITL):
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
+robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 
 # Real drone with OpenHD (starts OpenHD air + drone-follow):
 ./scripts/start_air.sh
@@ -146,21 +153,22 @@ drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 
 | Flag | Default | Description |
 |---|---|---|
+| `--robot {drone,rover}` | `drone` | Robot adapter. `drone` = MAVSDK / PX4; `rover` = ROS 2 `geometry_msgs/Twist` on `/cmd_vel`. The `--help` output adapts to the selected adapter (drone-only flags disappear under `--robot rover` and vice versa). |
 | `--input SOURCE` | — | Camera source: `rpi`, `usb`, `udp://host:port`, `shm://path`, or file path |
-| `--serial` | off | Connect via USB serial (`/dev/ttyACM0`); overrides `--connection` |
+| `--serial` | off | Connect via USB serial (`/dev/ttyACM0`); overrides `--connection`. *(drone only)* |
 | `--connection URL` | `udpin://0.0.0.0:14540` | MAVSDK connection string |
-| `--takeoff-landing` | off | Auto arm/takeoff/land. Without this, the pilot switches to OFFBOARD via GCS. |
+| `--takeoff-landing` | off | Auto arm/takeoff/land. Without this, the pilot switches to OFFBOARD via GCS. *(drone only)* |
 | `--display` | auto-on when no UI flag | Local X11 window with overlay (tile rectangles stripped, target person's bbox highlighted via class-id remap). |
 | `--webui` | off | Web UI with live MJPEG video and click-to-follow (port 5001). Mutually exclusive with `--openhd`. |
 | `--openhd` | off | Send overlay video to OpenHD via UDP RTP. Mutually exclusive with `--webui`. |
-| `--record` | off | Record post-overlay video to `recordings/rec_<ts>.mkv` (pure-GStreamer x264enc + matroskamux + filesink). |
+| `--record` | off | Record a session bundle to `recordings/<ts>/` containing `clean.mkv` (no overlay — for the offline renderer) and `overlay.mkv` (operator-visible). See [Recording & Offline Overlay Rendering](#recording--offline-overlay-rendering). |
 | `--target-bbox-height` | `0.25` | Desired person size in frame (0-0.25). Drives forward/backward distance. Adjustable mid-flight via UI. |
 | `--target-altitude` | `3.0` | Target altitude in metres. Also used as takeoff height. |
 | `--yaw-only` / `--no-yaw-only` | on | Yaw only: no forward/backward movement. Use `--no-yaw-only` for full follow. |
 | `--no-reid` | off | Disable ReID re-identification |
 | `--reid-timeout` | `20.0` | Seconds to search via ReID before returning to auto mode |
 
-Run `drone-follow --help` for the full list.
+Run `robot-follow --help` for the full list.
 
 ## Web UI
 
@@ -250,7 +258,7 @@ sim/start_sim.sh --bridge --world 2_person_world
 
 # Terminal 2 — Run drone-follow:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
+robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
 
 **Key ports:** `14540/udp` (MAVLink), `5600/udp` (video from Gazebo)
@@ -264,19 +272,56 @@ sim/start_sim.sh --remote <DRONE_APP_IP> --world 2_person_world
 
 # Drone-follow machine:
 source setup_env.sh
-drone-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
+robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 ```
 
 **Simulation configs** in `sim/configs/`: `simulation.json` (yaw-only), `simulation_follow.json` (full follow with reduced speeds).
 
 **USB camera with sim:** Always add `--yaw-only` — forward commands based on bbox size are unsafe because the webcam sees the real world, not the sim.
 
+## Rover Mode
+
+Run with the rover adapter to drive a skid-steer rover (diff-drive plugin in sim; real hardware needs a ROS 2 base subscribing to `/cmd_vel`). The controller emits `RobotCommand.yaw_rate` in **rad/s** (rover) vs **deg/s** (drone); the adapter publishes `geometry_msgs/Twist` with NED→ENU sign correction and applies its own EMA smoothing.
+
+Prerequisites: ROS 2 Humble installed at `/opt/ros/humble`, `ros-humble-geometry-msgs`, `ros-humble-ros-base`. Bring them in with `sudo ./install.sh --rover` (idempotent; pulls the apt deps plus the Gazebo Garden bits for sim).
+
+**Run against a real rover:**
+
+```bash
+source /opt/ros/humble/setup.bash
+source setup_env.sh
+robot-follow --robot rover --input usb --webui \
+    --config configs/rover_simulation.json
+```
+
+**Run against the bundled rover sim** (Gazebo + diff-drive model + ros_gz_bridge for `/cmd_vel`):
+
+```bash
+# Terminal 1 — sim:
+sim/rover/start_rover_sim.sh                      # default world (walk_across_then_approach)
+sim/rover/start_rover_sim.sh --world random_walk  # alternate
+
+# Terminal 2 — follow:
+source /opt/ros/humble/setup.bash
+source setup_env.sh
+robot-follow --robot rover --input udp://0.0.0.0:5600 \
+    --config configs/rover_simulation.json
+```
+
+Rover-specific behaviours (rover adapter only — drone path untouched):
+
+- **Bottom-edge stop** — when the person's bbox bottom enters the lowest 15% of the frame (`bbox_bottom_norm >= 0.85`), forward is overridden to 0.0; yaw stays active so the rover can still rotate to recenter. Prevents close-range collisions where the person is below the camera's depression angle.
+- **EMA smoothing on yaw + forward** — the rover lives in a different latency / dynamics regime than the drone, so smoothing is per-adapter (`yaw_alpha`, `forward_alpha` from `ControllerConfig`; both honoured by `Ros2RoverAdapter.send_command`). The drone has its own `_apply_smoothing` path.
+- **NED→ENU yaw sign flip** — the controller emits `yaw_rate` in the drone's NED / MAVSDK convention (clockwise-from-above positive). The rover adapter negates it before publishing `angular.z` so ROS REP-103 ENU (counter-clockwise positive) ends up turning the rover the right way.
+
+See [`sim/rover/README.md`](sim/rover/README.md) for the full sim story.
+
 ## OpenHD Integration
 
 For FPV video with detection overlays streamed to an OpenHD ground station:
 
 ```bash
-drone-follow --input shm:///tmp/openhd_raw_video --openhd --webui --serial
+robot-follow --input shm:///tmp/openhd_raw_video --openhd --webui --serial
 ```
 
 ### Real drone with OpenHD (air unit)
@@ -284,7 +329,7 @@ drone-follow --input shm:///tmp/openhd_raw_video --openhd --webui --serial
 The air unit pairs drone-follow with OpenHD wifibroadcast for long-range telemetry/video to a ground station running QOpenHD. `scripts/start_air.sh` launches both side-by-side; the typical CLI is:
 
 ```bash
-drone-follow --input rpi --openhd \
+robot-follow --input rpi --openhd \
     --connection tcpout://127.0.0.1:5760 \
     --tiles-x 1 --tiles-y 1
 ```
@@ -301,10 +346,10 @@ Store controller settings in JSON instead of CLI flags:
 
 ```bash
 # Save current defaults
-drone-follow --save-config my_config.json
+robot-follow --save-config my_config.json
 
 # Run with a config file (CLI flags still override)
-drone-follow --config configs/outdoor_follow.json --input rpi --serial --webui
+robot-follow --config configs/outdoor_follow.json --input rpi --serial --webui
 ```
 
 ### Bundled Presets
@@ -319,6 +364,58 @@ drone-follow --config configs/outdoor_follow.json --input rpi --serial --webui
 The status bar displays real-time metrics: FPS, callback latency, host CPU%, RSS memory, Hailo chip temperature, and NN core utilization.
 
 NN core utilization is read from HailoRT's monitor data (`/tmp/hmon_files/`), enabled automatically by the app. To also view per-model utilization in a separate terminal:
+
+## Flight Logs (`.ulg`)
+
+PX4 writes a fresh `.ulg` log for every armed run — useful for post-flight debugging and rendering 3D flight paths.
+
+- **Sim:** `sim/PX4-Autopilot/build/px4_sitl_default/rootfs/log/<YYYY-MM-DD>/<HH_MM_SS>.ulg`
+- **Real drone (Cube Orange+):** stored on the FC's microSD at `/fs/microsd/log/<YYYY-MM-DD>/<HH_MM_SS>.ulg`. Three ways to pull them off:
+  - Pop the microSD out — fastest, requires disarmed access.
+  - QGroundControl → *Analyze Tools → Log Download* (uses MAVLink FTP over the existing `/dev/ttyACM0` link — slow at 57600 baud).
+  - MAVSDK's `LogFiles.download_log_file` over the same connection (programmatic equivalent of the QGC option).
+
+**Viewing:** drag the `.ulg` onto https://logs.px4.io (PX4 Flight Review) — free 3D flight path, altitude, modes, GPS quality, etc. For local inspection, use `pyulog` (`pip install pyulog` → `ulog_info`, `ulog2csv`).
+
+## Recording & Offline Overlay Rendering
+
+`--record` writes a self-describing **session bundle**, not a single file. Each run produces a directory under `drone_follow/recordings/<YYYY-MM-DD_HH-MM-SS>/` containing both videos plus the metadata you need to re-render the overlay later from a machine that doesn't even have Hailo installed.
+
+```
+drone_follow/recordings/<timestamp>/
+├── clean.mkv             # raw video, NO overlay — input to the renderer
+├── overlay.mkv           # operator's-eye view, bboxes + cross + badge baked in
+├── frames.jsonl          # per-frame metadata, PTS-aligned to clean.mkv
+├── events.jsonl          # operator actions: clicks, mode switches, REID acquires
+└── manifest.json         # drone-follow version, git sha, argv, video dims, initial config
+```
+
+`clean.mkv` is tapped upstream of every overlay element, so it's exactly what the camera saw — re-render the overlay any number of times with different styling. `overlay.mkv` is what the operator saw live (handy for quick playback without running the renderer).
+
+### Rendering the overlay offline
+
+```bash
+source setup_env.sh
+python scripts/render_overlay.py drone_follow/recordings/<timestamp>
+#   → drone_follow/recordings/<timestamp>/overlay.rendered.mkv
+```
+
+The renderer uses ffmpeg + cairo and reuses the production `draw_target_cross` function from the live pipeline, so visual parity tracks the live overlay automatically. The toast attribution is *richer* than the live overlay because events.jsonl preserves the cause of every transition:
+
+| Live overlay | Offline render (reads `events.jsonl`)       |
+|---|---|
+| `TARGET CHANGED` | `USER LOCKED ID 5` (operator click)         |
+|                  | `REID RE-ACQUIRED ID 5` (post-occlusion)    |
+|                  | `REID-DRIFT → ID 5` (drift correction)      |
+|                  | `AUTO → ID 5` (auto-acquired largest)       |
+|                  | `TARGET CLEARED` / `REID TIMEOUT` / `TARGET LOST` |
+
+### Use cases
+
+- **Post-flight review from a non-Hailo machine.** Copy the bundle off the Pi, run the renderer on a laptop. No Hailo runtime, no driver, no submodule install needed — just `ffmpeg`, `pycairo`, and a Python venv with the drone-follow package.
+- **Re-render with different overlay styling.** Want thicker bboxes? Different colors? Different toast text? Tweak `vision_branches.draw_target_cross` (or `_draw_bboxes` in `scripts/render_overlay.py` for the bbox style), re-render — `clean.mkv` doesn't change.
+
+Skip `--record` if you only want live playback via the web UI — recording is opt-in and costs ~5 Mbps of disk write × 2 (clean + overlay), plus an x264 encode per branch.
 
 ## Yaw-Only Mode
 
@@ -390,23 +487,27 @@ Uninstall: `sudo scripts/boot/uninstall.sh`
 ## Architecture
 
 ```
-drone_follow/
-  follow_api/          Pure domain logic (no HW deps) — types, config, controller math, shared state
-  drone_api/           MAVSDK flight controller adapter — offboard velocity commands, takeoff/landing
+robot_follow/
+  follow_api/          Pure domain logic (no HW deps) — types, Capabilities, config, controller math, shared state
+  robot_api/           Robot abstraction — Robot protocol, orchestrator, and per-robot adapters
+    adapters/
+      mavsdk_drone.py  PX4 offboard velocity / takeoff / landing / altitude-hold P
+      ros2_rover.py    geometry_msgs/Twist on /cmd_vel (skid-steer); rover-specific safety overrides
   pipeline_adapter/    Hailo/GStreamer pipeline, ByteTracker, ReID manager
   servers/             HTTP/UDP servers — follow target REST API (port 8080), web UI with MJPEG (port 5001), OpenHD parameter bridge (UDP 5510/5511)
   ui/                  React web dashboard
-  drone_follow_app.py  Composition root and CLI entrypoint
+  robot_follow_app.py  Composition root and CLI entrypoint
 reid_analysis/         ReID embedding extraction and gallery matching strategies
-configs/               Real-drone controller presets (outdoor_follow, etc.)
+configs/               Controller presets (outdoor_follow, rover_simulation, etc.)
 sim/
   PX4-Autopilot/       PX4 git submodule (v1.14.0)
   bridge/              Gazebo camera -> UDP video bridge
-  configs/             Simulation parameter presets
+  configs/             Drone simulation parameter presets
   worlds/              Gazebo world SDF files
   mavlink_relay.py     UDP relay for remote simulation
-  setup_sim.sh         One-time sim setup
-  start_sim.sh         Launch PX4 SITL + Gazebo + bridge
+  setup_sim.sh         One-time sim setup (drone)
+  start_sim.sh         Launch PX4 SITL + Gazebo + bridge (drone)
+  rover/               Rover sim — diff-drive SDF model, worlds, start_rover_sim.sh
 ```
 
 **Data flow:**
@@ -414,14 +515,16 @@ sim/
 Camera -> GStreamer -> Hailo NPU (YOLOv8n) -> ByteTracker
   -> Target Selection (auto: largest / locked: specific ID)
   -> ReID (if locked target lost, --reid-timeout) -> SharedDetectionState
-  -> Control Loop (10 Hz) -> MAVSDK Offboard Velocity -> PX4 Flight Controller
+  -> Control Loop (10 Hz) -> Robot Adapter
+       drone: MAVSDK offboard velocity -> PX4 Flight Controller
+       rover: geometry_msgs/Twist     -> ROS 2 /cmd_vel
 ```
 
-The `follow_api` package has zero external dependencies, making the controller logic testable without hardware.
+The `follow_api` package has zero external dependencies (no MAVSDK, no rclpy, no Hailo), making the controller logic testable without hardware. Robot-specific behaviour (drone tilt-retreat, rover bottom-edge stop, rover yaw-aware forward attenuation) lives inside each adapter, never in the controller.
 
 ## Control Surfaces
 
-drone-follow exposes the same control surface through three independent channels — they all read and write the **same** in-process `ControllerConfig`, `FollowTargetState`, and `SharedUIState`, so any of them can be used interchangeably:
+robot-follow exposes the same control surface through three independent channels — they all read and write the **same** in-process `ControllerConfig`, `FollowTargetState`, and `SharedUIState`, so any of them can be used interchangeably:
 
 | Channel | Started by | Edits config | Selects target | Toggles recording | Reads detections |
 |---|---|---|---|---|---|

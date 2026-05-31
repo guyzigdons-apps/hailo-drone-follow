@@ -1,0 +1,227 @@
+<?xml version="1.0" ?>
+<!--
+  sim/rover/rover.sdf — differential-drive rover model with forward-facing camera.
+
+  Phase 5 (v1.1 milestone). Companion to drone x500_vision; the rover spawns
+  in sim/rover/worlds/*.sdf via <include><uri>model://rover</uri></include>.
+
+  LOCKED INVARIANTS (do not "clean up" without reading PITFALLS.md first):
+
+  1. Plugin uses gz::sim::systems::DiffDrive with filename
+     "gz-sim-diff-drive-system" — Garden+ naming.  The legacy Fortress
+     namespace prefix (i g n i t i o n - colon - colon, intentionally
+     spelled out so this comment cannot be confused for a real symbol)
+     is a SILENT LOAD FAILURE on Garden (PITFALLS Pitfall 5).  gz starts,
+     no error, /cmd_vel is silently dropped.  Verify with:
+       gz sim -r sim/rover/worlds/walk_across_then_approach.sdf
+       # stdout must show:  Loaded system [gz::sim::systems::DiffDrive]
+
+  2. The DiffDrive plugin's <topic> element overrides the default
+     /model/rover/cmd_vel — without it the bridge maps ROS /cmd_vel to
+     gz /cmd_vel, but the plugin is subscribed on /model/rover/cmd_vel,
+     so messages bridge fine and the rover stays put (PITFALLS Pitfall 6).
+     RSIM-02 mandates this override; see the plugin block below for the
+     single occurrence of that element.
+
+  3. Camera matches drone-follow pipeline default (1280x720, 30 Hz,
+     ~66 deg hfov / 1.152 rad).  Source: sim/PX4-Autopilot/Tools/
+     simulation/gz/models/x500_vision/model.sdf lines 20-46.  Deviating
+     triggers hailo-apps tile-cropper resampling and ReID embedding
+     drift between sim and real-hardware deployments.
+-->
+<sdf version="1.9">
+  <model name="rover">
+    <pose>0 0 0.15 0 0 0</pose>
+    <self_collide>false</self_collide>
+
+    <link name="chassis">
+      <pose>0 0 0.10 0 0 0</pose>
+      <inertial>
+        <mass>5.0</mass>
+        <inertia>
+          <ixx>0.05</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.10</iyy><iyz>0</iyz>
+          <izz>0.12</izz>
+        </inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry><box><size>0.40 0.30 0.15</size></box></geometry>
+        <material>
+          <ambient>0.2 0.4 0.8 1</ambient>
+          <diffuse>0.2 0.4 0.8 1</diffuse>
+        </material>
+      </visual>
+      <collision name="collision">
+        <geometry><box><size>0.40 0.30 0.15</size></box></geometry>
+      </collision>
+    </link>
+
+    <!-- Forward-facing camera. <topic>, FOV, resolution, update_rate all
+         match the drone x500_vision sensor (verified at
+         sim/PX4-Autopilot/Tools/simulation/gz/models/x500_vision/model.sdf
+         lines 20-46).  Do not deviate — see comment block 3 at top of file. -->
+    <link name="camera_link">
+      <pose>0.20 0 0.20 0 0 0</pose>
+      <inertial><mass>0.01</mass>
+        <inertia><ixx>1e-5</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>1e-5</iyy><iyz>0</iyz>
+                 <izz>1e-5</izz></inertia>
+      </inertial>
+      <sensor name="camera" type="camera">
+        <topic>/camera</topic>
+        <gz_frame_id>camera_link</gz_frame_id>
+        <pose>0 0 0 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.152</horizontal_fov>
+          <image><width>1280</width><height>720</height></image>
+          <clip><near>0.1</near><far>3000</far></clip>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>30</update_rate>
+        <visualize>true</visualize>
+      </sensor>
+    </link>
+    <joint name="camera_joint" type="fixed">
+      <parent>chassis</parent>
+      <child>camera_link</child>
+    </joint>
+
+    <!-- 4-wheel skid-steer look (Husky / ClearPath style).
+         Front (left_wheel / right_wheel) are the DRIVEN wheels — wired into
+         the DiffDrive plugin below.
+         Rear (left_rear_wheel / right_rear_wheel) are free-spinning passive
+         wheels for the look + ground-contact stability (replaces the original
+         single rear caster). Lower lateral friction (mu2=0.2) on the rear
+         wheels lets the rover skid-turn in place without the rear digging in.
+         Diff-drive kinematics unchanged: wheel_separation/wheel_radius and
+         the controller's RobotCommand contract are identical. -->
+
+    <link name="left_wheel">
+      <pose>0.12 0.20 0 -1.5708 0 0</pose>
+      <inertial><mass>0.5</mass>
+        <inertia><ixx>0.001</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>0.001</iyy><iyz>0</iyz>
+                 <izz>0.001</izz></inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
+      </visual>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+      </collision>
+    </link>
+    <link name="right_wheel">
+      <pose>0.12 -0.20 0 -1.5708 0 0</pose>
+      <inertial><mass>0.5</mass>
+        <inertia><ixx>0.001</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>0.001</iyy><iyz>0</iyz>
+                 <izz>0.001</izz></inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
+      </visual>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+      </collision>
+    </link>
+
+    <link name="left_rear_wheel">
+      <pose>-0.12 0.20 0 -1.5708 0 0</pose>
+      <inertial><mass>0.5</mass>
+        <inertia><ixx>0.001</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>0.001</iyy><iyz>0</iyz>
+                 <izz>0.001</izz></inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
+      </visual>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>0.2</mu2></ode></friction></surface>
+      </collision>
+    </link>
+    <link name="right_rear_wheel">
+      <pose>-0.12 -0.20 0 -1.5708 0 0</pose>
+      <inertial><mass>0.5</mass>
+        <inertia><ixx>0.001</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>0.001</iyy><iyz>0</iyz>
+                 <izz>0.001</izz></inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
+      </visual>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.15</radius><length>0.05</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>0.2</mu2></ode></friction></surface>
+      </collision>
+    </link>
+
+    <joint name="left_wheel_joint" type="revolute">
+      <parent>chassis</parent><child>left_wheel</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit><lower>-1.79769e+308</lower><upper>1.79769e+308</upper></limit>
+      </axis>
+    </joint>
+    <joint name="right_wheel_joint" type="revolute">
+      <parent>chassis</parent><child>right_wheel</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit><lower>-1.79769e+308</lower><upper>1.79769e+308</upper></limit>
+      </axis>
+    </joint>
+    <!-- Rear wheels are free-spinning (revolute joints not driven by the
+         plugin). They follow the front wheels' rotation passively via
+         ground contact when the rover drives straight, and skid when
+         turning (low mu2 minimizes resistance). -->
+    <joint name="left_rear_wheel_joint" type="revolute">
+      <parent>chassis</parent><child>left_rear_wheel</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit><lower>-1.79769e+308</lower><upper>1.79769e+308</upper></limit>
+      </axis>
+    </joint>
+    <joint name="right_rear_wheel_joint" type="revolute">
+      <parent>chassis</parent><child>right_rear_wheel</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit><lower>-1.79769e+308</lower><upper>1.79769e+308</upper></limit>
+      </axis>
+    </joint>
+
+    <!-- Garden-era diff-drive plugin.
+         - filename "gz-sim-diff-drive-system" and class
+           "gz::sim::systems::DiffDrive" are mandatory; the legacy
+           Fortress namespace prefix (see header comment block) causes
+           silent load failure (PITFALLS Pitfall 5 / RSIM-01).
+         - The <topic> child below overrides the default
+           /model/rover/cmd_vel so ros_gz_bridge maps /cmd_vel <-> /cmd_vel
+           cleanly (PITFALLS Pitfall 6 / RSIM-02). -->
+    <plugin filename="gz-sim-diff-drive-system"
+            name="gz::sim::systems::DiffDrive">
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>0.40</wheel_separation>
+      <wheel_radius>0.15</wheel_radius>
+      <!-- RSIM-02: override default /model/rover/cmd_vel -> /cmd_vel -->
+      <topic>cmd_vel</topic>
+      <odom_publish_frequency>10</odom_publish_frequency>
+      <!-- Conservative caps; rover-safe values.  Tuning belongs in
+           configs/rover_simulation.json which Phase 6 RINT-01 will add. -->
+      <max_linear_velocity>1.0</max_linear_velocity>
+      <min_linear_velocity>-0.5</min_linear_velocity>
+      <max_angular_velocity>2.0</max_angular_velocity>
+      <min_angular_velocity>-2.0</min_angular_velocity>
+      <max_linear_acceleration>2.0</max_linear_acceleration>
+      <min_linear_acceleration>-2.0</min_linear_acceleration>
+      <max_angular_acceleration>4.0</max_angular_acceleration>
+      <min_angular_acceleration>-4.0</min_angular_acceleration>
+    </plugin>
+  </model>
+</sdf>
