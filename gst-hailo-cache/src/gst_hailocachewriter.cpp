@@ -98,6 +98,15 @@ GST_DEBUG_CATEGORY_STATIC(gst_hailocachewriter_debug);
 #define DEFAULT_RECORD_CACHE_HITS FALSE
 #define DEFAULT_HEF_ID_META_KEY   "hailo-hef-sha"
 
+// Source-pixel provenance defaults (Task 4). 0 / "" mean "not set" → the
+// writer falls back to the caps frame dims, preserving pre-Task-4 keys.
+#define DEFAULT_SOURCE_WIDTH      0
+#define DEFAULT_SOURCE_HEIGHT     0
+#define DEFAULT_RESIZE_MODE       "stretch"
+#define DEFAULT_DST_WIDTH         0
+#define DEFAULT_DST_HEIGHT        0
+#define DEFAULT_HEF_SHA           ""
+
 // Ring capacity rule (plan Task 5): max(1024, 4 * batch_size).
 #define RING_MIN_CAPACITY         1024u
 
@@ -122,6 +131,12 @@ enum {
     PROP_RECORD_CACHE_HITS,
     PROP_HEF_ID_META_KEY,
     PROP_DROPPED_ROWS,
+    PROP_SOURCE_WIDTH,
+    PROP_SOURCE_HEIGHT,
+    PROP_RESIZE_MODE,
+    PROP_DST_WIDTH,
+    PROP_DST_HEIGHT,
+    PROP_HEF_SHA,
 };
 
 // -- GEnum type registrations -----------------------------------------------
@@ -500,6 +515,52 @@ gst_hailocachewriter_class_init(GstHailoCacheWriterClass* klass)
                           "or shorten flush-interval-ms if this is non-zero.",
                           0, G_MAXUINT, 0,
                           (GParamFlags)(G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
+    // -- Source-pixel provenance (Task 4) -----------------------------------
+    g_object_class_install_property(gobject_class, PROP_SOURCE_WIDTH,
+        g_param_spec_uint("source-width", "source-width",
+                          "Source video width in pixels. When >0, tile crop keys are "
+                          "computed in source-pixel space instead of the cropped-branch "
+                          "caps width. 0 = fall back to caps width.",
+                          0, G_MAXUINT, DEFAULT_SOURCE_WIDTH,
+                          (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(gobject_class, PROP_SOURCE_HEIGHT,
+        g_param_spec_uint("source-height", "source-height",
+                          "Source video height in pixels. When >0, tile crop keys are "
+                          "computed in source-pixel space instead of the cropped-branch "
+                          "caps height. 0 = fall back to caps height.",
+                          0, G_MAXUINT, DEFAULT_SOURCE_HEIGHT,
+                          (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(gobject_class, PROP_RESIZE_MODE,
+        g_param_spec_string("resize-mode", "resize-mode",
+                            "How the source maps to the network input (stretch | letterbox). "
+                            "Stamped into the cache meta table as 'resize_mode'.",
+                            DEFAULT_RESIZE_MODE,
+                            (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(gobject_class, PROP_DST_WIDTH,
+        g_param_spec_uint("dst-width", "dst-width",
+                          "Network input width in pixels. Stamped into meta as 'dst_w'. "
+                          "0 = fall back to caps width (which IS the network input on the "
+                          "cropped branch).",
+                          0, G_MAXUINT, DEFAULT_DST_WIDTH,
+                          (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(gobject_class, PROP_DST_HEIGHT,
+        g_param_spec_uint("dst-height", "dst-height",
+                          "Network input height in pixels. Stamped into meta as 'dst_h'. "
+                          "0 = fall back to caps height.",
+                          0, G_MAXUINT, DEFAULT_DST_HEIGHT,
+                          (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(gobject_class, PROP_HEF_SHA,
+        g_param_spec_string("hef-sha", "hef-sha",
+                            "Hex SHA of the HEF that produced these detections. "
+                            "Stamped into the cache meta table as 'hef_sha'.",
+                            DEFAULT_HEF_SHA,
+                            (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
 }
 
 static void
@@ -513,6 +574,12 @@ gst_hailocachewriter_init(GstHailoCacheWriter* self)
     self->record_empty      = DEFAULT_RECORD_EMPTY;
     self->record_cache_hits = DEFAULT_RECORD_CACHE_HITS;
     self->hef_id_meta_key   = g_strdup(DEFAULT_HEF_ID_META_KEY);
+    self->source_width      = DEFAULT_SOURCE_WIDTH;
+    self->source_height     = DEFAULT_SOURCE_HEIGHT;
+    self->resize_mode       = g_strdup(DEFAULT_RESIZE_MODE);
+    self->dst_width         = DEFAULT_DST_WIDTH;
+    self->dst_height        = DEFAULT_DST_HEIGHT;
+    self->hef_sha           = g_strdup(DEFAULT_HEF_SHA);
     self->buffer_count      = 0;
     self->counter_state     = 0;
     self->frame_width       = 0;
@@ -570,6 +637,26 @@ gst_hailocachewriter_set_property(GObject* object, guint property_id,
         g_free(self->hef_id_meta_key);
         self->hef_id_meta_key = g_value_dup_string(value);
         break;
+    case PROP_SOURCE_WIDTH:
+        self->source_width = g_value_get_uint(value);
+        break;
+    case PROP_SOURCE_HEIGHT:
+        self->source_height = g_value_get_uint(value);
+        break;
+    case PROP_RESIZE_MODE:
+        g_free(self->resize_mode);
+        self->resize_mode = g_value_dup_string(value);
+        break;
+    case PROP_DST_WIDTH:
+        self->dst_width = g_value_get_uint(value);
+        break;
+    case PROP_DST_HEIGHT:
+        self->dst_height = g_value_get_uint(value);
+        break;
+    case PROP_HEF_SHA:
+        g_free(self->hef_sha);
+        self->hef_sha = g_value_dup_string(value);
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
         break;
@@ -615,6 +702,24 @@ gst_hailocachewriter_get_property(GObject* object, guint property_id,
         g_value_set_uint(value, (guint)(n > G_MAXUINT ? G_MAXUINT : n));
         break;
     }
+    case PROP_SOURCE_WIDTH:
+        g_value_set_uint(value, self->source_width);
+        break;
+    case PROP_SOURCE_HEIGHT:
+        g_value_set_uint(value, self->source_height);
+        break;
+    case PROP_RESIZE_MODE:
+        g_value_set_string(value, self->resize_mode);
+        break;
+    case PROP_DST_WIDTH:
+        g_value_set_uint(value, self->dst_width);
+        break;
+    case PROP_DST_HEIGHT:
+        g_value_set_uint(value, self->dst_height);
+        break;
+    case PROP_HEF_SHA:
+        g_value_set_string(value, self->hef_sha);
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
         break;
@@ -651,6 +756,8 @@ gst_hailocachewriter_finalize(GObject* object)
 
     g_free(self->output_file);
     g_free(self->hef_id_meta_key);
+    g_free(self->resize_mode);
+    g_free(self->hef_sha);
     G_OBJECT_CLASS(gst_hailocachewriter_parent_class)->finalize(object);
 }
 
@@ -750,6 +857,41 @@ writer_thread_main_(GstHailoCacheWriter* self)
             : ring_size_(self->ring);
     };
 
+    // Task 4: stamp the resize envelope into `meta` exactly ONCE, on the
+    // writer thread (which owns the single DB connection). Deferred to the
+    // first non-empty batch so set_caps has run on the streaming thread and
+    // self->frame_width/height are populated for the caps-fallback path
+    // (no source/dst props set). The ring's release/acquire publish of the
+    // first row happens-after set_caps's plain stores, so reading
+    // frame_width/height here is safe. Canonical keys: see
+    // hailo_tiling/cache/schema.sql.
+    bool meta_stamped = false;
+    auto stamp_envelope_meta = [&]() {
+        if (meta_stamped) return;
+        meta_stamped = true;
+        const std::int32_t meta_video_w =
+            (self->source_width  > 0) ? (std::int32_t)self->source_width  : self->frame_width;
+        const std::int32_t meta_video_h =
+            (self->source_height > 0) ? (std::int32_t)self->source_height : self->frame_height;
+        const std::int32_t meta_dst_w =
+            (self->dst_width  > 0) ? (std::int32_t)self->dst_width  : self->frame_width;
+        const std::int32_t meta_dst_h =
+            (self->dst_height > 0) ? (std::int32_t)self->dst_height : self->frame_height;
+        try {
+            db.meta_put("video_w", std::to_string(meta_video_w));
+            db.meta_put("video_h", std::to_string(meta_video_h));
+            db.meta_put("resize_mode",
+                        (self->resize_mode && *self->resize_mode) ? self->resize_mode : DEFAULT_RESIZE_MODE);
+            db.meta_put("dst_w", std::to_string(meta_dst_w));
+            db.meta_put("dst_h", std::to_string(meta_dst_h));
+            db.meta_put("interpolation", "linear");
+            db.meta_put("hef_sha", (self->hef_sha ? self->hef_sha : ""));
+        } catch (const std::exception& e) {
+            post_writer_error_(self,
+                std::string("hailocachewriter: meta envelope stamp failed: ") + e.what());
+        }
+    };
+
     while (true) {
         const bool stop = self->writer_stop->load(std::memory_order_acquire);
         // Sleep until either: a row arrives (signalled via cv), the
@@ -767,6 +909,7 @@ writer_thread_main_(GstHailoCacheWriter* self)
             batch_frame.clear();
             ring_drain_(self->frame_results_ring, self->batch_size, batch_frame);
             if (!batch_frame.empty()) {
+                stamp_envelope_meta();
                 try {
                     db.put_frame_results(batch_frame);
                 } catch (const std::exception& e) {
@@ -778,6 +921,7 @@ writer_thread_main_(GstHailoCacheWriter* self)
             batch_tile.clear();
             ring_drain_(self->ring, self->batch_size, batch_tile);
             if (!batch_tile.empty()) {
+                stamp_envelope_meta();
                 try {
                     db.put_many(batch_tile);
                 } catch (const std::exception& e) {
@@ -1114,13 +1258,21 @@ gst_hailocachewriter_transform_ip(GstBaseTransform* trans, GstBuffer* buffer)
     //     is present (non-tiled pipeline / videotestsrc / whole-frame ROI),
     //     fall back to the full-frame crop (0,0,W,H) — identical to the
     //     pre-Phase-14 behaviour, so the existing no-crop tests still pass.
+    // Conversion dims: source props take priority (so crop keys land in
+    // source-video pixels); otherwise fall back to the cropped-branch caps
+    // dims — byte-identical to the pre-Task-4 writer.
+    const std::int32_t conv_w =
+        (self->source_width  > 0) ? (std::int32_t)self->source_width  : self->frame_width;
+    const std::int32_t conv_h =
+        (self->source_height > 0) ? (std::int32_t)self->source_height : self->frame_height;
+
     std::int32_t cx = 0;
     std::int32_t cy = 0;
-    std::int32_t cw = self->frame_width;
-    std::int32_t ch = self->frame_height;
+    std::int32_t cw = conv_w;
+    std::int32_t ch = conv_h;
     if (self->mode != GST_HAILOCACHEWRITER_MODE_FULL_FRAME) {
         std::int32_t tx, ty, tw, th;
-        if (read_tile_crop_rect_(buffer, self->frame_width, self->frame_height,
+        if (read_tile_crop_rect_(buffer, conv_w, conv_h,
                                  &tx, &ty, &tw, &th)) {
             cx = tx; cy = ty; cw = tw; ch = th;
         }

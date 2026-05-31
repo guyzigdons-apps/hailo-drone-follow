@@ -135,9 +135,13 @@ _RUNNER = textwrap.dedent(
     import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst, GLib
     Gst.init(None)
     video, hef, so, cfg, static, out = sys.argv[1:7]
+    # Optional extra writer props (Task 4: source-pixel provenance). Passed as
+    # a single string of "key=value key=value"; appended verbatim onto the
+    # hailocachewriter element so the no-prop test stays byte-identical.
+    extra = sys.argv[7] if len(sys.argv) > 7 else ""
     inner = (f"queue ! hailonet hef-path={hef} batch-size=1 nms-score-threshold=0.3 ! "
              f"queue ! hailofilter so-path={so} function-name=filter config-path={cfg} qos=false ! "
-             f"hailocachewriter mode=tile_cache output-file={out} batch-size=8 flush-interval-ms=50")
+             f"hailocachewriter mode=tile_cache output-file={out} batch-size=8 flush-interval-ms=50 {extra}")
     pipe = (f"filesrc location={video} ! decodebin ! videoconvert ! video/x-raw,format=RGB ! "
             f"videoscale ! video/x-raw,width=1280,height=800 ! "
             f"hailotilecropper_dynamic name=cr internal-offset=true tiling-mode=single-scale "
@@ -167,19 +171,23 @@ _RUNNER = textwrap.dedent(
 )
 
 
-def test_writer_records_real_per_tile_crops(chip_gate, tmp_path):
-    out_db = tmp_path / "writer_tile.sqlite3"
+def _run_pipeline(tmp_path, static: str, out_db: Path, extra: str = "") -> subprocess.CompletedProcess:
     runner = tmp_path / "runner.py"
     runner.write_text(_RUNNER)
-
     env = dict(os.environ)
     env["GST_PLUGIN_PATH"] = f"{_PLUGIN_DIR}:{env.get('GST_PLUGIN_PATH', '')}"
-
-    proc = subprocess.run(
-        [sys.executable, str(runner), str(_VIDEO), str(_HEF), str(_POST_SO),
-         str(_POST_CFG), _grid_static(), str(out_db)],
-        capture_output=True, text=True, timeout=180, env=env,
+    argv = [sys.executable, str(runner), str(_VIDEO), str(_HEF), str(_POST_SO),
+            str(_POST_CFG), static, str(out_db)]
+    if extra:
+        argv.append(extra)
+    return subprocess.run(
+        argv, capture_output=True, text=True, timeout=180, env=env,
     )
+
+
+def test_writer_records_real_per_tile_crops(chip_gate, tmp_path):
+    out_db = tmp_path / "writer_tile.sqlite3"
+    proc = _run_pipeline(tmp_path, _grid_static(), out_db)
     assert out_db.exists(), (
         "writer produced no SQLite file\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
@@ -206,3 +214,64 @@ def test_writer_records_real_per_tile_crops(chip_gate, tmp_path):
         f"recorded crops {sorted(crops)} != expected 3x2 grid {sorted(expected)}\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
+
+
+# Source-pixel provenance (Task 4): when source-width/height are supplied,
+# crop keys must land in SOURCE-video space, NOT the cropped-branch caps
+# (640x480). A single tile 0,0,0.4,0.5 over a declared 3840x2160 source
+# yields (0, 0, int(0.4*3840)=1536, int(0.5*2160)=1080) by the same TAPPAS
+# truncate-then-clamp rule. The resize envelope is stamped into `meta`.
+_SOURCE_W, _SOURCE_H = 3840, 2160
+_SRC_TILE = "0.000000,0.000000,0.400000,0.500000"
+
+
+def _expected_source_crop() -> tuple[int, int, int, int]:
+    x = int(0.0 * _SOURCE_W)
+    y = int(0.0 * _SOURCE_H)
+    w = min(int(0.4 * _SOURCE_W), _SOURCE_W - x)
+    h = min(int(0.5 * _SOURCE_H), _SOURCE_H - y)
+    return (x, y, w, h)
+
+
+def test_writer_records_source_pixel_crops_and_meta(chip_gate, tmp_path):
+    out_db = tmp_path / "writer_source.sqlite3"
+    extra = (f"source-width={_SOURCE_W} source-height={_SOURCE_H} "
+             f"resize-mode=stretch hef-sha=deadbeef")
+    proc = _run_pipeline(tmp_path, _SRC_TILE, out_db, extra=extra)
+    assert out_db.exists(), (
+        "writer produced no SQLite file\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+    con = sqlite3.connect(str(out_db))
+    try:
+        crops = set(con.execute(
+            "SELECT DISTINCT crop_x, crop_y, crop_w, crop_h FROM detections"
+        ).fetchall())
+        n_rows = con.execute("SELECT COUNT(*) FROM detections").fetchone()[0]
+        meta = dict(con.execute("SELECT k, v FROM meta").fetchall())
+    finally:
+        con.close()
+
+    assert n_rows > 0, f"no rows written\nstderr:\n{proc.stderr}"
+
+    # Crops are in 3840x2160 space, NOT the 640x480 cropped-branch caps.
+    expected_crop = _expected_source_crop()
+    assert expected_crop in crops, (
+        f"expected source-pixel crop {expected_crop} not found; got {sorted(crops)}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    # Sanity: nothing was recorded in the cropped-branch 640x480 space.
+    assert (0, 0, _MODEL_W, _MODEL_H) not in crops, (
+        "writer recorded a 640x480-space crop despite source-width/height being set"
+    )
+
+    # Resize envelope stamped into the meta table.
+    assert meta.get("video_w") == str(_SOURCE_W), f"meta={meta}"
+    assert meta.get("video_h") == str(_SOURCE_H), f"meta={meta}"
+    assert meta.get("resize_mode") == "stretch", f"meta={meta}"
+    assert meta.get("hef_sha") == "deadbeef", f"meta={meta}"
+    assert meta.get("interpolation") == "linear", f"meta={meta}"
+    # dst dims fall back to the cropped-branch caps (the network input).
+    assert meta.get("dst_w") == str(_MODEL_W), f"meta={meta}"
+    assert meta.get("dst_h") == str(_MODEL_H), f"meta={meta}"

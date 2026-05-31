@@ -120,6 +120,20 @@ struct _GstHailoCacheWriter {
     gboolean                         record_cache_hits;
     gchar*                           hef_id_meta_key;
 
+    // Source-pixel provenance (Task 4). When `source_width`/`source_height`
+    // are > 0 the writer converts each tile's normalized ROI bbox into
+    // SOURCE-VIDEO pixels (not the cropped-branch caps dims), so crop keys
+    // are anchored in the original frame space. The resize envelope
+    // (resize_mode, dst dims, hef_sha) is stamped once into the cache `meta`
+    // table. All default to 0 / "" / "stretch" so the no-property path is
+    // byte-identical to pre-Task-4 behaviour (caps-dim fallback).
+    guint                            source_width;
+    guint                            source_height;
+    gchar*                           resize_mode;
+    guint                            dst_width;
+    guint                            dst_height;
+    gchar*                           hef_sha;
+
     // Diagnostics (read-only property)
     std::atomic<std::uint64_t>*      dropped_rows;
 
