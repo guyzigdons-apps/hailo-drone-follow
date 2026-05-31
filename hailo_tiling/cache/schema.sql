@@ -18,6 +18,22 @@ CREATE TABLE IF NOT EXISTS detections (
     PRIMARY KEY (frame_idx, crop_x, crop_y, crop_w, crop_h, ppv)
 ) WITHOUT ROWID;
 
+-- Generic key/value sidecar. Values are ALWAYS stored as TEXT; numeric
+-- envelope keys are the decimal string of the integer (no padding).
+--
+-- Canonical provenance-envelope keys (shared spec for the C++ writer and the
+-- Python reader — keep this list in sync with TileCacheDb / SqliteCacheStore):
+--   video_w        source frame width in pixels (e.g. "3840")
+--   video_h        source frame height in pixels (e.g. "2160")
+--   resize_mode    how the source was mapped to the network input:
+--                    "stretch"   — anisotropic scale, no padding
+--                    "letterbox" — aspect-preserving scale + symmetric pad
+--   dst_w          network input width in pixels (e.g. "640")
+--   dst_h          network input height in pixels (e.g. "640")
+--   interpolation  resize filter used; currently "linear"
+--   hef_sha        hex SHA of the HEF that produced these detections
+-- Any of these keys may be absent in older / partial caches; readers must
+-- treat a missing key the same as meta_get() -> nullopt.
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL

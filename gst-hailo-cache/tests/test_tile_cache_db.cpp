@@ -295,6 +295,41 @@ TEST(TileCacheDb, MismatchedUserVersionRaises) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 2b (Task 3) — provenance envelope meta keys round-trip.
+//
+// Locks the typed round-trip for the canonical envelope keys that the
+// pixel-provenance writer (Plan: gst-cache-source-pixel-provenance, Task 4)
+// stamps into `meta`: video_w/video_h (source pixels), resize_mode, dst_w/
+// dst_h (network input dims), interpolation, hef_sha. See schema.sql for the
+// shared key spec. meta_get/meta_put already exist — this just guards them.
+// ---------------------------------------------------------------------------
+TEST(TileCacheDbMeta, EnvelopeRoundTrip) {
+    TmpFile tmp;
+    hailo_cache::TileCacheDb db;
+    db.open(tmp.str(), /*create_if_missing=*/true);
+
+    db.meta_put("video_w", "3840");
+    db.meta_put("video_h", "2160");
+    db.meta_put("resize_mode", "stretch");
+    db.meta_put("dst_w", "640");
+    db.meta_put("dst_h", "640");
+    db.meta_put("interpolation", "linear");
+    db.meta_put("hef_sha", "deadbeef");
+
+    EXPECT_EQ(db.meta_get("video_w").value(), "3840");
+    EXPECT_EQ(db.meta_get("video_h").value(), "2160");
+    EXPECT_EQ(db.meta_get("resize_mode").value(), "stretch");
+    EXPECT_EQ(db.meta_get("dst_w").value(), "640");
+    EXPECT_EQ(db.meta_get("dst_h").value(), "640");
+    EXPECT_EQ(db.meta_get("interpolation").value(), "linear");
+    EXPECT_EQ(db.meta_get("hef_sha").value(), "deadbeef");
+
+    EXPECT_FALSE(db.meta_get("missing_key").has_value());
+
+    db.close();
+}
+
+// ---------------------------------------------------------------------------
 // Test 6 (Task 6) — opening a DB creates the frame_results table too.
 // ---------------------------------------------------------------------------
 TEST(TileCacheDb, OpenCreatesFrameResultsTable) {
