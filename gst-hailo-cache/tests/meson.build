@@ -101,6 +101,27 @@ test('hailocachereader', test_hailocachereader,
          'GST_HAILOCACHE_PLUGIN_PATH=' + gsthailocache_lib.full_path(),
      ])
 
+# Plan 5 Task 12 — hailocachebypass element gtest.
+#
+# The bypass element is a passthrough that reads GST_HAILO_CACHE_HIT_QDATA_KEY
+# set upstream by hailocachereader. The tests use appsrc -> hailocachebypass
+# -> appsink so they can hand-craft buffers with specific qdata values and
+# observe what comes out the other side. Same plugin-load pattern as the
+# reader tests (GST_HAILOCACHE_PLUGIN_PATH env var).
+test_hailocachebypass = executable('test_hailocachebypass',
+    'test_hailocachebypass.cpp',
+    include_directories : gsthailocache_inc,
+    dependencies        : [gtest_dep, gst_dep, gst_base_dep, gst_app_dep],
+    install             : false,
+)
+
+test('hailocachebypass', test_hailocachebypass,
+     protocol : 'gtest',
+     timeout  : 60,
+     env      : [
+         'GST_HAILOCACHE_PLUGIN_PATH=' + gsthailocache_lib.full_path(),
+     ])
+
 # Plan 5 Task 10 — lookup latency + writer microbench.
 #
 # Wired as a meson benchmark() target rather than a regular test() so

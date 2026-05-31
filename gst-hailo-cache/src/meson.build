@@ -10,6 +10,7 @@ gsthailocache_sources = [
     'cache_keys.cpp',
     'gst_hailocachewriter.cpp',
     'gst_hailocachereader.cpp',
+    'gst_hailocachebypass.cpp',
 ]
 
 gsthailocache_inc = include_directories('.')

@@ -1,12 +1,17 @@
 # gst-hailo-cache — GStreamer cache plugins for the Hailo tile-cache layer
 
-This directory ships **`libgsthailocache.so`**, a single GStreamer plugin that will eventually register two elements:
+This directory ships **`libgsthailocache.so`**, a single GStreamer plugin that registers three elements:
 
 - **`hailocachewriter`** — records per-crop detections (mode `tile_cache`) or per-frame
   aggregated detections (mode `full_frame`) into a SQLite cache file. Drop-in
   passthrough; never blocks the streaming thread.
 - **`hailocachereader`** — drop-in replacement for `hailonet` that serves cached
   detections instead of running inference. Research / replay tool.
+- **`hailocachebypass`** — wrapper-first stand-in for `hailofilter` on the
+  cache-replay path (Plan 5 Task 12). Reads the `hailo-cache-hit` qdata that
+  `hailocachereader` sets on each buffer and forwards the buffer without
+  invoking the postprocess `.so`. Avoids patching the `hailo-apps/`
+  submodule for the Phase 14 `bypass-on-cache-hit` contract.
 
 The plugin lives at the repo root in `gst-hailo-cache/` (NOT in the `hailo-apps/`
 submodule). It uses the same meson + ninja build pattern as
@@ -104,12 +109,36 @@ A drop-in replacement for `hailonet` with identical sink/source caps and the
 same property surface. Pipeline string change is `s/hailonet/hailonet_cache/`.
 
 ```
-... ! hailotilecropper_dynamic ! hailonet_cache cache-file=flight.sqlite3 hef-path=...hef ! \
-    hailofilter bypass-on-cache-hit=true ! hailodet_record record-cache-hits=false ! ...
+... ! hailotilecropper_dynamic ! hailocachereader cache-file=flight.sqlite3 hef-path=...hef ! \
+    hailocachebypass ! hailocachewriter record-cache-hits=false ! ...
 ```
 
-(Read `hailonet_cache` as `hailocachereader` and `hailodet_record` as
-`hailocachewriter` in this repo.)
+(Spec calls these `hailonet_cache` / `hailodet_record` / Phase 14 `hailofilter
+bypass-on-cache-hit=true`; this repo ships them as `hailocachereader` /
+`hailocachewriter` / `hailocachebypass`. The bypass element STANDS IN for
+`hailofilter` in the replay pipeline — see Task 12 below.)
+
+### Bypass — Plan 5 Task 12 (`hailocachebypass`)
+
+Stand-in for `hailofilter` in the cache-replay pipeline. Reads the
+`hailo-cache-hit` qdata that `hailocachereader` attaches to each buffer
+(`GST_HAILO_CACHE_HIT_VALUE_HIT` / `_MISS`) and forwards the buffer
+without invoking any postprocess `.so`. The cached detection JSON (also
+attached upstream under `hailo-cached-detections` qdata) survives the
+bypass untouched so downstream visualisers / writers see exactly the
+state a live `hailofilter` would have produced.
+
+| Upstream qdata | Behaviour |
+| --- | --- |
+| `HIT`  (1) | Forward buffer unchanged. No postprocess invoked. |
+| `MISS` (2) | Forward buffer unchanged. (Reader was in `on-miss=drop`.) |
+| absent     | Forward buffer unchanged + emit `GST_WARNING` once. |
+
+This is the **option 1** (wrapper-first) resolution of spec §7.9's
+Phase 14 `hailofilter bypass-on-cache-hit=true` property — avoids
+patching the `hailo-apps/` submodule. See
+`docs/superpowers/plans/2026-05-28-gst-cache-plugins.md` Task 12 for the
+decision matrix.
 
 **Cache-hit semantics (critical):**
 1. Look up `(frame_idx, crop_rect, hef_sha)` in the cache.
@@ -137,5 +166,6 @@ gst-hailo-cache/
 ```
 
 (Additional sources — `tile_cache_db.{hpp,cpp}`, `cache_keys.{hpp,cpp}`,
-`gst_hailocachewriter.{hpp,cpp}`, `gst_hailocachereader.{hpp,cpp}` — and the
-`tests/` directory land in later tasks.)
+`gst_hailocachewriter.{hpp,cpp}`, `gst_hailocachereader.{hpp,cpp}`,
+`gst_hailocachebypass.{hpp,cpp}` — and the `tests/` directory land in
+later tasks.)

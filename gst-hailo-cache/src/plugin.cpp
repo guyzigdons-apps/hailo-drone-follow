@@ -15,6 +15,7 @@
 
 #include "gst_hailocachewriter.hpp"
 #include "gst_hailocachereader.hpp"
+#include "gst_hailocachebypass.hpp"
 
 #ifndef PACKAGE
 #define PACKAGE "hailo-drone-follow"
@@ -34,6 +35,14 @@ plugin_init(GstPlugin* plugin)
     // gst_hailo_cache_reader_plugin_init wraps the gst_element_register
     // call so the reader's GType + enum types stay private to its TU.
     if (!gst_hailo_cache_reader_plugin_init(plugin)) {
+        return FALSE;
+    }
+
+    // BYPASS — Task 12 (Phase 14 `bypass-on-cache-hit` wrapper-first
+    // implementation). Stands in for `hailofilter` in the cache-replay
+    // pipeline; forwards HIT/MISS-tagged buffers from `hailocachereader`
+    // without running the postprocess .so.
+    if (!gst_hailo_cache_bypass_plugin_init(plugin)) {
         return FALSE;
     }
 
