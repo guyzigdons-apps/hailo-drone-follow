@@ -59,6 +59,37 @@ CanonicalCrop canonicalize_crop(std::int32_t x,
                                 std::int32_t h,
                                 int q);
 
+// Source-vs-caps dimension selection shared by the writer and reader
+// (Task 5 DRY). When the explicit source/network-input property is set
+// (>0) it wins; otherwise fall back to the negotiated caps dimension.
+// Keeping this in one place guarantees both elements agree on which
+// dimension the normalized bbox is scaled by.
+inline std::int32_t pick_dim(unsigned int prop, std::int32_t caps) {
+    return (prop > 0) ? static_cast<std::int32_t>(prop) : caps;
+}
+
+// Convert a normalized tile bbox to an absolute pixel crop rect using the
+// EXACT TAPPAS `HailoMat::get_bounding_rect` rule (hailomat.cpp):
+//
+//     rect.x      = CLAMP((int)(xmin   * W), 0, W)
+//     rect.y      = CLAMP((int)(ymin   * H), 0, H)
+//     rect.width  = CLAMP((int)(width  * W), 0, W - rect.x)
+//     rect.height = CLAMP((int)(height * H), 0, H - rect.y)
+//
+// The float->int cast truncates toward zero (== floor() for the >=0
+// bbox components the cropper produces); width/height come from
+// width*W / height*H INDEPENDENTLY of x/y, then clamp to the residual
+// frame extent. This is the single source of truth for the crop key the
+// writer records and the reader looks up — replicating it byte-for-byte
+// is what makes replay HIT. The bbox is passed as plain doubles (not a
+// HailoBBox) so this header stays free of any TAPPAS include; each
+// element extracts the four components from its ROI locally.
+//
+// Caller must ensure W > 0 && H > 0.
+CanonicalCrop tile_crop_to_source_px(double xmin, double ymin,
+                                     double width, double height,
+                                     std::int32_t W, std::int32_t H);
+
 enum class FrameIdSource {
     COUNTER,
     PTS,

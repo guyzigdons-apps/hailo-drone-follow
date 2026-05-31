@@ -49,6 +49,25 @@ CanonicalCrop canonicalize_crop(std::int32_t x,
     };
 }
 
+CanonicalCrop tile_crop_to_source_px(double xmin, double ymin,
+                                     double width, double height,
+                                     std::int32_t W, std::int32_t H) {
+    auto clampi = [](double v, std::int32_t lo, std::int32_t hi) -> std::int32_t {
+        // Truncate toward zero (matches int-field assignment in TAPPAS
+        // HailoMat::get_bounding_rect), then CLAMP to [lo, hi].
+        std::int32_t t = static_cast<std::int32_t>(v);
+        if (t < lo) return lo;
+        if (t > hi) return hi;
+        return t;
+    };
+
+    const std::int32_t rx = clampi(xmin   * W, 0, W);
+    const std::int32_t ry = clampi(ymin   * H, 0, H);
+    const std::int32_t rw = clampi(width  * W, 0, W - rx);
+    const std::int32_t rh = clampi(height * H, 0, H - ry);
+    return CanonicalCrop{rx, ry, rw, rh};
+}
+
 std::int64_t frame_id_from_buffer(GstBuffer* buf,
                                   FrameIdSource src,
                                   std::int64_t& counter_state) {

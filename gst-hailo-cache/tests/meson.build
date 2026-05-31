@@ -81,10 +81,22 @@ test('hailocachewriter', test_hailocachewriter,
 # libgsthailocache.so explicitly via gst_plugin_load_file using the
 # GST_HAILOCACHE_PLUGIN_PATH env var. This avoids depending on a
 # system-installed copy of the plugin.
+# Task 5 — the source-pixel crop test hand-crafts a buffer carrying a
+# tile HailoROI, so the test TU needs the TAPPAS meta headers + lib when
+# available. Guarded by HAVE_GSTHAILOMETA so a no-Hailo box still builds
+# (the Task-5 case is then #if'd out, matching the reader's own guard).
+test_reader_deps = [gtest_dep, gst_dep, gst_base_dep, gst_app_dep, sqlite3_dep]
+test_reader_cpp_args = []
+if have_tappas
+    test_reader_deps += tappas_dep
+    test_reader_cpp_args += '-DHAVE_GSTHAILOMETA=1'
+endif
+
 test_hailocachereader = executable('test_hailocachereader',
     'test_hailocachereader.cpp',
     include_directories : gsthailocache_inc,
-    dependencies        : [gtest_dep, gst_dep, gst_base_dep, gst_app_dep, sqlite3_dep],
+    dependencies        : test_reader_deps,
+    cpp_args            : test_reader_cpp_args,
     # Task 9 lookup tests pre-populate the cache via TileCacheDb directly
     # — link against the same libgsthailocache.so the plugin ships.
     link_with           : gsthailocache_lib,

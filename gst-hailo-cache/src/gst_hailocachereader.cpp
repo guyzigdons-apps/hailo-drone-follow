@@ -41,6 +41,16 @@
 #include "cache_keys.hpp"
 #include "tile_cache_db.hpp"
 
+// Crop provenance (Task 5): when built against TAPPAS core, read each
+// tile-crop's HailoROI bbox and derive the SAME source-pixel crop key the
+// writer (Task 4) recorded, so replay HITs. Guarded so the lib still
+// builds on a no-Hailo box (the reader then keeps the full-frame caps
+// fallback — mirrors the writer's HAVE_GSTHAILOMETA guard).
+#if defined(HAVE_GSTHAILOMETA)
+#include <gst_hailo_meta.hpp>   // get_hailo_main_roi
+#include <hailo_objects.hpp>    // HailoROI, HailoBBox
+#endif
+
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -130,6 +140,12 @@ enum {
     PROP_QUANTISE,
     PROP_FRAME_ID_SOURCE,
 
+    // ---- Source-pixel provenance (Task 5) ----
+    // Mirror the writer's source-width/source-height so the reader derives
+    // the SAME source-pixel crop key from each tile's HailoROI bbox.
+    PROP_SOURCE_WIDTH,
+    PROP_SOURCE_HEIGHT,
+
     // ---- hailonet mirror (NO-OP stubs) ----
     // Listed in the order `gst-inspect-1.0 hailonet` reports them so a
     // future diff against a new hailonet release is mechanical.
@@ -172,6 +188,11 @@ struct _GstHailoCacheReader {
     GstHailoCacheReaderOnMiss on_miss;
     guint     quantise;
     GstHailoCacheReaderFrameIdSource frame_id_source;
+
+    // Source-pixel provenance (Task 5). 0 = "not set" → fall back to the
+    // negotiated caps dims (preserves the pre-Task-5 full-frame behaviour).
+    guint     source_width;
+    guint     source_height;
 
     // hailonet-mirror property storage (no-op; we keep the value so
     // get_property returns what was last set).
@@ -265,6 +286,12 @@ gst_hailo_cache_reader_set_property(GObject* object, guint prop_id,
             self->frame_id_source =
                 (GstHailoCacheReaderFrameIdSource)g_value_get_enum(value);
             break;
+        case PROP_SOURCE_WIDTH:
+            self->source_width = g_value_get_uint(value);
+            break;
+        case PROP_SOURCE_HEIGHT:
+            self->source_height = g_value_get_uint(value);
+            break;
 
         // ---- hailonet mirror (no-op storage) ----
         case PROP_BATCH_SIZE:
@@ -340,6 +367,8 @@ gst_hailo_cache_reader_get_property(GObject* object, guint prop_id,
         case PROP_FRAME_ID_SOURCE:
             g_value_set_enum(value, self->frame_id_source);
             break;
+        case PROP_SOURCE_WIDTH:  g_value_set_uint(value, self->source_width);  break;
+        case PROP_SOURCE_HEIGHT: g_value_set_uint(value, self->source_height); break;
 
         // ---- hailonet mirror ----
         case PROP_BATCH_SIZE:                   g_value_set_uint   (value, self->m_batch_size); break;
@@ -588,16 +617,61 @@ gst_hailo_cache_reader_transform_ip(GstBaseTransform* trans, GstBuffer* buf)
         return GST_FLOW_ERROR;
     }
 
-    // (2) Crop list. TODO Phase 14: read the upstream
-    //     GstHailoBaseCropperDyn provenance metadata to get the actual
-    //     per-buffer crop list. Today we fall back to a single
-    //     full-frame crop using the negotiated caps dimensions — this
-    //     matches what Task 5's writer does so writer-then-reader stays
-    //     bit-exact on the no-crop path.
-    std::int32_t fw = self->cached_width  > 0 ? self->cached_width  : 0;
-    std::int32_t fh = self->cached_height > 0 ? self->cached_height : 0;
+    // (2) Crop list.
+    //
+    //     When the buffer carries a per-tile HailoROI (the cropped branch,
+    //     after hailotilecropper_dynamic) AND source-width/height are set,
+    //     derive the SAME source-pixel crop key the writer (Task 4)
+    //     recorded: normalized bbox * source dims, using the shared
+    //     truncate-then-clamp helper (cache_keys::tile_crop_to_source_px).
+    //     This is what makes writer-then-reader replay HIT.
+    //
+    //     Otherwise fall back to a single full-frame crop using the
+    //     negotiated caps dims — preserves the pre-Task-5 behaviour the
+    //     existing reader tests (videotestsrc, no ROI) rely on.
+    //
+    // Conversion dims: source props win (so the lookup key lands in
+    // source-video pixels, matching the writer); else fall back to caps —
+    // byte-identical to the pre-Task-5 reader. (Same pick_dim rule as the
+    // writer's transform_ip.)
+    const std::int32_t conv_w =
+        hailo_cache::pick_dim(self->source_width,  self->cached_width);
+    const std::int32_t conv_h =
+        hailo_cache::pick_dim(self->source_height, self->cached_height);
+
+    std::int32_t fw = conv_w > 0 ? conv_w : 0;
+    std::int32_t fh = conv_h > 0 ? conv_h : 0;
     std::vector<hailo_cache::TileCacheDb::CropKey> crops;
+
+#if defined(HAVE_GSTHAILOMETA)
+    bool used_tile_roi = false;
+    if (conv_w > 0 && conv_h > 0) {
+        HailoROIPtr roi = get_hailo_main_roi(buf, /*create_if_missing=*/false);
+        if (roi) {
+            HailoBBox bb = roi->get_bbox();
+            const float xmin = bb.xmin();
+            const float ymin = bb.ymin();
+            const float w    = bb.width();
+            const float h    = bb.height();
+            // A whole-frame ROI (0,0,1,1) carries no per-tile provenance —
+            // treat it like "no tile ROI" so behaviour matches the writer's
+            // full-frame fallback for non-tiled pipelines.
+            if (!(xmin == 0.0f && ymin == 0.0f && w == 1.0f && h == 1.0f)) {
+                hailo_cache::CanonicalCrop r =
+                    hailo_cache::tile_crop_to_source_px(
+                        (double)xmin, (double)ymin, (double)w, (double)h,
+                        conv_w, conv_h);
+                crops.push_back({r.x, r.y, r.w, r.h});
+                used_tile_roi = true;
+            }
+        }
+    }
+    if (!used_tile_roi) {
+        crops.push_back({0, 0, fw, fh});
+    }
+#else
     crops.push_back({0, 0, fw, fh});
+#endif
 
     // (3) Per-crop lookup.
     bool all_hit = true;
@@ -733,6 +807,27 @@ gst_hailo_cache_reader_class_init(GstHailoCacheReaderClass* klass)
             "that produced the cache",
             GST_TYPE_HAILO_CACHE_READER_FRAME_ID_SOURCE,
             GST_HAILO_CACHE_READER_FRAME_ID_COUNTER,
+            (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
+
+    // --- Source-pixel provenance (Task 5). Mirror the writer's
+    //     source-width/source-height so writer-then-reader replay HITs:
+    //     the reader scales each tile's normalized HailoROI bbox by these
+    //     dims (when >0) to derive the SAME source-pixel crop key the
+    //     writer recorded. 0 = fall back to caps dims (full-frame). ---
+    g_object_class_install_property(gobject_class, PROP_SOURCE_WIDTH,
+        g_param_spec_uint("source-width", "source-width",
+            "Source video width in pixels. When >0, the tile crop lookup "
+            "key is computed in source-pixel space (bbox * source-width) to "
+            "match a writer run with the same source-width. 0 = caps width.",
+            0, G_MAXUINT, 0,
+            (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(gobject_class, PROP_SOURCE_HEIGHT,
+        g_param_spec_uint("source-height", "source-height",
+            "Source video height in pixels. When >0, the tile crop lookup "
+            "key is computed in source-pixel space (bbox * source-height) to "
+            "match a writer run with the same source-height. 0 = caps height.",
+            0, G_MAXUINT, 0,
             (GParamFlags)(G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS)));
 
     // --- hailonet mirror (NO-OP stubs). Types + defaults match the
@@ -907,6 +1002,8 @@ gst_hailo_cache_reader_init(GstHailoCacheReader* self)
     self->on_miss    = GST_HAILO_CACHE_READER_ON_MISS_ERROR;
     self->quantise   = 0;
     self->frame_id_source = GST_HAILO_CACHE_READER_FRAME_ID_COUNTER;
+    self->source_width  = 0;
+    self->source_height = 0;
 
     // hailonet-mirror defaults (match the values printed by
     // gst-inspect-1.0 hailonet on GStreamer 1.20).

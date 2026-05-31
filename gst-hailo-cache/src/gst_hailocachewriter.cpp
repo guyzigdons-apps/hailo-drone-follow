@@ -398,21 +398,16 @@ bool read_tile_crop_rect_(GstBuffer* buf,
         return false;
     }
 
-    auto clampi = [](double v, std::int32_t lo, std::int32_t hi) -> std::int32_t {
-        // Truncate toward zero (matches int-field assignment in TAPPAS),
-        // then CLAMP to [lo, hi] exactly as get_bounding_rect does.
-        std::int32_t t = (std::int32_t)v;
-        if (t < lo) return lo;
-        if (t > hi) return hi;
-        return t;
-    };
+    // Shared truncate-then-clamp rule (cache_keys.hpp) — the SAME helper
+    // the reader uses, so writer-recorded and reader-looked-up crop keys
+    // match byte-for-byte. The arithmetic is identical to the previous
+    // inline version (a local clampi over xmin*W etc.).
+    const hailo_cache::CanonicalCrop r =
+        hailo_cache::tile_crop_to_source_px((double)xmin, (double)ymin,
+                                            (double)w, (double)h,
+                                            frame_w, frame_h);
 
-    const std::int32_t rx = clampi((double)xmin * frame_w, 0, frame_w);
-    const std::int32_t ry = clampi((double)ymin * frame_h, 0, frame_h);
-    const std::int32_t rw = clampi((double)w * frame_w, 0, frame_w - rx);
-    const std::int32_t rh = clampi((double)h * frame_h, 0, frame_h - ry);
-
-    *cx = rx; *cy = ry; *cw = rw; *ch = rh;
+    *cx = r.x; *cy = r.y; *cw = r.w; *ch = r.h;
     return true;
 #else
     (void)buf; (void)frame_w; (void)frame_h;

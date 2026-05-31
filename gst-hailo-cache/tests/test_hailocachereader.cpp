@@ -42,6 +42,18 @@
 #include "tile_cache_db.hpp"
 #include "gst_hailocachereader.hpp"
 
+// Task 5 — source-pixel crop lookup test. We hand-craft a buffer carrying
+// a single tile HailoROI (normalized bbox) and push it through the reader
+// with source-width/height set, asserting it HITs a source-pixel cache
+// row. Guarded by HAVE_GSTHAILOMETA so the suite still builds on a
+// no-Hailo box (where the reader can't read the ROI either).
+#if defined(HAVE_GSTHAILOMETA)
+#include <gst_hailo_meta.hpp>   // gst_buffer_add_hailo_meta
+#include <hailo_objects.hpp>    // HailoROI, HailoBBox
+#include <gst/app/gstappsrc.h>
+#include <memory>
+#endif
+
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -637,3 +649,128 @@ TEST(HailoCacheReaderTask9, QuantiseAlignsCropToCache) {
     gst_object_unref(pl.pipeline);
     std::remove(db_path.c_str());
 }
+
+// ===========================================================================
+// Task 5 — source-pixel crop lookup from a per-tile HailoROI.
+// ===========================================================================
+//
+// The writer (Task 4) records a tile's crop key as the normalized
+// HailoROI bbox scaled by the SOURCE-video dims (truncate-then-clamp).
+// The reader must derive the SAME key so replay HITs. We seed a row at a
+// source-pixel crop, push one buffer carrying a tile ROI of normalized
+// (0,0,0.4,0.5) with source-width=3840 source-height=2160, and assert HIT
+// + the cached dets are attached. The caps are deliberately a SMALL
+// cropped-branch size (640x480) to prove the reader uses source dims, not
+// caps, for the lookup key.
+//
+// Expected source-pixel crop (TAPPAS truncate-then-clamp rule):
+//   x = (int)(0.0 * 3840) = 0
+//   y = (int)(0.0 * 2160) = 0
+//   w = (int)(0.4 * 3840) = (int)1536.0 = 1536
+//   h = (int)(0.5 * 2160) = (int)1080.0 = 1080
+#if defined(HAVE_GSTHAILOMETA)
+
+namespace {
+
+// Attach a single tile HailoROI (normalized bbox) to `buf`, mirroring
+// what hailotilecropper_dynamic does on the cropped branch.
+void attach_tile_roi(GstBuffer* buf, float xmin, float ymin,
+                     float w, float h) {
+    HailoROIPtr roi = std::make_shared<HailoROI>(HailoBBox(xmin, ymin, w, h));
+    gst_buffer_add_hailo_meta(buf, roi);
+}
+
+}  // namespace
+
+TEST(HailoCacheReaderTask5, SourcePixelCropFromTileRoiHits) {
+    std::string db_path = tmp_db_path("source_px");
+
+    // Seed frame 0 at the SOURCE-pixel crop the writer would record for a
+    // (0,0,0.4,0.5) tile over a 3840x2160 source.
+    {
+        hailo_cache::TileCacheDb db;
+        db.open(db_path, /*create_if_missing=*/true);
+        db.meta_put("ppv", "1");
+        hailo_cache::Row r;
+        r.frame_idx = 0;
+        r.crop_x = 0; r.crop_y = 0; r.crop_w = 1536; r.crop_h = 1080;
+        r.ppv = 1;
+        r.dets_json = kSampleDetsJson;
+        r.ts_epoch  = 1700000000.0;
+        db.put_many(std::vector<hailo_cache::Row>{r});
+        db.close();
+    }
+
+    // Build appsrc -> hailocachereader -> appsink manually so we can set
+    // source-width/height and push a buffer carrying a tile ROI.
+    GstElement* pipeline = gst_pipeline_new("task5_pipeline");
+    GstElement* src    = gst_element_factory_make("appsrc", "src");
+    GstElement* reader = gst_element_factory_make("hailocachereader", "reader");
+    GstElement* sink   = gst_element_factory_make("appsink", "sink");
+    ASSERT_TRUE(pipeline && src && reader && sink);
+
+    // Cropped-branch caps (small) — the reader must NOT use these for the
+    // lookup key when source-width/height are set.
+    GstCaps* caps = gst_caps_new_simple("video/x-raw",
+        "format", G_TYPE_STRING, "RGB",
+        "width",  G_TYPE_INT, 640,
+        "height", G_TYPE_INT, 480,
+        "framerate", GST_TYPE_FRACTION, 30, 1,
+        nullptr);
+    g_object_set(src, "caps", caps, "format", GST_FORMAT_TIME, nullptr);
+    gst_caps_unref(caps);
+
+    g_object_set(reader,
+        "cache-file", db_path.c_str(),
+        "on-miss", 0 /* error */,
+        "source-width", 3840u,
+        "source-height", 2160u,
+        nullptr);
+    g_object_set(sink, "async", FALSE, "sync", FALSE,
+                 "emit-signals", FALSE, nullptr);
+
+    gst_bin_add_many(GST_BIN(pipeline), src, reader, sink, nullptr);
+    ASSERT_TRUE(gst_element_link_many(src, reader, sink, nullptr));
+
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+
+    // Build a buffer (640x480 RGB) carrying a tile ROI.
+    const gsize sz = 640 * 480 * 3;
+    GstBuffer* buf = gst_buffer_new_allocate(nullptr, sz, nullptr);
+    GST_BUFFER_PTS(buf) = 0;
+    attach_tile_roi(buf, 0.0f, 0.0f, 0.4f, 0.5f);
+
+    GstFlowReturn fr = gst_app_src_push_buffer(GST_APP_SRC(src), buf);
+    EXPECT_EQ(fr, GST_FLOW_OK);
+    gst_app_src_end_of_stream(GST_APP_SRC(src));
+
+    // Pull the buffer back and inspect its cache-hit qdata + dets payload.
+    GQuark q_hit  = g_quark_from_static_string(GST_HAILO_CACHE_HIT_QDATA_KEY);
+    GQuark q_dets = g_quark_from_static_string(GST_HAILO_CACHED_DETECTIONS_QDATA_KEY);
+
+    int hit_flag = -1;
+    std::string dets;
+    GstSample* sample = gst_app_sink_try_pull_sample(
+        GST_APP_SINK(sink), 5 * GST_SECOND);
+    ASSERT_NE(sample, nullptr) << "reader dropped the buffer (on-miss=error "
+                                  "should have HIT the source-pixel row)";
+    GstBuffer* out = gst_sample_get_buffer(sample);
+    ASSERT_NE(out, nullptr);
+    gpointer p = gst_mini_object_get_qdata(GST_MINI_OBJECT(out), q_hit);
+    if (p) hit_flag = GPOINTER_TO_INT(p);
+    gpointer dp = gst_mini_object_get_qdata(GST_MINI_OBJECT(out), q_dets);
+    if (dp) dets = (const char*)dp;
+    gst_sample_unref(sample);
+
+    EXPECT_EQ(hit_flag, GST_HAILO_CACHE_HIT_VALUE_HIT)
+        << "reader did not HIT the source-pixel crop (0,0,1536,1080); "
+           "it likely used the full-frame caps fallback (0,0,640,480)";
+    EXPECT_EQ(dets, kSampleDetsJson)
+        << "cached detections payload not attached on HIT";
+
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(pipeline);
+    std::remove(db_path.c_str());
+}
+
+#endif  // HAVE_GSTHAILOMETA
