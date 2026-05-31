@@ -405,3 +405,285 @@ Tables: dynamic_tiling/runs/ablation_0026_fov{50,60,70}/ablation_table.md
 - 261 passed + 8 skipped (pytest, venv); meson 5/5. Floor was 238. No regressions.
 - No changes on main; no submodule pointer moves; pre-existing uncommitted files untouched.
 
+
+---
+
+# 2026-05-31 NIGHT 2 — Dynamic Ablation Rows + Scaling + Paper Scaffold
+
+Plan: `docs/superpowers/plans/2026-05-31-dynamic-ablation-and-scaling.md`
+Branch: `tiling-benchmark`. Never main, never push, submodule pointers untouched.
+
+## ENVIRONMENT CONSTRAINT (critical for resume)
+This session's available tools: **Bash, Read, Write, Edit ONLY** (verified via ToolSearch:
+no Agent/subagent, no Cron*, no Task*). Same as Night 1.
+- Adaptation: manager self-executes each task with rigorous inline verification
+  (write -> task tests -> full suites -> self spec+quality review -> single-invocation commit).
+- No subagent two-stage review possible; self-review is documented per task.
+- Session-limit handling is MANUAL resume (no cron will fire). Salvage + record queue here +
+  in HANDOFF.md.
+
+## Baseline (manager-verified at run start)
+- HEAD: `74480e6` (Night-2 plan commit, one past Plan-6-complete `b15623d`).
+- pytest (venv): **261 passed + 8 skipped**.  C++ meson: **5/5**.
+- **Test floor: 261** (hard-stop below this).
+- Chip: HAILO10H `pci/0000:3d:00.0` FW 5.3.0 present. chip_in_flight: null
+- Warmed (Night 1): `.tile_cache/DJI_..._0026_..._fov{50,60,70}__a2e9861507428064.sqlite3`
+  (each ~186k rows, 879 frames, full 8-grid static set, 0 misses). Gitignored.
+- Pre-existing uncommitted (NOT this run's — never touch): reid_manager.py (M),
+  hailo-apps (M submodule), sim/PX4-Autopilot (m), .claude/scheduled_tasks.lock, HANDOFF.md,
+  dynamic_tiling/runs/dynamic_run_multi_p2.frames.json.
+
+## Conventions
+- Python: `/home/giladn/.../hailo-apps/venv_hailo_apps/bin/python -m pytest -q`
+- C++: `meson test -C gst-hailo-cache/build`
+- Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+- Commit = single Bash invocation, explicit file paths, no `git add .`/`-A`.
+
+## KEY FINDING re B1 (recorded before starting)
+KB note `hailotilecropper_dynamic.md`: the INSTALLED `hailotilecropper_dynamic` plugin supports
+ONLY `tiles-static`. The dynamic `HailoTileROI`-via-`identity signal-handoffs` injection path
+the plan's B1 references was NEVER landed in the C++. THEREFORE B1's literal signal-handoff
+injector is unbuildable against the real plugin -> take the plan's documented **per-frame-relaunch
+fallback**: GstCropperBackend.infer() ALREADY accepts a per-frame `crops` list and builds a
+per-frame `tiles-static` string + selects the frame via frame_idx. So per-frame dynamic tiling is
+already mechanically supported via tiles-static; B1 work = make the no-chip test assert per-frame
+tiles-static variation (the fallback), B2 drives the scheduler to produce per-frame crops.
+
+## Task queue + order (one chip)
+No-chip first: A1, B1(no-chip fallback), B2, C1, C2. Then chip serialised: B1 smoke -> A3 -> B3
+-> A2 -> C3 smoke.
+- [ ] A1  [no-chip] warmer subprocess-per-grid
+- [ ] C1  [no-chip] independent review of Night-1 12 commits a5f2938..b15623d
+- [ ] C2  [no-chip] paper scaffold + renderer
+- [ ] B1  [no-chip fallback + CHIP smoke] GstCropperBackend per-frame tiles
+- [ ] B2  [no-chip] dynamic runner (scheduler + ByteTracker per-frame tiles)
+- [ ] A3  [CHIP] warm 0026 dynamic ROI tiles
+- [ ] B3  [no-chip after A3] dynamic-vs-static ablation tables
+- [ ] A2  [CHIP] warm 0027/0029 static
+- [ ] C3  [no-chip + CHIP smoke] full_frame detection payload
+
+chip_in_flight: null
+
+## Status-review checklist (for manual resume)
+1. meson test -C gst-hailo-cache/build (>=5); venv pytest -q (>=261). Record counts.
+2. git log --oneline -12; git status --short. No main changes; no submodule pointer moves.
+3. chip_in_flight; if a warm is running poll its .tile_cache/*.log.
+4. Resume from first unchecked task above.
+
+## Tick log
+### run start
+Baseline verified: meson 5/5, pytest 261+8 at `74480e6`. State initialized. Starting A1.
+
+### A1 landed — `442d86e`
+warm() now spawns one fresh subprocess per grid (internal --_single-grid-child child runs
+_warm_one_grid_in_process); parent stamps meta once. subprocess_runner seam injected for the
+no-chip test test_warmer_spawns_subprocess_per_grid (asserts one child per grid, in order).
+_warm_one_fov.sh kept (redundant but harmless). pytest 262+8, meson 5/5. Next: B1 (no-chip
+fallback) + B2.
+
+### B2 landed — `94d04e4`
+hailo_tiling/bench/runner.py run_dynamic_config(): stateful TileScheduler + production
+ByteTracker (TargetLock) per-frame loop; backend-agnostic (CachingBackend warm OR ReplayBackend
+replay); counts per-crop misses without raising; GT-seeded lock. 2 tests (per-frame tile
+variation + ROI-on-lock; replay miss-count). Existing run_config placeholder untouched.
+Lever flags not yet reshaping crops (noted follow-up). pytest 264+8, meson 5/5. Next: B1
+(per-frame-relaunch fallback — signal-handoff plugin path unimplemented per KB note).
+
+### B1 landed — `108f0c0`
+GstCropperBackend per-frame ROI injection via per-frame-relaunch fallback (signal-handoff plugin
+path unimplemented per KB note). No-chip test test_gst_cropper_injects_per_frame_rois (2 vs 4 ROI
+frames -> distinct pipelines, exact counts/rects). Chip smoke
+test_gst_cropper_per_frame_roi_injection_ordered added (runs in chip phase). Module docstring
+documents the fallback. pytest 265+9, meson 5/5.
+
+HEADLINE no-chip path DONE: A1, B1, B2 landed. Remaining headline: A3 (chip warm) -> B3 (tables).
+Plan: do Track C no-chip (C1 review, C2 paper scaffold) next, THEN the chip phase
+(B1 smoke -> A3 -> B3 -> A2 -> C3 smoke).
+
+### C1 landed — `6fc6e34`
+Independent review doc docs/superpowers/reviews/2026-05-31-night1-review.md. No blocking issues.
+1 IMPORTANT non-blocking: warmed fov50 cache has 8 crops at 878 occ vs 204 at 879 (incl 1x1
+full-frame crop) -> crop-ordered min-n_frames truncates short-crop configs to 878 while ref=879
+-> ~0.1% recall understate; verified NOT misalignment (trailing frame, contiguous). Carry into
+B3: score all configs over common frame prefix. 2 nits logged. No fix commits needed.
+
+### C2 landed — `e0b2fdb`
+docs/paper/technical-report.md + reproducibility.md + scripts/render_ablation_into_report.py
+(marker-based, committed-numbers-only, idempotent, --check mode). Rendered the 3 real FOV tables.
+6 no-chip tests. pytest 271+9, meson 5/5.
+
+## CHIP PHASE BEGINS — chip serialised
+All no-chip headline + Track-C work landed (A1 442d86e, B2 94d04e4, B1 108f0c0, C1 6fc6e34,
+C2 e0b2fdb). Chip order: B1 smoke -> A3 (dynamic warm, priority) -> B3 (tables) -> A2 -> C3 smoke.
+Note for B3: score configs over common frame prefix (C1 finding).
+chip_in_flight: B1-smoke
+
+### B1 chip smoke PASSED
+HAILO_CHIP=1 tests/integration/test_gst_cropper_chip.py -> 2 passed: existing CachingBackend
+4-tile smoke + new per-frame-relaunch ordered test (2-ROI then 4-ROI frame). Per-frame relaunch
+injection confirmed live on HAILO10H. chip_in_flight: null (smoke done). Next: A3.
+
+### A3 — TARGET-CLASS FINDING (important, recorded before warming)
+Clip 0026 has NO person (cls 0) detections in the 12x9 reference — class histogram fov50:
+{cls1 vehicle:3468, cls2 face:4425, cls3 lp:944}. The dynamic scheduler's TargetLock defaults to
+person_cls=0, so person-tracking would never lock -> degenerate (discovery-grid-only) dynamic run.
+DECISION: drive the dynamic single-target tracker on the most-present class. Stitched trajectory
+frames/878 (fov50): face=862, license_plate=827, vehicle=435. -> Track cls 2 (FACE) as the
+single target (most continuous). The tiler is class-agnostic; this faithfully exercises ROI tiling.
+run_dynamic_config(person_cls=2), GT trajectory from build_target_trajectory(label='face') over
+the committed 12x9.frames.json (schema-adapted). Dynamic tiles warmed into a SEPARATE
+per-source-frame cache via CachingBackend(GstCropperBackend); static caches untouched.
+chip_in_flight: A3-warm
+
+### A3 — DEGENERATE DYNAMIC FINDING (honest result, recorded)
+Probe (40 frames, fov50, track face cls2): mean_tiles=0.45, n_dets=0, 18 rows, 0 misses, ~1s.
+The dynamic config (discovery_period=15, 3x2 discovery grid) emits ONLY the discovery grid every
+15 frames; those 6 coarse tiles (~1440x1080 each, ~2.25x downscale to 640 model input) find ZERO
+faces -> tracker never locks -> NO ROI tiles ever emitted. Faces in 0026 are below the coarse
+discovery grid's detection floor (dense static 8x6/12x9 succeed because their tiles are small
+enough). This is NOT a hard-stop bug (injection works; 0 misses; tracker deterministic) but a
+data/config reality: the dynamic tiler can't engage ROI tracking on this clip as configured.
+DECISION: warm the dynamic configs over the FULL clip anyway (cheap, ~seconds) and produce the
+dynamic rows in the B3 table as an HONEST result (dynamic ~0.5 tiles/frame, near-zero recall
+because it never locks), with this explanation in the table notes + report discussion. The
+headline 'dynamic-vs-static tables for 0026' is still delivered; the finding (coarse discovery
+grid under-seeds small targets) is itself a paper-worthy observation.
+
+### A3 DONE — `6fc6cdd` (driver committed; caches gitignored)
+Warmed dynamic configs (dynamic, +asahi, +altitude_zoom) full clip (878 frames) for fov50/60/70
+into separate per-source-frame caches .tile_cache/..._{fov}__dynamic.sqlite3 (354 rows each, ~11s
+each). ACCEPTANCE MET: chip-free ReplayBackend replay of each dynamic config = 0 MISSES (all
+configs, fov50 verified; deterministic tracker reproduces warmed crops). Dynamic is degenerate
+(0.40 tiles/frame, 0 dets — never locks, see finding above) but the warm/replay machinery is
+sound. All 3 dynamic configs identical (levers don't reshape crops when no ROI exists).
+chip_in_flight: null. Next: B3 (tables with dynamic rows + matched-compute column).
+
+### B3 DONE — table commit + report discussion `347c8ff`
+hailo-tiling-bench --dynamic-cache/--ref/--target-class merges dynamic rows (ReplayBackend +
+run_dynamic_config, 0 misses) into the table with a matched_compute column (metrics.
+matched_compute_delta, 4 tests). Regenerated all 3 FOV tables: dynamic rows present, 0.40
+tiles/frame, recall 0, delta -0.26..-0.32 vs 1x1 (honest degenerate result — never locks).
+Report discussion rewritten with the finding. pytest 275+9, meson 5/5.
+
+## HEADLINE PATH COMPLETE: A1->B1->B2->A3->B3 all landed + reviewed (self).
+Good-morning priorities 1 (A1), 2 (dynamic-vs-static 0026 all FOV), 3 (C1), 4 (C2) ALL MET.
+Remaining filler: A2 (warm 0027/0029 static), C3 (full_frame payload).
+chip_in_flight: null. Next: C3 no-chip part (C++), then A2 chip warm, then C3 chip smoke.
+
+### C3 (no-chip C++) DONE — `02e3ec7`
+full_frame writer now serializes real dets_json (read_tile_dets_json_ on post-aggregator ROI) +
+tiles_json (new read_tiles_json_ over HailoTileROI sub-objects, cache_keys kTileField* consts).
+No-chip gtest FullFramePayload (seeds ROI det + tile, asserts non-empty payloads; writer test
+gains HAVE_GSTHAILOMETA+tappas+appsrc deps). INDEX Phase-14 follow-up -> RESOLVED. meson 5/5,
+pytest 275+9. C3 chip smoke (full_frame over real frames) remains for chip phase.
+
+### Chip filler: A2 (warm 0027/0029 static) + C3 chip smoke
+chip_in_flight: A2
+
+### A2 fov50 warm — 0027 IN PROGRESS
+Launched 0027 fov50 static warm (full 8-grid set, subprocess-per-grid via fixed warmer A1).
+PID 632009, log .tile_cache/warm_0027_fov50.log. Progress: 1x1..4x3 done, 61k rows, on 6x4/8x6/
+12x9. 0027 denser than 0026 (1x1=1913 rows). After 0027 fov50: validate 0-miss static replay +
+emit table, then warm 0027 fov60/70 + 0029 all FOV. chip_in_flight: A2 (0027 fov50).
+
+### A2 fov50 0027 — still warming dense grids (8x6/12x9)
+6x4 done (107k rows). 8x6 (48 tiles/frame) + 12x9 (108) over ~880 frames are the slow tail.
+PID 632009 still running. Monitors bt4hltjbs/bj6ze2b2q watch for exit.
+RESUME: when 632009 exits, check .tile_cache/warm_0027_fov50.log for DONE; then run
+hailo-tiling-bench static-only over the 0027 fov50 cache (per-tile-buffer -> crop-ordered) into
+dynamic_tiling/runs/ablation_0027_fov50 to validate 0 misses + emit table; commit table; then
+warm 0027 fov60/70 + 0029 all FOV (same loop). C3 chip smoke (full_frame over real frames) also
+pending. If session-limit/interrupt: A2 + C3 chip smoke are the only remaining items; headline +
+C1 + C2 + C3-no-chip all DONE.
+
+### A2 0027 fov50 — 8x6 done (199k rows), 12x9 (final grid) in flight
+8x6 added 91,871 rows. 12x9 (108 tiles, slowest) started. 0027 is denser/longer than 0026.
+A2 full 6-clip-FOV warm is SLOW (each dense FOV ~12-15 min). REVISED A2 SCOPE given time:
+finish 0027 fov50 + validate + table, do C3 chip smoke (higher value), then warm 0029 fov50 if
+time. Will NOT attempt all 6 caches tonight (lowest-priority filler; headline + C1/C2/C3 done).
+
+### A2 0027 fov50 DONE — table `<committed>`
+405,760 rows / 1914 frames, ALL static configs 0 misses. recall 1x1=0.11..6x4=0.54..12x9=1.0.
+Subprocess-per-grid (A1) worked perfectly — no deadlock. Cache gitignored.
+Now warming 0029 fov50 (smaller clip).
+chip_in_flight: A2 (0029 fov50)
+
+### A2 DONE — 0027 + 0029 fov50 tables (acceptance met)
+0027 fov50: 405,760 rows/1914 frames, 0 misses, recall 1x1=0.11..12x9=1.0.
+0029 fov50: 134,824 rows/636 frames, 0 misses, recall 1x1=0.00..8x6=0.78..12x9=1.0 (small targets).
+Both committed. A2 acceptance (0027/0029 fov50 static tables) MET. Did NOT warm fov60/70 of
+0027/0029 (time — dense 12x9 grids ~10-15min each; lowest-priority filler).
+chip_in_flight: null. Next: C3 chip smoke (full_frame post-aggregator non-empty payload).
+
+### C3 CHIP SMOKE PASSED — full_frame payload verified live
+Ran cropper->hailonet->hailofilter->hailotileaggregator->hailocachewriter mode=full_frame over
+5 frames of 0027 fov50 (HAILO_CHIP=1). frame_results: 6 rows, 5/6 non-empty dets_json (the
+empty one = a frame with no dets, correct), 6/6 non-empty tiles_json. dets carry source-frame
+cls1/cls2 coords; tiles_json carries the 3x2 layout [{x,y,w,h,mode}]. Notably tiles_json survives
+post-aggregator (better than expected). C3 FULLY COMPLETE (no-chip + chip smoke). chip_in_flight:
+null.
+
+## Wake-up summary (2026-06-01, Night 2)
+
+### Run mode
+Self-execution (no Agent/Cron/Task tools this session — Bash/Read/Write/Edit only, same as
+Night 1). Each task: write -> task tests -> full suites -> self spec+quality review -> single
+commit. The autonomous-project-manager two-stage subagent review was NOT possible; self-review
+is documented per task above.
+
+### Headline result — DELIVERED (good-morning priorities 1-4 all met)
+Dynamic-vs-static tiling tables for clip 0026 (fov50/60/70) with a matched-compute column now
+exist (`dynamic_tiling/runs/ablation_0026_fov{50,60,70}/ablation_table.md`). The full path
+A1->B1->B2->A3->B3 landed:
+- A1 `442d86e` warmer subprocess-per-grid (fixes the multi-grid teardown deadlock; verified on
+  the real A2 warms — 8 grids, no wedge).
+- B2 `94d04e4` stateful dynamic runner (TileScheduler + production ByteTracker per frame).
+- B1 `108f0c0` GstCropperBackend per-frame ROI injection via per-frame-relaunch FALLBACK (the
+  signal-handoff plugin path is NOT in the installed C++ — KB note). Chip smoke PASSED.
+- A3 `6fc6cdd` warmed dynamic ROI tiles on-chip into per-source-frame caches; chip-free replay
+  of every dynamic config = 0 MISSES (deterministic tracker reproduces warmed crops).
+- B3 `a3bf094`+`347c8ff` regenerated tables w/ dynamic + +asahi + +altitude_zoom rows + a
+  matched_compute recall-delta column vs the equal-tiles static grid.
+
+**The dynamic result is an HONEST NEGATIVE on 0026:** the configured 3x2 discovery grid
+(~1440px tiles, 2.25x downscale) cannot detect 0026's small faces (clip has NO person/cls0;
+dominant class is face), so the tracker never locks and no ROI tiles are emitted -> dynamic runs
+at ~0.40 tiles/frame with ~0 recall (delta -0.26..-0.32 vs the 1x1 grid). The warm/replay/
+matched-compute MACHINERY is fully sound (0 misses); the finding (track-guided tiling is only as
+good as its discovery stage) is itself the paper-worthy observation, written up in the report
+discussion.
+
+### Also landed
+- C1 `6fc6e34` independent review of Night-1's 12 commits — no blocking issues; 1 IMPORTANT
+  non-blocking finding (the 878-vs-879 per-crop occurrence asymmetry; verified NOT a misalignment
+  bug). Review doc: `docs/superpowers/reviews/2026-05-31-night1-review.md`.
+- C2 `e0b2fdb` paper scaffold: `docs/paper/technical-report.md` + `reproducibility.md` +
+  `scripts/render_ablation_into_report.py` (marker-based, committed-numbers-only, idempotent,
+  --check mode). Report's results section auto-rendered from the real committed tables.
+- C3 `02e3ec7` full_frame writer now records REAL dets_json + tiles_json (Phase 14). No-chip
+  gtest + CHIP SMOKE PASSED (5/6 non-empty dets, 6/6 non-empty tiles over real 0027 frames).
+  INDEX Phase-14 follow-up flipped to RESOLVED.
+- A2 `89eb56e`+`0dfa9cf` warmed clips 0027 + 0029 fov50 (full static grid set, 0 misses) +
+  tables. 0027: recall 1x1=0.11..12x9=1.0 (1914 frames). 0029: 1x1=0.00..8x6=0.78..12x9=1.0
+  (636 frames, small targets — a clean tiling-benefit illustration).
+
+### Cleanup / decisions for you
+- **Dynamic on 0026 is degenerate by design-of-clip, not a bug.** To get a POSITIVE dynamic
+  result, either (a) run the dynamic configs on a clip with larger lockable targets, or (b) make
+  the scheduler's discovery grid denser / size-gated so it can seed on small targets (a scheduler
+  change, future work). The methodology + pipeline are validated and ready.
+- **C1 finding (precision refinement, not a bug):** the per-tile-buffer caches have a few crops
+  with 878 vs 879 occurrences (incl the 1x1 full-frame crop), so crop-ordered replay truncates a
+  short-crop config to the common prefix (~0.1% recall understate). Consider scoring all configs
+  over the common frame prefix in a future bench pass, or re-warm uniformly.
+- **A2 left fov60/70 of 0027/0029 unwarmed** (only fov50 per acceptance — the dense 12x9 grids
+  take ~10-15 min each; lowest-priority filler). Re-run `scripts/warm_gst_cache.py` per the
+  reproducibility doc to extend coverage.
+- `.tile_cache/*.sqlite3` (static + new `*__dynamic.sqlite3`) are gitignored (regenerable).
+- Pre-existing uncommitted files (reid_manager.py, hailo-apps + sim/PX4 submodule pointers,
+  .claude lock, HANDOFF.md, dynamic_run_multi_p2.frames.json) were NOT touched. No changes on
+  main; no submodule pointer moves; nothing pushed.
+
+### Test suite
+- pytest **275 passed + 9 skipped** (venv); meson **5/5**. Floor was 261. No regressions
+  (grew +14 from new tests). All commits on `tiling-benchmark`, head `<state commit follows>`.
