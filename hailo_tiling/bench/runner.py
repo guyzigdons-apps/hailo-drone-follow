@@ -142,6 +142,65 @@ def run_config(
     raise ValueError(f"unknown config kind: {cfg.kind!r}")
 
 
+def run_static_config_crop_ordered(
+    cfg: BenchConfig,
+    store: SqliteCacheStore,
+    video_meta: dict,
+    *,
+    ppv: int = 1,
+) -> ConfigResult:
+    """Replay a STATIC grid against a GST-warmed cache whose ``frame_idx`` is a
+    per-tile-buffer monotonic counter (the GStreamer ``hailocachewriter``
+    convention) rather than a per-source-frame index.
+
+    In such a cache each grid crop appears exactly once per source frame; the
+    k-th occurrence of a crop (ordered by ``frame_idx``) belongs to source
+    frame k. We therefore reconstruct source frames by zipping the per-crop
+    occurrence streams. This sidesteps the writer's frame_idx semantics while
+    relying only on the (correct) source-pixel crop keys.
+
+    Returns a ConfigResult with one FrameResult per reconstructed source frame.
+    Raises ``CacheMissError`` if any grid crop has zero occurrences (the grid
+    was not warmed) — preserving the static-must-be-fully-warmed guarantee.
+    """
+    if cfg.kind != "static":
+        raise ValueError("crop-ordered replay is for static configs only")
+    src_w = int(video_meta["src_w"])
+    src_h = int(video_meta["src_h"])
+    crops = _static_crops(cfg, src_w, src_h)
+    agg = _make_aggregator(cfg)
+
+    # Per-crop ordered dets-json streams.
+    from ..cache.store import _json_to_dets
+
+    streams: list[list] = []
+    n_frames = None
+    for c in crops:
+        rows = store._con.execute(  # noqa: SLF001 — same-package read
+            "SELECT dets_json FROM detections WHERE "
+            "crop_x=? AND crop_y=? AND crop_w=? AND crop_h=? AND ppv=? "
+            "ORDER BY frame_idx",
+            (c.x, c.y, c.w, c.h, int(ppv)),
+        ).fetchall()
+        if not rows:
+            raise CacheMissError(
+                f"static grid {cfg.name}: crop ({c.x},{c.y},{c.w},{c.h}) "
+                "has no occurrences in the cache — grid not warmed."
+            )
+        streams.append([_json_to_dets(r[0]) for r in rows])
+        n = len(rows)
+        n_frames = n if n_frames is None else min(n_frames, n)
+
+    result = ConfigResult(name=cfg.name, kind=cfg.kind)
+    for k in range(n_frames or 0):
+        dets_per_crop = [streams[ci][k] for ci in range(len(crops))]
+        final = agg.aggregate(k, crops, dets_per_crop, src_w, src_h)
+        result.frames.append(
+            FrameResult(frame_idx=k, dets=final, n_tiles=len(crops), n_misses=0)
+        )
+    return result
+
+
 def _dynamic_crops(cfg: BenchConfig, src_w: int, src_h: int, frame_idx: int) -> list[CropRect]:
     """Per-frame source-pixel crops for a dynamic row.
 

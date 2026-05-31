@@ -43,3 +43,7 @@ tiling_benchmark/pxt_runs_yolov8m/
 
 # Warmed tile caches (Plan 6) — large runtime artifacts, not source.
 .tile_cache/
+
+# Ablation per-config frames.json are large reproducible artifacts; keep only
+# the committed ablation_table.md summaries.
+dynamic_tiling/runs/ablation_*/*.frames.json

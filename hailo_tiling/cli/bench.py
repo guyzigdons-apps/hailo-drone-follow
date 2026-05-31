@@ -24,7 +24,7 @@ from typing import Sequence
 
 from ..bench.config import BenchConfig, default_matrix
 from ..bench.metrics import recall_precision_vs_reference
-from ..bench.runner import ConfigResult, run_config
+from ..bench.runner import ConfigResult, run_config, run_static_config_crop_ordered
 from ..cache.store import SqliteCacheStore
 from ..types import Det
 
@@ -35,6 +35,29 @@ def _frames_in_cache(store: SqliteCacheStore, ppv: int = 1) -> list[int]:
         (int(ppv),),
     ).fetchall()
     return [int(r[0]) for r in rows]
+
+
+def _is_per_tile_buffer_keyed(store: SqliteCacheStore, ppv: int = 1) -> tuple[bool, int]:
+    """Detect whether a cache's ``frame_idx`` is a per-tile-buffer monotonic
+    counter (GStreamer hailocachewriter) rather than a per-source-frame index.
+
+    In a per-tile-buffer cache each distinct crop appears once per source
+    frame, so the number of source frames == the max per-crop occurrence count,
+    which is far smaller than the number of distinct frame_idx values. Returns
+    ``(is_per_tile_buffer, n_source_frames)``.
+    """
+    n_distinct_frame_idx = store._con.execute(  # noqa: SLF001
+        "SELECT COUNT(DISTINCT frame_idx) FROM detections WHERE ppv=?", (int(ppv),)
+    ).fetchone()[0]
+    max_occ = store._con.execute(  # noqa: SLF001
+        "SELECT MAX(c) FROM (SELECT COUNT(*) c FROM detections WHERE ppv=? "
+        "GROUP BY crop_x, crop_y, crop_w, crop_h)",
+        (int(ppv),),
+    ).fetchone()[0] or 0
+    # Heuristic: if distinct frame_idx greatly exceeds the per-crop occurrence
+    # count, frame_idx is a per-tile-buffer counter.
+    is_ptb = n_distinct_frame_idx > 1.5 * max(1, max_occ)
+    return bool(is_ptb), int(max_occ)
 
 
 def _select_configs(spec: str) -> list[BenchConfig]:
@@ -126,25 +149,53 @@ def run(
             )
         video_meta = {"src_w": int(vw), "src_h": int(vh)}
 
-        frames = _frames_in_cache(store, ppv=ppv)
-        if max_frames and max_frames > 0:
-            frames = frames[:max_frames]
-        if not frames:
-            raise SystemExit(f"{cache}: no frames in cache")
+        per_tile_buffer, n_src_frames = _is_per_tile_buffer_keyed(store, ppv=ppv)
+        if per_tile_buffer:
+            # GST writer keys frame_idx per tile-buffer; reconstruct source
+            # frames by crop-occurrence order. Static rows replay via the
+            # crop-ordered path; dynamic rows are not supported on such a cache
+            # in chip-free v1 (need live frame indexing) and are skipped.
+            frames = list(range(n_src_frames))
+            if max_frames and max_frames > 0:
+                frames = frames[:max_frames]
+            max_k = (max_frames if max_frames and max_frames > 0 else None)
+
+            def _run(cfg: BenchConfig) -> ConfigResult:
+                res = run_static_config_crop_ordered(cfg, store, video_meta, ppv=ppv)
+                if max_k is not None:
+                    res.frames = res.frames[:max_k]
+                return res
+        else:
+            frames = _frames_in_cache(store, ppv=ppv)
+            if max_frames and max_frames > 0:
+                frames = frames[:max_frames]
+            if not frames:
+                raise SystemExit(f"{cache}: no frames in cache")
+
+            def _run(cfg: BenchConfig) -> ConfigResult:
+                return run_config(cfg, store, video_meta, frames, ppv=ppv)
 
         configs = _select_configs(configs_spec)
+        if per_tile_buffer:
+            skipped = [c.name for c in configs if c.kind == "dynamic"]
+            configs = [c for c in configs if c.kind == "static"]
+            if skipped:
+                print(
+                    f"[bench] per-tile-buffer cache: skipping dynamic rows "
+                    f"{skipped} (need live frame indexing; static-only table)."
+                )
 
         # Run the reference row first so its frame-dets map is available as the
         # recall/precision denominator for every other config.
         ref_cfg = next(c for c in configs if c.is_reference)
         results: dict[str, ConfigResult] = {}
-        results[ref_cfg.name] = run_config(ref_cfg, store, video_meta, frames, ppv=ppv)
+        results[ref_cfg.name] = _run(ref_cfg)
         ref_map = _frame_dets_map(results[ref_cfg.name])
 
         for cfg in configs:
             if cfg.name in results:
                 continue
-            results[cfg.name] = run_config(cfg, store, video_meta, frames, ppv=ppv)
+            results[cfg.name] = _run(cfg)
 
         # Build the table (configs in matrix order, reference last for clarity).
         ordered = [c for c in configs if not c.is_reference] + [ref_cfg]

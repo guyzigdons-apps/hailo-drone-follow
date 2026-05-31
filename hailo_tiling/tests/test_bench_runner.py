@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from hailo_tiling.bench.config import BenchConfig
-from hailo_tiling.bench.runner import run_config
+from hailo_tiling.bench.runner import run_config, run_static_config_crop_ordered
 from hailo_tiling.backends.replay import CacheMissError
 from hailo_tiling.cache.hashing import tile_norm_to_source_px
 from hailo_tiling.cache.store import SqliteCacheStore
@@ -96,6 +96,50 @@ def test_static_config_raises_on_miss(tmp_path):
             run_config(cfg, store, {"src_w": _W, "src_h": _H}, [0, 1])
     finally:
         store.close()
+
+
+def test_crop_ordered_replay_reconstructs_source_frames(tmp_path):
+    """A GST-style cache whose frame_idx is a per-tile-buffer counter (each crop
+    appears once per source frame under a distinct frame_idx) replays via the
+    crop-ordered path: the k-th occurrence of each crop = source frame k."""
+    store = SqliteCacheStore.open(tmp_path / "ptb.sqlite3")
+    try:
+        # 2x2 grid, 3 source frames, per-tile-buffer frame_idx (monotonic):
+        # frame_idx 0..11 = 3 frames x 4 tiles, in source order.
+        crops = _crops_for_grid_2x2()
+        store.meta_put("video_w", str(_W))
+        store.meta_put("video_h", str(_H))
+        rows = []
+        fidx = 0
+        for src_frame in range(3):
+            for ci, c in enumerate(crops):
+                # Put one detection in tile 0 of source frame 1 to check ordering.
+                dets = []
+                if src_frame == 1 and ci == 0:
+                    dets = [Det(cls=1, score=0.7, x=0.5, y=0.5, w=0.2, h=0.2)]
+                rows.append({"frame_idx": fidx, "crop_rect": c, "ppv": 1, "dets": dets})
+                fidx += 1
+        store.put_many(rows)
+
+        cfg = BenchConfig(name="2x2", kind="static", tiles_x=2, tiles_y=2, overlap=0.0)
+        res = run_static_config_crop_ordered(cfg, store, {"src_w": _W, "src_h": _H})
+        assert len(res.frames) == 3
+        assert all(f.n_tiles == 4 and f.n_misses == 0 for f in res.frames)
+        # The detection lands in reconstructed source frame 1.
+        assert len(res.frames[0].dets) == 0
+        assert len(res.frames[1].dets) == 1
+        assert len(res.frames[2].dets) == 0
+    finally:
+        store.close()
+
+
+def _crops_for_grid_2x2():
+    from tiling_benchmark.tiling_record import _grid_to_static_tiles
+    out = []
+    for r in _grid_to_static_tiles(2, 2, 0.0, 0.0):
+        x, y, w, h = (float(v) for v in r.split(",")[:4])
+        out.append(tile_norm_to_source_px(x, y, w, h, _W, _H))
+    return out
 
 
 def test_dynamic_config_counts_misses_without_raising(tmp_path):
