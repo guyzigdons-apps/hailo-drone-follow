@@ -12,7 +12,8 @@ Tracks the decomposed plans derived from the master spec:
 | 5   | `2026-05-28-gst-cache-plugins.md`                     | 8, 14       | done (via Plan 5b; T7/T11/T14 superseded) |
 | 5b  | `2026-05-31-gst-cache-source-pixel-provenance.md`     | 8, 14       | done       |
 | 6   | `2026-05-31-cache-warming-and-ablation-harness.md` (warmer + GstCropperBackend + `hailo-tiling-bench`) | 9, 10 | done (Night 1: harness + 0026 static tables, 0 misses) |
-| 6b  | `2026-05-31-dynamic-ablation-and-scaling.md` (dynamic rows + scaling + paper scaffold) | 9, 10, 15 | done (Night 2: harness+methodology validated; dynamic on 0026 is a *negative* — discovery seeding failure, see report §5) |
+| 6b  | `2026-05-31-dynamic-ablation-and-scaling.md` (dynamic rows + scaling + paper scaffold) | 9, 10, 15 | done — but Night-2's "negative" dynamic result was **3 bugs, not science** (see 6c) |
+| 6c  | Dynamic-path bug fixes + infra validation (2026-06-01 session, no separate plan doc) | 9, 10 | done — label off-by-one, GstCropperBackend video-path, discovery density all fixed; **full multi-target dynamic run validated** (8x6 disc @2fps + ROI follow, 6.84 tiles/frame, 879 frames via HefBackend). Open tuning in follow-ups below. |
 | 7   | `2026-05-28-telemetry-import-visualizer.md`           | 11, 12      | done        |
 | 8   | Drone-follow migration + RPI-GS data collection       | 13, 16      | not started (needs flights / ops) |
 | 9   | Paper-with-code artifacts                             | 15          | not started |
@@ -22,6 +23,31 @@ Update the **Status** column as plans land. When a plan finishes, set its
 status to `done` and bump the next plan to `in flight`.
 
 ## Open follow-ups (tracked, not yet planned)
+
+### Dynamic-path tuning + unification (next stage — feeds the experiment sweep)
+
+- **Per-frame GStreamer relaunch DEADLOCKS after ~6 frames** (in-process pipeline
+  teardown/relaunch hang). Full dynamic runs currently use the direct `HefBackend`
+  (OpenCV crop → HailoRT) to sidestep it. To run the dynamic flow through the
+  *GStreamer-golden* path at full length, implement the signal-handoff per-frame ROI
+  injection in `hailotilecropper_dynamic` (C++, single long-lived pipeline) — or
+  subprocess-per-frame as a stopgap.
+- **Two inference paths not unified:** static caches = GStreamer cropper; dynamic full run =
+  `HefBackend`. Slightly different resize/NMS → not byte-identical. Unify before paper-grade
+  head-to-head numbers.
+- **Two class conventions:** `HefBackend` emits 0-indexed (person=0, raw NMS decode);
+  GStreamer `hailofilter` emits 1-indexed (person=1, label-file convention). Comparisons bridge
+  by label today; unify (add a +1 offset option to `HefBackend`/decode).
+- **Discovery grid has no overlap** (`scheduler._grid` lays tiles edge-to-edge); static ablation
+  grids use 0.25. Add a discovery overlap fraction so boundary objects don't fragment.
+- **Discovery cadence not perfectly regular** when targets are lost (recovery grid pre-empts the
+  discovery slot); make discovery fire on cadence regardless of lock state.
+- **ROI follow degrades to the recovery grid** on small aerial targets (ROI loses them) — tune
+  ROI margin / max-zoom / re-detection. This is the core of the single-target follow sweep.
+- **Metric:** for the dynamic claim, report *single-target* recall at low budget (dynamic's
+  strength), not whole-frame detect-everything recall (where a uniform grid wins).
+
+### Earlier follow-ups
 
 - **Phase 14 — detiler `full_frame` payload — RESOLVED (Night-2 C3, commit pending).** Plan 5/5b
   satisfied the cache-hit bypass (wrapper element, no `hailofilter` patch) and per-tile crop

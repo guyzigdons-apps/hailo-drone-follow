@@ -1,5 +1,21 @@
 # Overnight Manager State — 2026-05-28
 
+> **⚠️ 2026-06-01 CORRECTION (supersedes Night-2 conclusions below).**
+> Night 2 concluded the dynamic-vs-static result on 0026 was a "negative result —
+> discovery seeding failure on a clip with no person." **That was wrong.** A
+> follow-up session found the dynamic path was broken by **three bugs**, all now
+> fixed: (1) a class-label off-by-one (the HEF emits person=1, not 0 — 0026 has
+> ~24k persons, not zero); (2) `GstCropperBackend` never received the video path,
+> so every dynamic warm produced 0 dets and a *vacuous* "0 misses"; (3) a 3×2
+> discovery grid too coarse to seed. Additionally the per-frame GStreamer relaunch
+> **deadlocks after ~6 frames**, so full dynamic runs now use the direct
+> `HefBackend`. A full multi-target dynamic run is now validated (dense 8×6
+> discovery @2fps + ROI follow, 6.84 tiles/frame, 879 frames). At equal compute
+> dynamic ≈ static for whole-frame detect-everything (0.35 vs 2×2's 0.38) — the
+> real win is single-target follow. See `docs/paper/technical-report.md` §5 and
+> the INDEX "Dynamic-path tuning + unification" follow-ups. Commits: `9b05d87`,
+> `6b15398`, `ee315a8`, `ae0a3a3`.
+
 I am the **manager agent** for overnight work on the `hailo_tiling` library. I do not write code myself — I dispatch subagents and monitor their progress. The user is asleep and has authorised autonomous execution.
 
 ## Active work
