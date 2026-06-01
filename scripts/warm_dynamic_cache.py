@@ -84,6 +84,8 @@ def warm_dynamic(
     configs: list[str] | None = None,
     max_frames: int = 0,
     ppv: int = 1,
+    discovery_grid: tuple | None = None,
+    discovery_period: int | None = None,
 ) -> dict:
     from hailo_tiling.backends.caching import CachingBackend
     from hailo_tiling.backends.gst_cropper import GstCropperBackend
@@ -102,6 +104,22 @@ def warm_dynamic(
     matrix = {c.name: c for c in default_matrix() if c.kind == "dynamic"}
     want = configs or list(matrix)
     cfgs = [matrix[n] for n in want if n in matrix]
+
+    # Optional scheduler overrides (experiment knob: discovery grid density /
+    # cadence). The 3x2 default discovery grid is too coarse to seed a small
+    # target; a denser grid (e.g. 8x6) detects it so the tracker can lock.
+    if discovery_grid is not None or discovery_period is not None:
+        import dataclasses
+
+        new_cfgs = []
+        for c in cfgs:
+            kw = dict(c.scheduler_kwargs)
+            if discovery_grid is not None:
+                kw["discovery_grid"] = discovery_grid
+            if discovery_period is not None:
+                kw["discovery_period"] = discovery_period
+            new_cfgs.append(dataclasses.replace(c, scheduler_kwargs=kw))
+        cfgs = new_cfgs
 
     out_path = Path(out_cache)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,13 +180,24 @@ def main(argv=None) -> int:
     ap.add_argument("--configs", default=None,
                     help="Comma-separated dynamic config names (default: all dynamic rows).")
     ap.add_argument("--max-frames", type=int, default=0)
+    ap.add_argument("--discovery-grid", default=None,
+                    help="Override discovery grid as WxH (e.g. 8x6). Default: "
+                    "the config's grid (3x2) — too coarse to seed small targets.")
+    ap.add_argument("--discovery-period", type=int, default=None,
+                    help="Override discovery cadence (frames between discovery "
+                    "passes).")
     args = ap.parse_args(argv)
     configs = [c.strip() for c in args.configs.split(",")] if args.configs else None
+    discovery_grid = None
+    if args.discovery_grid:
+        gx, gy = args.discovery_grid.lower().split("x")
+        discovery_grid = (int(gx), int(gy))
     warm_dynamic(
         video=args.video, ref=args.ref, out_cache=args.out_cache,
         source_width=args.source_width, source_height=args.source_height,
         target_cls=args.target_class, hef=args.hef, post_so=args.post_so,
         configs=configs, max_frames=args.max_frames,
+        discovery_grid=discovery_grid, discovery_period=args.discovery_period,
     )
     return 0
 

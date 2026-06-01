@@ -61,7 +61,17 @@ def adapt(doc: dict) -> dict:
                 "label": _label(cls),
                 "cls": cls,
             })
-        out_frames.append({"frame": f["frame_idx"], "detections": dets})
+        out = {"frame": f["frame_idx"], "detections": dets}
+        # Pass through per-frame tile rectangles if the runner recorded them
+        # (new schema) so the viewer draws the actual tile layout, incl.
+        # dynamic ROI tiles. Falls back to config-reconstruction otherwise.
+        if f.get("tiles"):
+            out["tiles"] = [
+                {"x": t["x"], "y": t["y"], "w": t["w"], "h": t["h"],
+                 "category": t.get("category", "dynamic")}
+                for t in f["tiles"]
+            ]
+        out_frames.append(out)
     return {
         "label": cfg_name if isinstance(cfg_name, str) else doc.get("label", "run"),
         "config": config,
