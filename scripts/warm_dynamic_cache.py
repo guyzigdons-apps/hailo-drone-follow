@@ -120,7 +120,8 @@ def warm_dynamic(
         store.meta_put("created_at", str(time.time()))
 
         backend = GstCropperBackend(hef=hef, post_so=post_so,
-                                    source_w=source_width, source_h=source_height)
+                                    source_w=source_width, source_h=source_height,
+                                    video=str(video))
         caching = CachingBackend(backend, store, ppv=ppv)
         for cfg in cfgs:
             rows_before = int(store.stats()["n_rows"])

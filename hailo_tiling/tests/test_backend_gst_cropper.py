@@ -38,6 +38,24 @@ def test_gst_cropper_builds_pipeline():
     assert "hailotileaggregator" in s
 
 
+def test_infer_uses_constructor_video_over_frame_arg():
+    """Regression: the stateful runner calls infer(frame_idx, crops, frame_idx)
+    — it passes the frame *index* as ``frame``, not the video path. The backend
+    must use the video given at construction, else the pipeline becomes
+    ``filesrc location="<int>"`` and decodes nothing (every dynamic warm then
+    silently produced 0 dets / vacuous "0 misses")."""
+    be = GstCropperBackend(hef="/m.hef", post_so="/p.so",
+                           source_w=_W, source_h=_H, video="/real/clip.mp4")
+    crops = [tile_norm_to_source_px(0.0, 0.0, 1.0, 1.0, _W, _H)]
+    # The path used for the pipeline comes from self.video; the frame arg here
+    # is an int frame index (what run_dynamic_config passes) and must be ignored.
+    s = be.build_pipeline_string(be.video, crops)
+    assert 'filesrc location="/real/clip.mp4"' in s
+    # Without a constructor video, direct callers can still pass the path.
+    be2 = GstCropperBackend(hef="/m.hef", post_so="/p.so", source_w=_W, source_h=_H)
+    assert be2.video is None
+
+
 def test_tiles_static_round_trips_crop_keys():
     """A normalized tile -> source-pixel crop -> normalized tile round-trips to
     the same string (so feeding these tiles reproduces the warmed crop key)."""

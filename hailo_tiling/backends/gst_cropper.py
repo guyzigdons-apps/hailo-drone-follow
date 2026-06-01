@@ -59,12 +59,19 @@ class GstCropperBackend(InferenceBackend):
         source_w: int = 0,
         source_h: int = 0,
         post_fn: str | None = None,
+        video: str | None = None,
     ):
         self.hef = hef
         self.post_so = post_so or _DEFAULT_POST_SO
         self.post_fn = post_fn or _DEFAULT_POST_FN
         self.source_w = int(source_w)
         self.source_h = int(source_h)
+        # The cropper decodes the video itself; the stateful runner calls
+        # ``infer(frame_idx, crops, frame_idx)`` (it has no frame pixels to
+        # hand over), so the video path must be supplied here. When set, it
+        # takes precedence over the ``frame`` argument (which is then just the
+        # frame index used for selection).
+        self.video = video
 
     # -- pipeline construction (pure / chip-free) --------------------------
 
@@ -119,14 +126,18 @@ class GstCropperBackend(InferenceBackend):
         """Run the cropper pipeline for ``crops`` and return per-crop tile-local
         normalized dets in input order.
 
-        Requires a Hailo chip. ``frame`` is the source video path (the cropper
-        decodes the frame itself); ``frame_idx`` selects which decoded frame to
-        score. Reuses the replay gate's pad-probe extraction.
+        Requires a Hailo chip. The source video is ``self.video`` when set
+        (the stateful runner passes the frame *index* as ``frame``, so it
+        cannot be the path); otherwise ``frame`` is treated as the video path
+        for direct callers. ``frame_idx`` selects which decoded frame to score.
+        Reuses the replay gate's pad-probe extraction.
         """
         if not crops:
             return []
         if self.source_w <= 0 or self.source_h <= 0:
             raise ValueError("source_w/source_h must be set for infer")
+
+        video = self.video if self.video is not None else str(frame)
 
         import gi
 
@@ -137,7 +148,7 @@ class GstCropperBackend(InferenceBackend):
 
         Gst.init(None)
         n_tiles = len(crops)
-        pipe_str = self.build_pipeline_string(str(frame), crops)
+        pipe_str = self.build_pipeline_string(video, crops)
         pipeline = Gst.parse_launch(pipe_str)
         tap = pipeline.get_by_name("gcb_tap")
         srcpad = tap.get_static_pad("src")
