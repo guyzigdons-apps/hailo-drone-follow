@@ -1,7 +1,12 @@
 """Tests for hailo_tiling.bench.metrics (matched-compute delta — Night-2 B3)."""
 from __future__ import annotations
 
-from hailo_tiling.bench.metrics import matched_compute_delta
+from hailo_tiling.bench.metrics import (
+    matched_compute_delta,
+    recall_precision_vs_reference,
+)
+from hailo_tiling.classes import FACE, PERSON, VEHICLE
+from hailo_tiling.types import Det
 
 
 _STATIC = [
@@ -36,3 +41,41 @@ def test_matched_compute_skips_none_recall():
     name, delta = matched_compute_delta(1.5, 0.4, rows)
     assert name == "y"  # the None-recall row is skipped
     assert abs(delta - 0.1) < 1e-9
+
+
+def _box(cls):
+    # One box per class at a fixed location so pred/ref overlap perfectly.
+    return Det(cls=cls, score=0.9, x=0.4, y=0.4, w=0.2, h=0.2)
+
+
+def test_keep_classes_excludes_face_and_plate():
+    # Reference + prediction each carry person, vehicle and face boxes.
+    preds = {0: [_box(PERSON), _box(VEHICLE), _box(FACE)]}
+    refs = {0: [_box(PERSON), _box(VEHICLE), _box(FACE)]}
+
+    # Unfiltered: all three classes count (perfect recall over 3 boxes).
+    recall, precision, n_ref = recall_precision_vs_reference(preds, refs)
+    assert n_ref == 3
+    assert recall == 1.0 and precision == 1.0
+
+    # keep_classes drops face: only person + vehicle are scored.
+    recall, precision, n_ref = recall_precision_vs_reference(
+        preds, refs, keep_classes=(PERSON, VEHICLE)
+    )
+    assert n_ref == 2
+    assert recall == 1.0 and precision == 1.0
+
+
+def test_keep_classes_filters_false_positives():
+    # Prediction has an extra face box the reference lacks; with face kept it
+    # is a false positive, with face dropped precision is perfect.
+    preds = {0: [_box(PERSON), _box(FACE)]}
+    refs = {0: [_box(PERSON)]}
+
+    recall, precision, _ = recall_precision_vs_reference(preds, refs)
+    assert recall == 1.0 and precision == 0.5  # the face is an FP
+
+    recall, precision, _ = recall_precision_vs_reference(
+        preds, refs, keep_classes=(PERSON, VEHICLE)
+    )
+    assert recall == 1.0 and precision == 1.0  # face dropped from both sides

@@ -9,9 +9,9 @@ by the stateful bench runner (scheduler + production ByteTracker). The tracker
 is deterministic given the per-frame detection sequence, so a later chip-free
 ReplayBackend run requests exactly the crops warmed here -> 0 misses.
 
-Target class: clip 0026 has NO person (cls 0) detections, so the single-target
-tracker is driven on the most-present class (cls 2 = face) using the committed
-12x9 reference as the GT trajectory source (see the Night-2 state file).
+Target class: the single-target tracker locks the PERSON class (cls 1 in the
+hailo_4_classes HEF — see hailo_tiling.classes; id 0 is the json's "unlabeled"
+slot). The committed 12x9 reference is the GT trajectory source.
 
 Usage:
     source setup_env.sh
@@ -21,7 +21,7 @@ Usage:
         --ref dynamic_tiling/runs/ablation_0026_fov50/12x9.frames.json \
         --out-cache .tile_cache/0026__fov50__dynamic.sqlite3 \
         --source-width 3840 --source-height 2160 \
-        --target-class 2 [--max-frames N] [--configs dynamic,dynamic+asahi]
+        --target-class 1 [--max-frames N] [--configs dynamic,dynamic+asahi]
 """
 from __future__ import annotations
 
@@ -37,7 +37,8 @@ for _p in (str(_THIS_DIR), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-_CLASS_LABELS = ("person", "vehicle", "face", "license_plate")
+from hailo_tiling.classes import PERSON, label as _class_label  # noqa: E402
+
 _DEFAULT_HEF = ("/usr/local/hailo/resources/models/hailo10h/"
                 "hailo_yolov8n_4_classes_vga.hef")
 _DEFAULT_POST = "/usr/local/hailo/resources/so/libyolo_hailortpp_postprocess.so"
@@ -51,14 +52,14 @@ def gt_traj_from_reference(ref_path: Path, target_cls: int) -> dict:
     from dynamic_tiling.gt_track import build_target_trajectory
 
     doc = json.loads(ref_path.read_text())
-    label = _CLASS_LABELS[target_cls] if 0 <= target_cls < len(_CLASS_LABELS) else str(target_cls)
+    label = _class_label(target_cls)
     adapted = {
         "frames": [
             {
                 "frame": f["frame_idx"],
                 "detections": [
                     {
-                        "label": _CLASS_LABELS[d["cls"]] if 0 <= d["cls"] < len(_CLASS_LABELS) else str(d["cls"]),
+                        "label": _class_label(d["cls"]),
                         "bbox": [d["x"], d["y"], d["w"], d["h"]],
                         "confidence": d.get("score", 1.0),
                     }
@@ -152,7 +153,9 @@ def main(argv=None) -> int:
     ap.add_argument("--out-cache", required=True)
     ap.add_argument("--source-width", type=int, required=True)
     ap.add_argument("--source-height", type=int, required=True)
-    ap.add_argument("--target-class", type=int, default=2)
+    ap.add_argument("--target-class", type=int, default=PERSON,
+                    help="Single-target class (default 1 = person; "
+                    "see hailo_tiling.classes).")
     ap.add_argument("--hef", default=None)
     ap.add_argument("--post-so", default=None)
     ap.add_argument("--configs", default=None,

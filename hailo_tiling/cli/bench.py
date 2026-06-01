@@ -24,6 +24,7 @@ from typing import Sequence
 
 from ..bench.config import BenchConfig, default_matrix
 from ..bench.metrics import matched_compute_delta, recall_precision_vs_reference
+from ..classes import PERSON, TRACKED_CLASSES
 from ..bench.runner import (
     ConfigResult,
     run_config,
@@ -96,6 +97,12 @@ def _det_to_dict(d: Det) -> dict:
     return {"cls": d.cls, "score": d.score, "x": d.x, "y": d.y, "w": d.w, "h": d.h}
 
 
+def _tile_to_dict(t) -> dict:
+    """Normalized tile tuple ``(x, y, w, h, category)`` -> frames.json dict."""
+    x, y, w, h, cat = t
+    return {"x": x, "y": y, "w": w, "h": h, "category": cat}
+
+
 def _write_frames_json(out_dir: Path, res: ConfigResult) -> Path:
     path = out_dir / f"{res.name}.frames.json"
     doc = {
@@ -108,6 +115,7 @@ def _write_frames_json(out_dir: Path, res: ConfigResult) -> Path:
                 "n_tiles": f.n_tiles,
                 "n_misses": f.n_misses,
                 "dets": [_det_to_dict(d) for d in f.dets],
+                "tiles": [_tile_to_dict(t) for t in f.tiles],
             }
             for f in res.frames
         ],
@@ -188,7 +196,8 @@ def _dynamic_rows_from_cache(
             )
             _write_frames_json(out_dir, res)
             recall, precision, _ = recall_precision_vs_reference(
-                _frame_dets_map(res), ref_map, iou_thr=iou_thr
+                _frame_dets_map(res), ref_map, iou_thr=iou_thr,
+                keep_classes=TRACKED_CLASSES,
             )
             ms, md = matched_compute_delta(
                 res.mean_tiles_per_frame, recall, static_rows
@@ -216,7 +225,7 @@ def run(
     iou_thr: float = 0.5,
     dynamic_cache: str | None = None,
     ref: str | None = None,
-    target_cls: int = 2,
+    target_cls: int = PERSON,
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     store = SqliteCacheStore.open(cache)
@@ -289,7 +298,8 @@ def run(
                 recall, precision = 1.0, 1.0
             else:
                 recall, precision, _ = recall_precision_vs_reference(
-                    _frame_dets_map(res), ref_map, iou_thr=iou_thr
+                    _frame_dets_map(res), ref_map, iou_thr=iou_thr,
+                    keep_classes=TRACKED_CLASSES,
                 )
             table_rows.append(
                 {
@@ -369,9 +379,11 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--ref", default=None,
                     help="12x9 reference frames.json (GT-trajectory source for "
                     "the dynamic tracker). Required with --dynamic-cache.")
-    ap.add_argument("--target-class", type=int, default=2,
+    ap.add_argument("--target-class", type=int, default=PERSON,
                     help="Single-target class for the dynamic tracker "
-                    "(default 2 = face; clip 0026 has no person/cls0).")
+                    "(default 1 = person; see hailo_tiling.classes). The "
+                    "hailo_4_classes HEF emits 1=person 2=vehicle 3=face "
+                    "4=license_plate (0 is the json's 'unlabeled' slot).")
     return ap
 
 

@@ -13,6 +13,7 @@ from hailo_tiling.backends.backend import MockBackend
 from hailo_tiling.backends.replay import CacheMissError
 from hailo_tiling.cache.hashing import tile_norm_to_source_px
 from hailo_tiling.cache.store import SqliteCacheStore
+from hailo_tiling.classes import PERSON
 from hailo_tiling.types import CropRect, Det
 
 _W, _H = 3840, 2160
@@ -90,6 +91,27 @@ def test_static_config_replays_from_cache(tmp_path):
         store.close()
 
 
+def test_static_config_records_tile_rectangles(tmp_path):
+    """run_config must persist the normalized tile rectangles per frame so the
+    visualizer can draw the tile layout (not just the n_tiles count)."""
+    store = SqliteCacheStore.open(tmp_path / "seed.sqlite3")
+    try:
+        frames = [0, 1]
+        _seed_1x1(store, frames, {})
+        cfg = BenchConfig(name="1x1", kind="static", tiles_x=1, tiles_y=1, overlap=0.0)
+        res = run_config(cfg, store, {"src_w": _W, "src_h": _H}, frames)
+
+        for f in res.frames:
+            assert len(f.tiles) == f.n_tiles == 1
+            x, y, w, h, cat = f.tiles[0]
+            # 1x1 tile is the whole normalized frame.
+            assert (x, y) == pytest.approx((0.0, 0.0), abs=1e-6)
+            assert (w, h) == pytest.approx((1.0, 1.0), abs=1e-6)
+            assert isinstance(cat, str)
+    finally:
+        store.close()
+
+
 def test_static_config_raises_on_miss(tmp_path):
     """A static row that asks for a frame not in the cache must raise — the
     crop-key consistency / full-warming guarantee is load-bearing."""
@@ -130,6 +152,8 @@ def test_crop_ordered_replay_reconstructs_source_frames(tmp_path):
         res = run_static_config_crop_ordered(cfg, store, {"src_w": _W, "src_h": _H})
         assert len(res.frames) == 3
         assert all(f.n_tiles == 4 and f.n_misses == 0 for f in res.frames)
+        # Tile rectangles persisted for the visualizer (parity with run_config).
+        assert all(len(f.tiles) == 4 for f in res.frames)
         # The detection lands in reconstructed source frame 1.
         assert len(res.frames[0].dets) == 0
         assert len(res.frames[1].dets) == 1
@@ -197,8 +221,8 @@ def test_dynamic_runner_produces_per_frame_tiles():
                     ly = (gcy - c.y) / c.h
                     lw = gw * _W / c.w
                     lh = gh * _H / c.h
-                    out.append([Det(cls=0, score=0.9, x=lx - lw / 2, y=ly - lh / 2,
-                                    w=lw, h=lh)])
+                    out.append([Det(cls=PERSON, score=0.9, x=lx - lw / 2,
+                                    y=ly - lh / 2, w=lw, h=lh)])
                 else:
                     out.append([])
             return out

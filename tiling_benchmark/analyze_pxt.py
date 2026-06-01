@@ -101,13 +101,15 @@ def _compute_tile_rects(config: dict) -> list[tuple[float, float, float, float]]
 
 def is_phantom(det: dict, tile_rects: list[tuple[float, float, float, float]],
                tol: float = 0.01) -> bool:
-    """Return True if det is a class-0 phantom against the given tile grid.
+    """Return True if det is a person-class phantom against the given tile grid.
 
     A detection is treated as a phantom iff BOTH of these hold:
-      1. The detection is class-0 (person). We check ``label == 'person'``
-         (case-insensitive) OR ``class_id == 1`` for HEFs where the label
-         string is missing. ``vehicle``/``face``/``license_plate`` are
-         NEVER filtered — the artefact is class-0-specific.
+      1. The detection is the person class. We check ``label == 'person'``
+         (case-insensitive) OR ``class_id == 1`` (person is id 1 in the
+         hailo_4_classes HEF; id 0 is the json's "unlabeled" slot). For HEFs
+         where the label string is missing the id check applies.
+         ``vehicle``/``face``/``license_plate`` are NEVER filtered — the
+         artefact is person-class-specific.
       2. The bbox matches a tile rectangle in one of two ways:
          (a) Exact tile shape — ``(x, y, w, h)`` agrees with some tile rect
              within ``tol`` (normalized).
@@ -508,7 +510,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, default=None,
                     help="Optional path to dump the full analysis as JSON.")
     ap.add_argument("--drop-tile-shaped", action="store_true",
-                    help="Drop class-0 'person' phantom detections caused by the "
+                    help="Drop person-class phantom detections caused by the "
                          "yolov8n_4_classes_vga HEF on low-contrast tiles. Uses the "
                          "combined filter: (a) exact tile-rect match OR (b) area >= "
                          "75%% of a tile centered within 0.5*tile_w of the tile centre. "

@@ -77,7 +77,7 @@ IOU_THRESH = 0.3
 class Target:
     frame_idx: int
     cls_label: str        # 'person' | 'vehicle'
-    cls_id: int           # HEF class id (0=person, 1=vehicle in 4-class HEF)
+    cls_id: int           # HEF class id (1=person, 2=vehicle; 0='unlabeled')
     src_bbox: tuple       # (x, y, w, h) NORMALIZED to source frame
     src_w: int
     src_h: int
@@ -111,7 +111,8 @@ def load_gt_targets(gt_path: Path, src_w: int, src_h: int,
     `source_downscale_factor` is the synthetic-small factor — when > 1, the
     effective source dims are src_w/N × src_h/N, and target src_h_px is N×
     smaller (= "drone is N× farther / camera is N× lower res")."""
-    HEF_CLS_ID = {"person": 0, "vehicle": 1, "face": 2, "license_plate": 3}
+    # hailo_4_classes.json has a leading "unlabeled" slot, so ids start at 1.
+    HEF_CLS_ID = {"person": 1, "vehicle": 2, "face": 3, "license_plate": 4}
     with gt_path.open() as f:
         doc = json.load(f)
     eff_src_w = int(src_w / source_downscale_factor)

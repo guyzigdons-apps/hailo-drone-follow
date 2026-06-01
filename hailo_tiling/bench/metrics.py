@@ -9,7 +9,7 @@ matched per class.
 """
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Collection, Sequence
 
 from ..types import Det
 
@@ -67,10 +67,21 @@ def match_frame(
     return tp, n_pred, n_ref
 
 
+def _filter_classes(
+    dets: Sequence[Det], keep_classes: Collection[int] | None
+) -> Sequence[Det]:
+    """Keep only ``dets`` whose ``cls`` is in ``keep_classes`` (all if None)."""
+    if keep_classes is None:
+        return dets
+    keep = set(keep_classes)
+    return [d for d in dets if d.cls in keep]
+
+
 def recall_precision_vs_reference(
     pred_frames: dict[int, Sequence[Det]],
     ref_frames: dict[int, Sequence[Det]],
     iou_thr: float = 0.5,
+    keep_classes: Collection[int] | None = None,
 ) -> tuple[float, float, int]:
     """Aggregate recall/precision of ``pred_frames`` against ``ref_frames``.
 
@@ -80,6 +91,11 @@ def recall_precision_vs_reference(
       recall    = sum(tp) / sum(n_ref)    over all frames
       precision = sum(tp) / sum(n_pred)   over all frames
 
+    ``keep_classes`` (e.g. ``classes.TRACKED_CLASSES``) restricts BOTH
+    predictions and reference to those class ids before matching, so recall is
+    reported only over the classes we care about (persons/vehicles, not
+    faces/plates). ``None`` keeps every class.
+
     A frame present in one dict but not the other contributes its boxes as
     pure false-negatives / false-positives. Recall/precision are 0.0 when the
     respective denominator is 0 (no reference boxes / no predictions).
@@ -88,8 +104,8 @@ def recall_precision_vs_reference(
     n_pred_total = 0
     n_ref_total = 0
     for fi in set(pred_frames) | set(ref_frames):
-        preds = pred_frames.get(fi, [])
-        refs = ref_frames.get(fi, [])
+        preds = _filter_classes(pred_frames.get(fi, []), keep_classes)
+        refs = _filter_classes(ref_frames.get(fi, []), keep_classes)
         tp, n_pred, n_ref = match_frame(preds, refs, iou_thr=iou_thr)
         tp_total += tp
         n_pred_total += n_pred

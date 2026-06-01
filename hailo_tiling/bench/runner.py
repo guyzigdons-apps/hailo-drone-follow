@@ -24,6 +24,7 @@ from typing import Sequence
 
 from ..aggregator.aggregator import Aggregator
 from ..aggregator.boundary_strip import BoundaryStripFilter
+from ..classes import PERSON
 from ..backends.replay import CacheMissError, ReplayBackend
 from ..cache.hashing import tile_norm_to_source_px
 from ..cache.store import SqliteCacheStore
@@ -40,6 +41,10 @@ class FrameResult:
     dets: list[Det]
     n_tiles: int
     n_misses: int = 0
+    # Normalized tile rectangles requested this frame, as
+    # ``(x, y, w, h, category)`` tuples. Lets the visualizer draw the tile
+    # layout (esp. dynamic ROI tiles, whose positions are otherwise lost).
+    tiles: list = field(default_factory=list)
 
 
 @dataclass
@@ -71,6 +76,17 @@ def _static_crops(cfg: BenchConfig, src_w: int, src_h: int) -> list[CropRect]:
         x, y, w, h = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
         crops.append(tile_norm_to_source_px(x, y, w, h, src_w, src_h))
     return crops
+
+
+def _crops_to_norm_tiles(crops: Sequence[CropRect], src_w: int, src_h: int) -> list:
+    """Convert source-pixel crops to normalized ``(x, y, w, h, category)`` tile
+    tuples for frames.json / the visualizer. ``category`` is taken from the
+    crop's ``mode`` tag (``s``/``m``) or any ``category`` attribute it carries."""
+    out = []
+    for c in crops:
+        cat = getattr(c, "category", None) or getattr(c, "mode", "s")
+        out.append((c.x / src_w, c.y / src_h, c.w / src_w, c.h / src_h, str(cat)))
+    return out
 
 
 def _make_aggregator(cfg: BenchConfig) -> Aggregator:
@@ -106,13 +122,15 @@ def run_config(
 
     if cfg.kind == "static":
         crops = _static_crops(cfg, src_w, src_h)
+        norm_tiles = _crops_to_norm_tiles(crops, src_w, src_h)
         for fi in frames:
             # A static row must be fully warmed: a miss is a hard error
             # (crop-key consistency broken) — let CacheMissError propagate.
             dets_per_crop = backend.infer(None, crops, fi)
             final = agg.aggregate(fi, crops, dets_per_crop, src_w, src_h)
             result.frames.append(
-                FrameResult(frame_idx=fi, dets=final, n_tiles=len(crops), n_misses=0)
+                FrameResult(frame_idx=fi, dets=final, n_tiles=len(crops),
+                            n_misses=0, tiles=list(norm_tiles))
             )
         return result
 
@@ -133,7 +151,8 @@ def run_config(
             final = agg.aggregate(fi, hit_crops, hit_dets, src_w, src_h)
             result.frames.append(
                 FrameResult(
-                    frame_idx=fi, dets=final, n_tiles=len(crops), n_misses=n_misses
+                    frame_idx=fi, dets=final, n_tiles=len(crops), n_misses=n_misses,
+                    tiles=_crops_to_norm_tiles(crops, src_w, src_h),
                 )
             )
             result.n_misses_total += n_misses
@@ -192,11 +211,13 @@ def run_static_config_crop_ordered(
         n_frames = n if n_frames is None else min(n_frames, n)
 
     result = ConfigResult(name=cfg.name, kind=cfg.kind)
+    norm_tiles = _crops_to_norm_tiles(crops, src_w, src_h)
     for k in range(n_frames or 0):
         dets_per_crop = [streams[ci][k] for ci in range(len(crops))]
         final = agg.aggregate(k, crops, dets_per_crop, src_w, src_h)
         result.frames.append(
-            FrameResult(frame_idx=k, dets=final, n_tiles=len(crops), n_misses=0)
+            FrameResult(frame_idx=k, dets=final, n_tiles=len(crops), n_misses=0,
+                        tiles=list(norm_tiles))
         )
     return result
 
@@ -210,7 +231,7 @@ def run_dynamic_config(
     gt_traj: dict | None = None,
     fps: float = 30.0,
     budget: float | None = None,
-    person_cls: int = 0,
+    person_cls: int = PERSON,
     ppv: int = 1,
 ) -> ConfigResult:
     """Stateful dynamic-config runner (Night-2 B2).
@@ -296,7 +317,9 @@ def run_dynamic_config(
             lock.step(persons)
 
         result.frames.append(
-            FrameResult(frame_idx=fi, dets=final, n_tiles=len(crops), n_misses=n_misses)
+            FrameResult(frame_idx=fi, dets=final, n_tiles=len(crops),
+                        n_misses=n_misses,
+                        tiles=_crops_to_norm_tiles(crops, src_w, src_h))
         )
         result.n_misses_total += n_misses
 
