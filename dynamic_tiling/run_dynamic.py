@@ -63,7 +63,14 @@ def main():
                     help="Padding fraction applied to each bbox before IoU (default: 0.25).")
     ap.add_argument("--merge-union-inflate-max", type=float, default=1.5,
                     help="Max ratio union crop_w / max(crop_w_a, crop_w_b) (default: 1.5).")
+    ap.add_argument("--discovery-grid", default=None,
+                    help="Discovery grid density as WxH (e.g. 8x6 for dense "
+                    "whole-frame detection on cadence). Default: scheduler's 3x2.")
     args = ap.parse_args()
+    discovery_grid = None
+    if args.discovery_grid:
+        _gx, _gy = args.discovery_grid.lower().split("x")
+        discovery_grid = (int(_gx), int(_gy))
 
     cap = cv2.VideoCapture(str(args.video))
     if not cap.isOpened():
@@ -80,13 +87,15 @@ def main():
 
     if args.multi_target:
         target_classes = {int(c) for c in args.target_classes.split(",")}
+        _disc_kw = {"discovery_grid": discovery_grid} if discovery_grid else {}
         scheduler = MultiTargetTileScheduler(src_w, src_h,
                                              discovery_period=discovery_period,
                                              max_zoom=args.max_zoom,
                                              target_model_h=args.target_model_h,
                                              merge_iou_threshold=args.merge_iou_threshold,
                                              merge_pad_frac=args.merge_pad_frac,
-                                             merge_union_inflate_max=args.merge_union_inflate_max)
+                                             merge_union_inflate_max=args.merge_union_inflate_max,
+                                             **_disc_kw)
         lock = MultiTargetLock(target_classes=target_classes,
                                track_buffer=int(args.fps))
         try:
@@ -96,9 +105,10 @@ def main():
             backend.close()
             cap.release()
     else:
+        _disc_kw = {"discovery_grid": discovery_grid} if discovery_grid else {}
         scheduler = TileScheduler(src_w, src_h, discovery_period=discovery_period,
                                   max_zoom=args.max_zoom,
-                                  target_model_h=args.target_model_h)
+                                  target_model_h=args.target_model_h, **_disc_kw)
         lock = TargetLock(frame_rate=int(args.fps))
         try:
             res = run(_frame_iter(cap, args.max_frames), src_w, src_h,
