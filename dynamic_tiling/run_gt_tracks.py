@@ -44,6 +44,21 @@ def _overlay_doc(tracks, label: str) -> dict:
     return {"label": label, "frames": frames}
 
 
+def overlay_doc_by_id(tracks, label: str = "gt-by-id") -> dict:
+    """Overlay where each box's label is '<class>#<track_id>' so the viewer shows
+    track identity (not just class)."""
+    per_frame: dict = {}
+    for t in tracks:
+        name = f"{cls_label(t.cls)}#{t.track_id}"
+        for f, b in t.frames.items():
+            per_frame.setdefault(f, []).append(
+                {"label": name, "confidence": 1.0, "bbox": list(b),
+                 "track_id": t.track_id})
+    frames = [{"frame": f, "detections": per_frame[f], "tiles": []}
+              for f in sorted(per_frame)]
+    return {"label": label, "frames": frames}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dense", required=True, type=Path)
