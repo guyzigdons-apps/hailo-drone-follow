@@ -22,7 +22,7 @@ class AggregateScore:
     mean_time_to_recover: float
     mean_recovery_success: float
     avg_tiles_per_frame: float
-    per_trial: list  # list[TrialScore]
+    per_trial: list[TrialScore]
 
 
 def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
@@ -38,7 +38,7 @@ def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
         _disc = {"discovery_grid": discovery_grid} if discovery_grid else {}
         scheduler = TileScheduler(src_w, src_h, discovery_period=discovery_period,
                                   max_zoom=max_zoom, target_model_h=target_model_h, **_disc)
-        lock = TargetLock(frame_rate=int(fps))
+        lock = TargetLock(frame_rate=int(fps))  # frame_rate forwarded via **tracker_kwargs to create_tracker
         backend = backend_factory()
         meter = BudgetMeter(budget_inf_per_s=budget, fps=fps)
         try:
