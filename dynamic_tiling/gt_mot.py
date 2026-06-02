@@ -1,0 +1,121 @@
+"""Offline ground-truth multi-object tracks from dense detector output.
+
+Runs a HEAVY tracker (BoT-SORT: camera-motion compensation + ReID appearance)
+over the dense 12x9 detections to produce one stable trajectory per object. This
+is GT generation — it must be INDEPENDENT of the runtime ByteTracker under test.
+The tracker is injectable so unit tests avoid the boxmot/torch dependency.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from hailo_tiling.classes import TRACKED_CLASSES
+
+
+@dataclass
+class RawTrack:
+    cls: int
+    track_id: int
+    frames: dict = field(default_factory=dict)  # frame_idx -> (x,y,w,h) normalized
+
+
+def _dets_to_xyxy(frame_doc, classes):
+    """Return (N,6) array [x1,y1,x2,y2,score,cls] in NORMALIZED coords."""
+    rows = []
+    for d in frame_doc.get("detections", []):
+        c = int(d.get("cls", -1))
+        if c not in classes:
+            continue
+        x, y, w, h = d["bbox"]
+        rows.append([x, y, x + w, y + h, float(d.get("confidence", 1.0)), c])
+    return np.asarray(rows, dtype=float).reshape(-1, 6)
+
+
+def build_raw_tracks(doc, *, tracker, classes=TRACKED_CLASSES):
+    """Feed dense detections frame-by-frame to `tracker`; group outputs by id.
+
+    `tracker.update(dets_xyxy_score_cls, frame)` must return rows
+    [x1,y1,x2,y2,track_id,conf,cls,...] (the boxmot tracker contract).
+    """
+    classes = tuple(classes)
+    out: dict = {}  # (cls, track_id) -> RawTrack
+    frames = sorted(doc.get("frames", []), key=lambda fr: fr["frame"])
+    for fr in frames:
+        fi = fr["frame"]
+        dets = _dets_to_xyxy(fr, classes)
+        res = tracker.update(dets, fr)
+        if res is None or len(res) == 0:
+            continue
+        for row in np.asarray(res, dtype=float):
+            x1, y1, x2, y2, tid, _conf, cls = row[0], row[1], row[2], row[3], int(row[4]), row[5], int(row[6])
+            key = (cls, tid)
+            t = out.get(key)
+            if t is None:
+                t = RawTrack(cls=cls, track_id=tid)
+                out[key] = t
+            t.frames[fi] = (x1, y1, x2 - x1, y2 - y1)
+    return list(out.values())
+
+
+def make_botsort(reid_weights="osnet_x0_25_msmt17.pt", device="cuda:0", half=True):
+    """Construct a boxmot BoT-SORT tracker (CMC + ReID). Falls back to OC-SORT
+    if BoT-SORT import/instantiation fails (documented spec fallback)."""
+    from pathlib import Path
+    try:
+        from boxmot import BotSort
+        return BotSort(reid_weights=Path(reid_weights), device=device, half=half)
+    except Exception:  # pragma: no cover - environment-dependent
+        from boxmot import OcSort
+        return OcSort()
+
+
+def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort,
+                                classes=TRACKED_CLASSES):
+    """Pixel-coords BoT-SORT pass over the video frames + dense dets.
+
+    boxmot needs the BGR frame (CMC + ReID) and pixel-coord dets. Detections
+    are scaled to pixels per frame; results are stored back in NORMALIZED coords.
+    """
+    import cv2
+    classes = tuple(classes)
+    by_frame = {fr["frame"]: fr for fr in doc.get("frames", [])}
+    tracker = tracker_factory()
+    out: dict = {}
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise SystemExit(f"cannot open video: {video_path}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fi = -1
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            fi += 1
+            fr = by_frame.get(fi)
+            rows = []
+            if fr is not None:
+                for d in fr.get("detections", []):
+                    c = int(d.get("cls", -1))
+                    if c not in classes:
+                        continue
+                    x, y, bw, bh = d["bbox"]
+                    rows.append([x * w, y * h, (x + bw) * w, (y + bh) * h,
+                                 float(d.get("confidence", 1.0)), c])
+            px = np.asarray(rows, dtype=float).reshape(-1, 6)
+            res = tracker.update(px, frame)
+            if res is None or len(res) == 0:
+                continue
+            for row in np.asarray(res, dtype=float):
+                x1, y1, x2, y2 = row[0], row[1], row[2], row[3]
+                tid, cls = int(row[4]), int(row[6])
+                key = (cls, tid)
+                t = out.get(key) or RawTrack(cls=cls, track_id=tid)
+                out[key] = t
+                t.frames[fi] = (x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h)
+    finally:
+        cap.release()
+    return list(out.values())
