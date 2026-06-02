@@ -13,7 +13,7 @@ import argparse
 import json
 from pathlib import Path
 
-from hailo_tiling.classes import LABELS, TRACKED_CLASSES
+from hailo_tiling.classes import TRACKED_CLASSES, label as cls_label
 from .gt_clean import GtTrack, clean_tracks
 
 
@@ -24,7 +24,7 @@ def tracks_to_doc(tracks, *, clip: str) -> dict:
         for t in tracks]}
 
 
-def doc_to_tracks(doc) -> list:
+def doc_to_tracks(doc) -> list[GtTrack]:
     return [GtTrack(cls=t["cls"], track_id=t["track_id"],
                     frames={int(f): tuple(b) for f, b in t["frames"].items()})
             for t in doc["tracks"]]
@@ -36,7 +36,7 @@ def _overlay_doc(tracks, label: str) -> dict:
     for t in tracks:
         for f, b in t.frames.items():
             per_frame.setdefault(f, []).append(
-                {"label": LABELS[t.cls] if 0 <= t.cls < len(LABELS) else str(t.cls),
+                {"label": cls_label(t.cls),
                  "confidence": 1.0, "bbox": list(b),
                  "track_id": t.track_id})
     frames = [{"frame": f, "detections": per_frame[f], "tiles": []}
@@ -64,7 +64,8 @@ def main():
     args.out.write_text(json.dumps(tracks_to_doc(tracks, clip=args.video.stem)))
     print(f"GT tracks written: {args.out}  ({len(tracks)} tracks)")
     if args.overlay:
-        args.overlay.write_text(json.dumps(_overlay_doc(tracks, label="gt-tracks")))
+        args.overlay.parent.mkdir(parents=True, exist_ok=True)
+        args.overlay.write_text(json.dumps(_overlay_doc(tracks, label=args.out.stem)))
         print(f"overlay written : {args.overlay}")
 
 
