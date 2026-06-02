@@ -43,9 +43,10 @@ def patched_hef(monkeypatch):
     """Patch HefBackend internals so __init__ does no HailoRT work."""
     handle = _FakeHandle()
 
-    def _from_handle(self, handle_obj, decode):
+    def _from_handle(self, handle_obj, decode, class_offset=0):
         self._handle = handle_obj
         self._decode = decode
+        self._class_offset = class_offset
 
     monkeypatch.setattr(HefBackend, "__init__", _from_handle, raising=False)
     backend = HefBackend(handle, _fake_decode)  # type: ignore[call-arg]

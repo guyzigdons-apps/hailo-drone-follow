@@ -18,6 +18,7 @@ Tracks the decomposed plans derived from the master spec:
 | 8   | Drone-follow migration + RPI-GS data collection       | 13, 16      | not started (needs flights / ops) |
 | 9   | Paper-with-code artifacts                             | 15          | not started |
 | (10)| DJI optical-zoom maximum-range bonus shoot            | 17          | bonus / ops |
+| 11  | `2026-06-02-experiment-foundation-phase0.md` (class standardization + BoT-SORT GT tracks + tracking/recovery metrics + all-objects trials) | n/a (experiment) | done (code; on-chip GT-gen + trials smoke pending) |
 
 Update the **Status** column as plans land. When a plan finishes, set its
 status to `done` and bump the next plan to `in flight`.
@@ -26,6 +27,12 @@ status to `done` and bump the next plan to `in flight`.
 
 ### Dynamic-path tuning + unification (next stage — feeds the experiment sweep)
 
+- **Phase 0 (Plan 11) landed (2026-06-02):** the two class conventions are unified —
+  `HefBackend` now takes `class_offset` (set to 1 in the runners) so everything is
+  person=1/vehicle=2. Added the BoT-SORT GT-track builder, the tracking+recovery metric
+  suite, and the all-objects multi-trial runner. On-chip GT generation + the trials
+  smoke run remain to validate end-to-end. Phase A (simple-scheduler sweep) and Phase B
+  (knapsack) plans to follow.
 - **Per-frame GStreamer relaunch DEADLOCKS after ~6 frames** (in-process pipeline
   teardown/relaunch hang). Full dynamic runs currently use the direct `HefBackend`
   (OpenCV crop → HailoRT) to sidestep it. To run the dynamic flow through the
