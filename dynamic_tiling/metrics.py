@@ -52,9 +52,31 @@ def score_trial(target_traj, pred_traj, *, distractors, iou_thr=0.5) -> TrialSco
             if any(_covered(d.get(f), pred_box, iou_thr) for d in distractors
                    if d.get(f) is not None):
                 n_drift += 1
+    # --- recovery: scan the covered/uncovered sequence over GT-present frames ---
+    covered_seq = [_covered(target_traj[f], pred_traj.get(f), iou_thr) for f in frames]
+    loss_events = 0
+    recovered = 0
+    ttr_sum = 0
+    i = 0
+    while i < n:
+        if not covered_seq[i]:
+            loss_events += 1
+            j = i
+            while j < n and not covered_seq[j]:
+                j += 1
+            # j == n  -> never recovered (clip ended lost); else recovered at j
+            if j < n:
+                recovered += 1
+                ttr_sum += (j - i)
+            i = j
+        else:
+            i += 1
     return TrialScore(
         n_frames=n,
         coverage=(n_cov / n) if n else 0.0,
         mean_iou=(iou_sum / n_cov) if n_cov else 0.0,
         drift_rate=(n_drift / n) if n else 0.0,
+        loss_events=loss_events,
+        mean_time_to_recover=(ttr_sum / recovered) if recovered else 0.0,
+        recovery_success_rate=(recovered / loss_events) if loss_events else 0.0,
     )
