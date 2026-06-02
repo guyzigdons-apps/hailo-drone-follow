@@ -7,7 +7,7 @@ same-class boxes whose IoU with it exceeds the threshold.
 from __future__ import annotations
 
 
-def _iou(a, b) -> float:
+def _iomin(a, b) -> float:
     """Intersection over minimum area (IoMin).
 
     Standard IoU underestimates overlap when one tile-fragment is a cropped
@@ -34,7 +34,10 @@ def dedup_frame(dets, *, iou_thr: float = 0.5):
     kept = []
     for d in order:
         b, c = d["bbox"], int(d.get("cls", -1))
-        if any(int(k.get("cls", -1)) == c and _iou(b, k["bbox"]) > iou_thr for k in kept):
+        # IoMin treats a contained same-class box as a duplicate; a genuinely
+        # distinct small object inside a larger one's box can be suppressed here
+        # (recoverable downstream via keep_short flags + human review).
+        if any(int(k.get("cls", -1)) == c and _iomin(b, k["bbox"]) > iou_thr for k in kept):
             continue
         kept.append(d)
     return kept

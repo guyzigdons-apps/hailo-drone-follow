@@ -41,3 +41,13 @@ def test_apply_decisions_merge_and_drop():
     out = apply_decisions([a, b, short], cases, decisions)
     ids = sorted(t.track_id for t in out)
     assert ids == [1]
+
+
+def test_apply_decisions_chained_merges():
+    a = _t(1, 1, {i: (0.40, 0.60, 0.05, 0.05) for i in range(40)})
+    b = _t(2, 1, {i: (0.41, 0.61, 0.05, 0.05) for i in range(40)})
+    c = _t(3, 1, {i: (0.42, 0.62, 0.05, 0.05) for i in range(40)})
+    cases = [ReviewCase(kind="merge", frame=0, track_ids=(1, 2), boxes=[], reason="", score=0.5),
+             ReviewCase(kind="merge", frame=0, track_ids=(2, 3), boxes=[], reason="", score=0.5)]
+    out = apply_decisions([a, b, c], cases, {0: "merge", 1: "merge"})
+    assert [t.track_id for t in out] == [1]   # all three collapse transitively to one

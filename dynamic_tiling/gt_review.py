@@ -86,6 +86,7 @@ def merge_and_flag(tracks, *, auto_iou=0.7, flag_iou=0.3, min_len=30, min_shared
         groups.setdefault(find(tid), []).append(by_id[tid])
     merged = []
     for root, grp in groups.items():
+        grp.sort(key=lambda t: t.track_id)
         acc = grp[0]
         for other in grp[1:]:
             acc = _union(acc, other)
@@ -105,17 +106,42 @@ def apply_decisions(tracks, cases, decisions):
     """decisions: {case_index: verdict}.
       merge      -> 'merge' (apply) | 'keep' (leave separate)
       keep_short -> 'keep' (retain) | 'drop' (remove track)
-    Returns the final track list."""
+    Chained merges (e.g. approve (1,2) and (2,3)) collapse transitively via
+    union-find. Returns the final track list."""
     by_id = {t.track_id: t for t in tracks}
-    drop: set = set()
+    parent = {tid: tid for tid in by_id}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+
+    # 1. union all approved merges (transitive)
     for idx, case in enumerate(cases):
         if case.kind == "merge" and decisions.get(idx) == "merge":
             a_id, b_id = case.track_ids
-            if a_id in by_id and b_id in by_id:
-                merged = _union(by_id[a_id], by_id[b_id])
-                by_id.pop(b_id, None)
-                by_id[merged.track_id] = merged
+            if a_id in parent and b_id in parent:
+                ra, rb = find(a_id), find(b_id)
+                if ra != rb:
+                    parent[max(ra, rb)] = min(ra, rb)
+
+    # 2. collapse each group (min-id wins, deterministic)
+    groups: dict = {}
+    for tid in by_id:
+        groups.setdefault(find(tid), []).append(by_id[tid])
+    merged_map: dict = {}
+    for root, grp in groups.items():
+        grp.sort(key=lambda t: t.track_id)
+        acc = grp[0]
+        for other in grp[1:]:
+            acc = _union(acc, other)
+        merged_map[acc.track_id] = acc
+
+    # 3. drops (map the dropped track's original id to its group root)
+    drop_roots: set = set()
     for idx, case in enumerate(cases):
         if case.kind == "keep_short" and decisions.get(idx) == "drop":
-            drop.add(case.track_ids[0])
-    return [t for tid, t in by_id.items() if tid not in drop]
+            tid = case.track_ids[0]
+            if tid in parent:
+                drop_roots.add(find(tid))
+    return [t for tid, t in merged_map.items() if tid not in drop_roots]
