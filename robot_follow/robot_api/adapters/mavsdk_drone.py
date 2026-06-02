@@ -280,6 +280,11 @@ def add_drone_args(parser) -> None:
                        help="Baud rate for serial connection (default: 57600)")
     group.add_argument("--takeoff-landing", action="store_true",
                        help="Enable auto arm/takeoff/land (default: off — drone must already be airborne)")
+    group.add_argument("--auto-offboard", action="store_true",
+                       help="Activate OFFBOARD mode programmatically at startup (drone.offboard.start()). "
+                            "Default: off — stream zero setpoints and wait for the operator to switch "
+                            "to OFFBOARD via the GCS. Manual handshake is the safer choice for real-drone "
+                            "flights; auto-offboard is appropriate for SITL / bench tests.")
     group.add_argument("--target-altitude", type=float, default=3.0,
                        help="Target altitude in metres (default: 3.0). Also used as takeoff height with --takeoff-landing.")
     group.add_argument("--mission-duration", type=float, default=300.0,
@@ -594,6 +599,13 @@ class MavsdkDroneAdapter:
         # Lazy-initialised in start_session to avoid binding to the
         # wrong event loop when the adapter is constructed in tests.
         self._shutdown_event: Optional[asyncio.Event] = None
+        # OFFBOARD-loss resilience (manual-handshake path only). Tracks
+        # whether PX4 is currently in OFFBOARD; gated on send_command so
+        # we don't fight a pilot who has taken manual control mid-flight.
+        # Auto-offboard path keeps this True throughout (the app drove
+        # the mode, so any mid-flight change is exceptional).
+        self._offboard_active: bool = True
+        self._offboard_monitor_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
         """Open MAVSDK gRPC. Raises ConnectionError on timeout.
@@ -680,7 +692,61 @@ class MavsdkDroneAdapter:
         # Offboard handshake. After 03-07 deleted VelocityCommandAPI,
         # _start_offboard operates on the MAVSDK drone directly (sends
         # zero VelocityBodyYawspeed setpoints inline).
-        await _start_offboard(self._drone, self._shutdown_event)
+        #
+        # The pre-03-07 default was to *wait* for the operator to flip
+        # OFFBOARD on the GCS — safer for real flights, since the pilot
+        # retains the moment of transition. 03-07 collapsed this to
+        # unconditional auto-start. We restore the choice via
+        # --auto-offboard: opt in for SITL / bench tests; default is the
+        # safer wait-for-GCS handshake.
+        if getattr(self._args, "auto_offboard", False):
+            await _start_offboard(self._drone, self._shutdown_event)
+            # Auto-offboard skips resilience: the app drove the mode and
+            # any later change is exceptional (RC override, failsafe).
+        else:
+            await _wait_for_offboard_mode(self._drone, self._shutdown_event)
+            if self._shutdown_event.is_set():
+                return
+            # Spawn the OFFBOARD-loss resilience monitor. send_command
+            # gates on self._offboard_active; the monitor flips it.
+            self._offboard_monitor_task = asyncio.create_task(
+                self._offboard_resilience_loop())
+
+    async def _offboard_resilience_loop(self) -> None:
+        """Watch for OFFBOARD-loss and re-acquire on pilot's mode toggle.
+
+        Restores the pre-7f602d2 default-path behavior: when the pilot
+        switches out of OFFBOARD mid-flight (RC override, mode change),
+        we pause active control (send_command short-circuits to a zero
+        setpoint) until OFFBOARD is re-engaged. On re-acquisition the
+        smoothing filter is reset so the next command starts from a
+        clean state.
+        """
+        assert self._shutdown_event is not None
+        assert self._drone is not None
+        while not self._shutdown_event.is_set():
+            offboard_lost = asyncio.Event()
+            watcher = asyncio.create_task(
+                _watch_offboard_mode(self._drone, self._shutdown_event, offboard_lost))
+            try:
+                done, _pending = await asyncio.wait(
+                    [asyncio.create_task(offboard_lost.wait()),
+                     asyncio.create_task(self._shutdown_event.wait())],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                await _cancel_task(watcher)
+            if self._shutdown_event.is_set():
+                return
+            # OFFBOARD lost; stop driving the wire until pilot flips back.
+            self._offboard_active = False
+            await _wait_for_offboard_mode(self._drone, self._shutdown_event)
+            if self._shutdown_event.is_set():
+                return
+            # Re-acquired. Reset smoothing so we don't carry stale state
+            # into the new control session.
+            self._smoothing = SmoothingState()
+            self._offboard_active = True
 
     async def send_command(
         self,
@@ -690,9 +756,14 @@ class MavsdkDroneAdapter:
         """Per-tick command. Applies altitude P + retreat-from-tilt + smoothing.
 
         Q6 lock: early-returns when ``safety_ctx.target_lost`` is True.
+        OFFBOARD-loss: early-returns when self._offboard_active is False
+        (pilot has manual control); keeps the wire idle until the pilot
+        re-engages OFFBOARD.
         """
         if safety_ctx.target_lost:
             return
+        if not self._offboard_active:
+            return  # pilot has manual control; do not fight them
         if self._drone is None:
             return  # connect failed; silently skip
         down = _apply_altitude_p(cmd.down_m_s, self._altitude_cache, self._config)
@@ -725,6 +796,8 @@ class MavsdkDroneAdapter:
 
     async def on_target_lost(self, last_detection: Optional[Detection]) -> None:
         """Drone's lost-target behavior: yaw-spin in last bbox direction."""
+        if not self._offboard_active:
+            return  # pilot has manual control; do not fight them
         yawspeed_deg_s = _compute_search_yawspeed(last_detection, self._config)
         if self._drone is None:
             return
@@ -736,6 +809,9 @@ class MavsdkDroneAdapter:
         """Idempotent. Cancel telemetry, land if armed, exit context."""
         if self._shutdown_event is not None:
             self._shutdown_event.set()
+        if self._offboard_monitor_task is not None:
+            await _cancel_task(self._offboard_monitor_task)
+            self._offboard_monitor_task = None
         for task in self._telemetry_tasks:
             await _cancel_task(task)
         self._telemetry_tasks.clear()
