@@ -38,6 +38,10 @@ def build_raw_tracks(doc, *, tracker, classes=TRACKED_CLASSES):
 
     `tracker.update(dets_xyxy_score_cls, frame)` must return rows
     [x1,y1,x2,y2,track_id,conf,cls,...] (the boxmot tracker contract).
+
+    Note: ``frame`` here is the raw frame *dict*, not a BGR image — this
+    function is for injection-testing with trackers that ignore the image
+    argument. For real BoT-SORT (CMC + ReID) use ``build_raw_tracks_from_video``.
     """
     classes = tuple(classes)
     out: dict = {}  # (cls, track_id) -> RawTrack
@@ -49,7 +53,8 @@ def build_raw_tracks(doc, *, tracker, classes=TRACKED_CLASSES):
         if res is None or len(res) == 0:
             continue
         for row in np.asarray(res, dtype=float):
-            x1, y1, x2, y2, tid, _conf, cls = row[0], row[1], row[2], row[3], int(row[4]), row[5], int(row[6])
+            x1, y1, x2, y2 = row[0], row[1], row[2], row[3]
+            tid, cls = int(row[4]), int(row[6])
             key = (cls, tid)
             t = out.get(key)
             if t is None:
@@ -61,14 +66,16 @@ def build_raw_tracks(doc, *, tracker, classes=TRACKED_CLASSES):
 
 def make_botsort(reid_weights="osnet_x0_25_msmt17.pt", device="cuda:0", half=True):
     """Construct a boxmot BoT-SORT tracker (CMC + ReID). Falls back to OC-SORT
-    if BoT-SORT import/instantiation fails (documented spec fallback)."""
+    ONLY if boxmot's BoT-SORT cannot be imported (e.g. not installed). A bad
+    reid_weights path or device error is NOT swallowed — it raises, so a
+    misconfiguration can't silently degrade GT-track quality."""
     from pathlib import Path
     try:
         from boxmot import BotSort
-        return BotSort(reid_weights=Path(reid_weights), device=device, half=half)
-    except Exception:  # pragma: no cover - environment-dependent
+    except ImportError:  # pragma: no cover - environment-dependent
         from boxmot import OcSort
         return OcSort()
+    return BotSort(reid_weights=Path(reid_weights), device=device, half=half)
 
 
 def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort,
@@ -85,7 +92,7 @@ def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort
     out: dict = {}
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise SystemExit(f"cannot open video: {video_path}")
+        raise FileNotFoundError(f"cannot open video: {video_path}")
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fi = -1
@@ -113,8 +120,10 @@ def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort
                 x1, y1, x2, y2 = row[0], row[1], row[2], row[3]
                 tid, cls = int(row[4]), int(row[6])
                 key = (cls, tid)
-                t = out.get(key) or RawTrack(cls=cls, track_id=tid)
-                out[key] = t
+                t = out.get(key)
+                if t is None:
+                    t = RawTrack(cls=cls, track_id=tid)
+                    out[key] = t
                 t.frames[fi] = (x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h)
     finally:
         cap.release()

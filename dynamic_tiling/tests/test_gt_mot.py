@@ -1,3 +1,5 @@
+import numpy as np
+
 from dynamic_tiling.gt_mot import build_raw_tracks
 
 
@@ -6,7 +8,6 @@ class FakeTracker:
     def update(self, dets_xyxy_score_cls, frame):
         # dets_xyxy_score_cls: (N,6) [x1,y1,x2,y2,score,cls]; return (N,8)
         # [x1,y1,x2,y2,track_id,conf,cls,idx]
-        import numpy as np
         n = dets_xyxy_score_cls.shape[0]
         out = np.zeros((n, 8), dtype=float)
         out[:, 0:4] = dets_xyxy_score_cls[:, 0:4]
