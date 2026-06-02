@@ -23,6 +23,9 @@ class HefBackend(InferenceBackend):
        lazy-imports the HailoRT-touching ``probe_phantom_hef`` module.
     2. Test injection: ``HefBackend(handle, decode)`` — for unit tests that
        want to assert on the batched infer loop without touching HailoRT.
+
+    Pass ``class_offset=N`` to shift every decoded class id by N (default 0;
+    use 1 to map the 0-indexed NMS decode to the person=1 label convention).
     """
 
     def __init__(self, *args, **kwargs):
@@ -44,15 +47,11 @@ class HefBackend(InferenceBackend):
         self._decode = decode_nms_output
 
     def _infer_one(self, frame: np.ndarray, crop: CropRect) -> list:
-        if frame is None:
-            # Test-injection mode: the injected handle ignores its argument.
-            raw = self._handle.infer(None)
-        else:
-            import cv2  # noqa: WPS433 — lazy so headless tests don't import cv2
-            sub = frame[crop.y:crop.y + crop.h, crop.x:crop.x + crop.w]
-            resized = cv2.resize(sub, (MODEL_W, MODEL_H), interpolation=cv2.INTER_LINEAR)
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            raw = self._handle.infer(rgb)
+        import cv2  # noqa: WPS433 — lazy so headless tests don't import cv2
+        sub = frame[crop.y:crop.y + crop.h, crop.x:crop.x + crop.w]
+        resized = cv2.resize(sub, (MODEL_W, MODEL_H), interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        raw = self._handle.infer(rgb)
         dets = self._decode(raw)
         if self._class_offset:
             dets = [Det(cls=d.cls + self._class_offset, score=d.score,

@@ -42,6 +42,7 @@ def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
         dets = [d for d in dets if d.cls in TRACKED_CLASSES]
         res.frame_dets[frame_idx] = dets
 
+        # person_cls must be a member of TRACKED_CLASSES; else this list is silently empty.
         persons = [d for d in dets if d.cls == person_cls]
         gt_box = gt_traj.get(frame_idx)
         # `lock.track_id` never clears in the replay harness (single-target,
