@@ -51,3 +51,13 @@ def test_apply_decisions_chained_merges():
              ReviewCase(kind="merge", frame=0, track_ids=(2, 3), boxes=[], reason="", score=0.5)]
     out = apply_decisions([a, b, c], cases, {0: "merge", 1: "merge"})
     assert [t.track_id for t in out] == [1]   # all three collapse transitively to one
+
+
+def test_flagged_merge_case_carries_both_boxes():
+    a = _t(1, 1, {i: (0.40, 0.60, 0.05, 0.05) for i in range(40)})
+    b = _t(2, 1, {i: (0.41, 0.61, 0.05, 0.05) for i in range(40)})
+    _, cases = merge_and_flag([a, b], auto_iou=0.7, flag_iou=0.3, min_len=30)
+    merge_cases = [c for c in cases if c.kind == "merge"]
+    assert merge_cases and len(merge_cases[0].boxes) == 2     # both candidate boxes present
+    ids_in_boxes = {bid for (_cls, bid, _bbox) in merge_cases[0].boxes}
+    assert ids_in_boxes == {1, 2}

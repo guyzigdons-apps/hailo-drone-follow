@@ -57,17 +57,13 @@ def _read_frames(video, frame_idxs):
 def _build(args):
     from .gt_mot import build_raw_tracks_from_video, make_botsort
     from .gt_render_review import render_queue
-    doc = json.loads(Path(args.dense).read_text())
+    doc = json.loads(args.dense.read_text())
     raw = build_raw_tracks_from_video(doc, str(args.video),
                                       tracker_factory=make_botsort,
                                       dedup_iou=args.dedup_iou)
     clean = clean_tracks(raw, max_gap=args.max_gap, min_len=1)  # keep short; flag later
     merged, cases = merge_and_flag(clean, auto_iou=args.auto_iou,
                                    flag_iou=args.flag_iou, min_len=args.min_len)
-    by_id = {t.track_id: t for t in merged}
-    for c in cases:
-        c.boxes = [(by_id[i].cls, i, by_id[i].frames[c.frame])
-                   for i in c.track_ids if i in by_id and c.frame in by_id[i].frames]
     out = Path(args.outdir); out.mkdir(parents=True, exist_ok=True)
     (out / "gt_tracks.json").write_text(json.dumps(tracks_to_doc(merged, clip=Path(args.video).stem)))
     (out / "review_queue.json").write_text(json.dumps(cases_to_doc(cases), indent=2))
