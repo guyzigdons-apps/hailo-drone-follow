@@ -1,9 +1,9 @@
 # Tile-Scheduler Experiment Design
 
 > Spec for the experiment sweep that finds the best-performing dynamic
-> tile-scheduling algorithm for drone single-target follow on a fixed-throughput
-> Hailo NPU, and tests whether a budget-aware "knapsack" tile selector beats the
-> tuned simple scheduler.
+> tile-scheduling algorithm for drone single-target **follow + recovery** on a
+> fixed-throughput Hailo NPU, and tests whether a budget-aware "knapsack" tile
+> selector beats the tuned simple scheduler.
 
 **Date:** 2026-06-02
 **Branch:** `tiling-benchmark`
@@ -14,40 +14,48 @@
 ## 1. Goal
 
 Find the **simple best-performing** dynamic tile-scheduling algorithm for
-**single-target follow** at a fixed inference budget, establish its recall-vs-budget
-frontier against the static-grid baseline, then test a **budget-aware knapsack tile
-selector** as a challenger to see if principled selection beats the tuned heuristic.
+**single-target follow** at a fixed inference budget — measured not just by
+detection recall but by **tracking quality and recovery** — establish its
+performance-vs-budget frontier against the static-grid baseline, then test a
+**budget-aware knapsack tile selector** as a challenger to see if principled
+selection beats the tuned heuristic.
 
 The deliverable is a paper-with-code result: the tuned simple algorithm, the
-knapsack comparison, and clean recall-vs-budget curves on real drone footage.
+knapsack comparison, and clean tracking/recovery-vs-budget curves on real drone
+footage, averaged over **every object in each clip** (data augmentation).
 
 ## 2. Background & framing
 
 A Hailo NPU has **fixed throughput**: at a target FPS you get a fixed number *N* of
-tile inferences per frame. Tiling therefore becomes a **budget-allocation** problem
-— how to split *N* between *discovery* (find/keep targets), *track-ROI* (resolve the
-target at high pixel density), and *recovery* (re-find after loss). Static slicing
-(SAHI/ASAHI) has no budget and spends uniformly. The corrected Night-2 result showed
-that at equal compute, dynamic ≈ static for whole-frame "detect everything" (a
-uniform grid is near-optimal there) but dynamic **dominates for single-target
-follow**. This experiment quantifies that win and tries to push it further.
+tile inferences per frame. Tiling becomes a **budget-allocation** problem — how to
+split *N* between *discovery* (find/keep targets), *track-ROI* (resolve the target at
+high pixel density), and *recovery* (re-find after loss). Static slicing (SAHI/ASAHI)
+has no budget and spends uniformly. The corrected Night-2 result showed that at equal
+compute, dynamic ≈ static for whole-frame "detect everything" (a uniform grid is
+near-optimal there) but dynamic **dominates for single-target follow**. This
+experiment quantifies that win — emphasising the *tracking + recovery* behaviour where
+budget reallocation matters most — and tries to push it further.
 
 ## 3. Scope
 
 **In scope (this round):**
-- Single-target follow (target = a **person**).
+- Single-target follow + recovery (target = a **person**).
+- **All objects as trials:** every clean GT object trajectory becomes one
+  single-target follow trial; the others act as realistic distractors. Metrics are
+  averaged across all trials. (Augmentation: one clip → K trials.)
 - Person + vehicle as the only detected/tracked classes.
-- Offline replay over recorded clips with ground truth — **no telemetry inputs**.
-- Phase 0 bench standardization, Phase A simple-scheduler tuning, Phase B knapsack.
+- Offline replay over recorded clips with **heavy-MOT pseudo-GT** — no telemetry.
+- Phase 0 bench standardization + GT-track builder, Phase A simple-scheduler tuning,
+  Phase B knapsack.
 
 **Out of scope (deferred, must not be repainted-into-a-corner):**
-- **Multi-target follow** — design abstractions must treat single-target as the K=1
-  case so multi-target is a later extension, not a rewrite.
+- **Multi-target follow** (following >1 target at once) — design abstractions treat
+  single-target as the K=1 case so multi-target is a later extension, not a rewrite.
 - **AltitudeZoom modifier** — implemented + unit-tested, but the benchmark clips carry
-  no aligned AGL telemetry to drive it. Excluded from the matrix; stays in code as
-  future-work (re-enable when a clip has DJI-SRT / PX4-ulg altitude aligned).
-- **ReID re-acquisition** — a stronger ReID network exists but is not relevant to a
-  detector-only budget sweep. Deferred.
+  no aligned AGL telemetry. Excluded; stays in code as future-work.
+- **ReID re-acquisition in the algorithm under test** — deferred. (ReID *may* be used
+  offline to strengthen GT-track association; see §7 — that is GT generation, not the
+  algorithm being measured.)
 - **CMC (camera-motion compensation)** — future work.
 
 ## 4. Standing project rules
@@ -57,83 +65,124 @@ follow**. This experiment quantifies that win and tries to push it further.
    `{person, vehicle}`; they never enter GT, metrics, the sweep, or any report.
    (`hailo_tiling/classes.py`: `TRACKED_CLASSES = (PERSON, VEHICLE)`,
    `TARGET_CLASS = PERSON`.)
-2. **One class convention.** Standardize on **person = 1, vehicle = 2** end to end
-   (the label-file convention). `HefBackend`'s 0-indexed decode is bridged with a
-   `+1` offset so every artifact uses the same ids.
+2. **One class convention.** Standardize on **person = 1, vehicle = 2** end to end.
+   `HefBackend`'s 0-indexed decode is bridged with a `+1` offset so every artifact
+   uses the same ids.
 3. **One inference path.** All runs (static baseline + dynamic) go through
    **`HefBackend`** (OpenCV crop → HailoRT). The GStreamer cropper path deadlocks on
    per-frame relaunch and is not used for full-clip runs in this round.
-4. **Single target = largest person at first appearance, identity-locked.** See §6.
+4. **Selection is GT-bbox-seeded, ByteTracker-id-locked** (never GT-id). See §6.
 
-## 5. Definitions
+## 5. Definitions, trials, and metrics
 
-- **Budget** — mean **tiles per frame** (the per-frame inference count *N*). The
-  primary independent variable. Reported as a swept curve, never a single point.
-- **Primary metric** — **single-target follow recall**: fraction of clip frames in
-  which the locked target (the GT trajectory bbox) is detected by the aggregated
-  output (IoU ≥ 0.5 vs the GT target bbox).
-- **Secondary metric** — target-bbox localization IoU (mean over detected frames).
-- **Comparison rule** — algorithms are always compared at **equal mean tiles/frame**.
-  Plot recall vs budget; the area/curve is the result.
-- **Clips** — `DJI_20260528155239_0026` at emulated **fov50 / fov60 / fov70**
-  (existing GT). Report per-fov so we see behaviour as the target shrinks.
+### 5.1 Budget
+Mean **tiles per frame** (the per-frame inference count *N*) — the primary
+independent variable. Always reported as a swept curve, never a single point.
 
-## 6. Single-target selection (precise)
+### 5.2 Trials
+For each clip × fov, and for **each clean GT object trajectory** *G* (§7), run one
+single-target follow trial seeded on *G*. The headline numbers are **means over all
+trials** per fov. A trial's frame range is the frames where *G* is present in GT.
 
-1. **GT trajectory build** (`dynamic_tiling/gt_track.py::build_target_trajectory`,
-   `anchor="largest"`, `label="person"`): on the first GT frame containing a person,
-   pick the **largest-area** person box; greedily associate it forward (IoU +
-   centre-distance) into one trajectory `{frame_idx: (x,y,w,h)}` for the whole clip.
-2. **Runtime lock** (`TargetLock.lock_from_gt`): on the first frame with detections,
-   match the GT box by IoU to a ByteTracker track and pin a **stable lock identity**
-   that never reassigns. Follow that identity; on loss, re-acquire by IoU vs
-   last-known, else fall to the recovery grid.
-3. **Rationale:** mirrors the app's AUTO mode (follow the largest/nearest person);
-   freezing identity via GT makes recall reproducible.
+### 5.3 Metric suite (all reported vs budget, averaged over trials, per fov)
+Detection recall alone is insufficient — the contribution is *tracking + recovery*.
+
+1. **Follow coverage (primary):** fraction of *G*-present frames where the followed
+   bbox correctly localizes *G* (IoU ≥ 0.5 vs *G*'s GT bbox at that frame).
+2. **Localization accuracy:** mean IoU over covered frames (and success-AUC over IoU
+   thresholds 0.3–0.7 as a secondary robustness number).
+3. **Drift / mis-lock rate:** fraction of *G*-present frames where the followed bbox
+   instead covers a **different** GT object (IoU ≥ 0.5 with another trajectory) — i.e.
+   the lock jumped to a distractor. Requires all GT trajectories at scoring time.
+4. **Recovery:** a *loss* is a maximal run of frames where the followed bbox fails to
+   cover *G* while *G* is present. Report:
+   - **loss-event count** per trial,
+   - **mean time-to-recover** (frames from loss onset until correct re-coverage),
+   - **recovery success rate** (fraction of losses that re-cover the *correct* object,
+     vs ending on a wrong object = mis-recovery, vs never recovering before *G* exits).
+
+### 5.4 Clips
+`DJI_20260528155239_0026` at emulated **fov50 / fov60 / fov70** (existing). With
+all-objects trials this yields K×3 trials per clip; a second GT'd clip can be added if
+trial count proves thin (flagged, not blocking).
+
+## 6. Per-trial target selection (precise)
+
+For a trial seeded on GT trajectory *G*:
+
+1. **Seed by GT bbox, not GT id.** While the lock is unset, the runner passes *G*'s GT
+   bbox **every frame**. `TargetLock.lock_from_gt` (`target_lock.py:70`) /
+   `MultiTargetLock` step 3 (`:192`) IoU-match that bbox against the **live ByteTracker
+   tracks** and pin the matching **ByteTracker** `track_id` (composite `(cls,
+   track_id)` for multi) as the stable lock identity (IoU threshold 0.3). This
+   naturally handles detection delay at low budget — seeding waits until the target is
+   actually tracked.
+2. **Follow by ByteTracker id thereafter,** with the existing silent IoU
+   re-acquisition (`:99`) when ByteTracker drops/renumbers the track. The public
+   `track_id` (stable identity) never changes.
+3. **Score by bbox, not id.** Each frame, compare the followed bbox to *G*'s GT bbox by
+   IoU (§5.3). GT-id ≠ ByteTracker-id is therefore a non-issue — ids are never compared.
 
 **Forward-compat (multi-target later):** `MultiTargetLock` already keys targets by
-`(cls, track_id)` and GT-seeds a `selected_key`. Single-target is the K=1 case of the
-same machinery; scoring is written to average per-target recall so K>1 drops in
-without a rewrite.
+`(cls, track_id)` and GT-seeds a `selected_key`. Single-target is the K=1 case;
+scoring averages per-target so K>1 drops in without a rewrite.
 
-## 7. Phase 0 — Bench standardization (prereq, no science)
+## 7. Phase 0 — Bench standardization + GT-track builder (prereq)
 
-Make the harness produce comparable numbers before any tuning counts.
+Make the harness produce comparable numbers and good GT before any tuning counts.
 
+### 7.1 Standardization
 - Route static-baseline and dynamic runs through **`HefBackend`** only.
-- Apply the **person=1 / vehicle=2** convention everywhere (add the `+1` offset to
-  `HefBackend` decode; update `run()`/`run_multi()` defaults `person_cls`/
-  `target_classes`, and the replay label tuple, accordingly).
+- Apply **person=1 / vehicle=2** everywhere (add the `+1` offset to `HefBackend`
+  decode; update `run()`/`run_multi()` defaults and the replay label tuple).
 - Confirm GT prep and all detection filters keep only `{person, vehicle}`.
-- Lock the metric + protocol of §5 into the scoring code so every run reports
-  recall-vs-budget identically.
-- **Exit criterion:** a static-grid sweep and a dynamic run on the same clip produce
-  recall numbers on the same scale, same class ids, same metric — reproducible from a
-  single CLI.
+- Lock the §5 metric suite + protocol into the scoring code.
+
+### 7.2 Heavy-MOT GT-track builder (new)
+We need **good tracking GT**, including through occlusions/crossings, because tracking
+and recovery are now metrics. The builder:
+- Runs a **heavy offline multi-object tracker over the dense 12×9 detections** —
+  Kalman + global/Hungarian association (OC-SORT / BoT-SORT-style), with **short-gap
+  interpolation** to bridge occlusions. **Must be independent of the runtime
+  ByteTracker** (which is the component under test — using it would be circular).
+- *Optional* ReID-assisted association (the stronger ReID net) to reduce id-switches at
+  crossings — permitted because this is offline GT generation, not the algorithm under
+  test.
+- Emits one trajectory `{frame_idx: (x,y,w,h)}` per object, with a **quality filter**
+  (min length, no unresolved overlap/crossing ambiguity); only clean trajectories
+  become trials.
+- **Validation:** spot-check the GT tracks in the overlay visualizer; pseudo-GT
+  quality is a documented limitation.
+- Replaces the largest-only `build_target_trajectory` as the trial source (largest
+  becomes one trial among K).
+
+### 7.3 Exit criterion
+A static-grid sweep and a dynamic run on the same clip produce the §5 metrics on the
+same scale, same class ids, same trials, reproducible from a single CLI; GT tracks pass
+visual spot-check.
 
 ## 8. Phase A — The simple algorithm, tuned
 
 **Definition.** "Simple algorithm" = the **current dynamic scheduler unchanged**:
-discovery grid on a fixed cadence + one track-ROI for the locked target + recovery
-grid on loss, with the fixed **ROI-first** budget-trim drop order. No value function,
-no new modes.
+discovery grid on a fixed cadence + one track-ROI for the locked target + recovery grid
+on loss, with the fixed **ROI-first** budget-trim drop order. No value function, no new
+modes.
 
-**Parameter sweep** (find best single-target follow recall at fixed budget):
+**Parameter sweep** (maximise the §5 metric suite at fixed budget):
 - `discovery_period` (cadence), `discovery_grid` (density),
-- **discovery overlap fraction** — *new knob to add* (today `scheduler._grid` lays
-  tiles edge-to-edge; static grids use 0.25, so boundary objects fragment),
+- **discovery overlap fraction** — *new knob to add* (`scheduler._grid` lays tiles
+  edge-to-edge today; static grids use 0.25, so boundary objects fragment),
 - `roi_margin_frac`, `max_zoom`, `target_model_h`,
 - `recovery_grid`, `recovery_span`.
 
-**Output:** the best simple config + a **recall-vs-budget curve** per fov, plotted
-against the **static-grid frontier** (existing baseline). This curve is what Phase B
-must beat.
+**Output:** best simple config + **metric-vs-budget curves** per fov, plotted against
+the **static-grid frontier**. These curves are what Phase B must beat.
 
-**Optional stretch within Phase A** (decided *after* seeing the plain sweep; both keep
-the algorithm "simple" — still fixed-priority, just better ROI/memory):
-- **Predictive ROI** — place the ROI at the target's velocity-predicted position
-  rather than last-known, to cut recovery events.
-- **Skipped-tile carry-forward** — reuse last detections for unscanned tiles with a
+**Optional stretch within Phase A** (decided *after* the plain sweep; both keep the
+algorithm "simple" — still fixed-priority):
+- **Predictive ROI** — place the ROI at the velocity-predicted position (reduces loss
+  events; directly targets the recovery metrics).
+- **Skipped-tile carry-forward** — reuse last detections for unscanned tiles with
   staleness decay (`aggregator/memory.py` is half-built).
 
 ## 9. Phase B — Knapsack challenger
@@ -152,31 +201,37 @@ value(tile) ≈ P(tile contains a target) × resolution_gain(tile) × freshness(
 - `freshness` — value of re-scanning grows with time-since-last-scan (subsumes cadence).
 
 **Why "knapsack" and not "top-K":** with unit tile costs it degenerates to greedy
-top-K. It earns the name when **costs are non-uniform** — which is our case:
-batched NPU cost, IoU-**merged** ROIs (one tile, two targets' value), multi-resolution
-tiles (wider = costlier, more coverage). The non-uniform cost model must ship with it.
+top-K. It earns the name when **costs are non-uniform** — batched NPU cost, IoU-**merged**
+ROIs (one tile, two targets' value), multi-resolution tiles (wider = costlier, more
+coverage). The non-uniform cost model must ship with it.
 
-**Comparison.** Tune the value function, then compare to Phase A's best **at equal
-mean tiles/frame**, per fov. Single question answered: *does principled selection beat
-the tuned heuristic, and by how much?*
+**Comparison.** Tune the value function, then compare to Phase A's best **at equal mean
+tiles/frame**, per fov, on the full §5 metric suite. Single question answered: *does
+principled selection beat the tuned heuristic, and by how much — especially on tracking
+and recovery?*
 
 ## 10. Deliverables
 
-- Phase 0: one reproducible CLI producing comparable static + dynamic recall numbers.
-- Phase A: tuned simple-scheduler config + recall-vs-budget curves (per fov) vs the
+- Phase 0: one reproducible CLI producing comparable static + dynamic §5 metrics; the
+  heavy-MOT GT-track builder + spot-checked GT trajectories.
+- Phase A: tuned simple-scheduler config + metric-vs-budget curves (per fov) vs the
   static frontier; the new discovery-overlap knob.
-- Phase B: knapsack selector + cost model; head-to-head curves vs Phase A.
+- Phase B: knapsack selector + non-uniform cost model; head-to-head curves vs Phase A.
 - A results section in `docs/paper/technical-report.md` updating §5/§6.
 
 ## 11. Risks & open questions
 
+- **Pseudo-GT.** "GT" is dense-detector output associated by an offline tracker — not
+  human labels. Tracking/recovery numbers are relative to pseudo-GT; documented, and
+  spot-checked in the visualizer.
+- **GT-track association errors at crossings** can create unfair trials — the quality
+  filter (and optional ReID-assist) mitigate; rejected trajectories are dropped, not
+  scored.
 - **Knapsack reduces to greedy** if costs stay unit and the value function is crude —
-  the non-uniform cost model (§9) is what makes it meaningful. If the cost model
-  proves impractical offline, Phase B's claim weakens to "value-ranked greedy."
-- **Only one base clip (0026).** Generalization is thin; if time allows, add a second
-  clip with GT. Flagged, not blocking.
-- **`HefBackend` vs GStreamer-golden divergence** — using HefBackend throughout keeps
-  runs self-consistent, but production uses the GStreamer cropper; numbers are
-  internally comparable, not production-identical. Documented as a limitation.
-- **Resolution_gain estimation** needs a detector recall-vs-apparent-size curve;
-  deriving it cheaply offline is itself a small sub-task.
+  the non-uniform cost model (§9) is what makes it meaningful.
+- **`HefBackend` vs GStreamer-golden divergence** — HefBackend throughout keeps runs
+  self-consistent but not production-identical. Documented as a limitation.
+- **Compute.** K trials × 3 fov × B budgets × configs is many runs; the cache/replay
+  layer keeps it tractable, but the sweep grid must be sized deliberately.
+- **`resolution_gain` estimation** needs a detector recall-vs-apparent-size curve;
+  deriving it cheaply offline is a small sub-task.
