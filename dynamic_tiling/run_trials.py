@@ -32,7 +32,7 @@ def _frames_factory(video: Path, max_frames: int):
         try:
             while True:
                 ok, fr = cap.read()
-                if not ok or (max_frames and n >= max_frames):
+                if not ok or (max_frames > 0 and n >= max_frames):  # max_frames<=0 means no limit
                     break
                 yield fr
                 n += 1
