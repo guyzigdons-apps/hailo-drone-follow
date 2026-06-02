@@ -37,7 +37,11 @@ def build_raw_tracks(doc, *, tracker, classes=TRACKED_CLASSES):
     """Feed dense detections frame-by-frame to `tracker`; group outputs by id.
 
     `tracker.update(dets_xyxy_score_cls, frame)` must return rows
-    [x1,y1,x2,y2,track_id,conf,cls,...] (the boxmot tracker contract).
+    [x1,y1,x2,y2,track_id,conf,cls,...] (the legacy numpy-row contract).
+    This is the injection path used by unit tests (``FakeTracker``); it expects
+    each row to be indexable as ``row[4]`` = track_id, ``row[6]`` = cls.
+    The REAL boxmot-19 path (which parses ``TrackResults`` with ``.xyxy``/``.id``/
+    ``.cls``) is ``build_raw_tracks_from_video``.
 
     Note: ``frame`` here is the raw frame *dict*, not a BGR image — this
     function is for injection-testing with trackers that ignore the image
@@ -64,18 +68,23 @@ def build_raw_tracks(doc, *, tracker, classes=TRACKED_CLASSES):
     return list(out.values())
 
 
-def make_botsort(reid_weights="osnet_x0_25_msmt17.pt", device="cuda:0", half=True):
-    """Construct a boxmot BoT-SORT tracker (CMC + ReID). Falls back to OC-SORT
-    ONLY if boxmot's BoT-SORT cannot be imported (e.g. not installed). A bad
-    reid_weights path or device error is NOT swallowed — it raises, so a
-    misconfiguration can't silently degrade GT-track quality."""
-    from pathlib import Path
+def make_botsort(*, with_reid=False, cmc_method="ecc", frame_rate=30, track_buffer=90):
+    """Construct a boxmot 19 BoT-SORT tracker for offline GT building.
+
+    Camera-motion compensation (``cmc_method='ecc'``) is the dominant association
+    fix for moving-camera drone footage and runs with no extra weights. ReID
+    appearance is OFF by default: boxmot 19 requires a separately-constructed
+    ``reid_model`` object, so it is deferred (CMC + motion is a strong GT builder;
+    enable ReID later if crossings prove problematic). Falls back to OC-SORT only
+    if BoT-SORT cannot be imported.
+    """
     try:
-        from boxmot import BotSort
+        from boxmot.trackers import BotSort
     except ImportError:  # pragma: no cover - environment-dependent
-        from boxmot import OcSort
+        from boxmot.trackers import OcSort
         return OcSort()
-    return BotSort(reid_weights=Path(reid_weights), device=device, half=half)
+    return BotSort(with_reid=with_reid, cmc_method=cmc_method,
+                   frame_rate=frame_rate, track_buffer=track_buffer)
 
 
 def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort,
@@ -116,9 +125,13 @@ def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort
             res = tracker.update(px, frame)
             if res is None or len(res) == 0:
                 continue
-            for row in np.asarray(res, dtype=float):
-                x1, y1, x2, y2 = row[0], row[1], row[2], row[3]
-                tid, cls = int(row[4]), int(row[6])
+            xyxy = res.xyxy
+            ids = res.id
+            clss = res.cls
+            for k in range(len(xyxy)):
+                x1, y1, x2, y2 = (float(xyxy[k][0]), float(xyxy[k][1]),
+                                  float(xyxy[k][2]), float(xyxy[k][3]))
+                tid, cls = int(ids[k]), int(clss[k])
                 key = (cls, tid)
                 t = out.get(key)
                 if t is None:
