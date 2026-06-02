@@ -141,13 +141,19 @@ Make the harness produce comparable numbers and good GT before any tuning counts
 ### 7.2 Heavy-MOT GT-track builder (new)
 We need **good tracking GT**, including through occlusions/crossings, because tracking
 and recovery are now metrics. The builder:
-- Runs a **heavy offline multi-object tracker over the dense 12×9 detections** —
-  Kalman + global/Hungarian association (OC-SORT / BoT-SORT-style), with **short-gap
-  interpolation** to bridge occlusions. **Must be independent of the runtime
-  ByteTracker** (which is the component under test — using it would be circular).
-- *Optional* ReID-assisted association (the stronger ReID net) to reduce id-switches at
-  crossings — permitted because this is offline GT generation, not the algorithm under
-  test.
+- Runs a **heavy offline multi-object tracker over the dense 12×9 detections**:
+  **BoT-SORT** — chosen because the drone camera moves, and BoT-SORT's built-in
+  **camera-motion compensation (CMC)** directly addresses the dominant
+  moving-camera association failure, while its native **ReID appearance** support lets
+  us feed the existing strong ReID net to fix id-switches at crossings. Add
+  **short-gap interpolation** to bridge occlusions. **Must be independent of the
+  runtime ByteTracker** (the component under test — using it would be circular).
+  BoT-SORT satisfies this (different tracker, with CMC + appearance).
+- **Fallback** if BoT-SORT integration proves too costly: **OC-SORT + ReID-assisted
+  association + gap interpolation** (motion-only, lightweight). The plan's first GT
+  task is a BoT-SORT integration spike; fall back only if it stalls.
+- ReID here is **offline GT generation, not the algorithm under test** — permitted and
+  not circular.
 - Emits one trajectory `{frame_idx: (x,y,w,h)}` per object, with a **quality filter**
   (min length, no unresolved overlap/crossing ambiguity); only clean trajectories
   become trials.
