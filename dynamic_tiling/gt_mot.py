@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from hailo_tiling.classes import TRACKED_CLASSES
+from .gt_dedup import dedup_frame
 
 
 @dataclass
@@ -88,7 +89,7 @@ def make_botsort(*, with_reid=False, cmc_method="ecc", frame_rate=30, track_buff
 
 
 def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort,
-                                classes=TRACKED_CLASSES):
+                                classes=TRACKED_CLASSES, dedup_iou: float | None = None):
     """Pixel-coords BoT-SORT pass over the video frames + dense dets.
 
     boxmot needs the BGR frame (CMC + ReID) and pixel-coord dets. Detections
@@ -114,7 +115,9 @@ def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort
             fr = by_frame.get(fi)
             rows = []
             if fr is not None:
-                for d in fr.get("detections", []):
+                raw_dets = fr.get("detections", [])
+                dets_in = dedup_frame(raw_dets, iou_thr=dedup_iou) if dedup_iou is not None else raw_dets
+                for d in dets_in:
                     c = int(d.get("cls", -1))
                     if c not in classes:
                         continue
