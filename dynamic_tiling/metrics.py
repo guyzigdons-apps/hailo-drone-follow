@@ -23,7 +23,6 @@ class TrialScore:
     coverage: float          # fraction of GT-present frames the target is correctly followed
     mean_iou: float          # mean IoU over covered frames
     drift_rate: float        # fraction of GT-present frames the pred matched a DISTRACTOR
-    # recovery fields filled by Task 6:
     loss_events: int = 0
     mean_time_to_recover: float = 0.0
     recovery_success_rate: float = 0.0
@@ -41,19 +40,23 @@ def score_trial(target_traj, pred_traj, *, distractors, iou_thr=0.5) -> TrialSco
     n_cov = 0
     n_drift = 0
     iou_sum = 0.0
+    covered_flags = []
     for f in frames:
         gt_box = target_traj[f]
         pred_box = pred_traj.get(f)
-        if _covered(gt_box, pred_box, iou_thr):
+        iou_val = _iou(gt_box, pred_box) if pred_box is not None else 0.0
+        hit = pred_box is not None and iou_val >= iou_thr
+        covered_flags.append(hit)
+        if hit:
             n_cov += 1
-            iou_sum += _iou(gt_box, pred_box)
+            iou_sum += iou_val
         elif pred_box is not None:
             # not on target — did we lock onto a different GT object?
             if any(_covered(d.get(f), pred_box, iou_thr) for d in distractors
                    if d.get(f) is not None):
                 n_drift += 1
     # --- recovery: scan the covered/uncovered sequence over GT-present frames ---
-    covered_seq = [_covered(target_traj[f], pred_traj.get(f), iou_thr) for f in frames]
+    covered_seq = covered_flags
     loss_events = 0
     recovered = 0
     ttr_sum = 0
