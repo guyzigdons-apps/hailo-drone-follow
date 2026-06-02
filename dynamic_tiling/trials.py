@@ -32,7 +32,8 @@ def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
     discovery_period = max(1, int(round(fps / discovery_fps)))
     per_trial = []
     tiles_acc = 0.0
-    for target in gt_tracks:
+    trial_targets = [t for t in gt_tracks if t.cls == PERSON]
+    for target in trial_targets:
         target_traj = target.frames
         distractors = [t.frames for t in gt_tracks if t is not target]
         _disc = {"discovery_grid": discovery_grid} if discovery_grid else {}
