@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hailo_tiling.classes import PERSON, LABELS, TRACKED_CLASSES
+
 from .aggregator import map_to_source, nms
 from .scheduler import TileScheduler, MultiTargetTileScheduler
 from .target_lock import TargetLock, MultiTargetLock
@@ -24,7 +26,7 @@ class RunResult:
 
 def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
         lock: TargetLock, backend, meter, gt_traj: dict,
-        person_cls: int = 0) -> RunResult:
+        person_cls: int = PERSON) -> RunResult:
     res = RunResult()
     frame_idx = -1
     for frame_idx, frame in enumerate(frames):
@@ -37,6 +39,7 @@ def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
             local = backend.infer(frame, crop, frame_idx)
             dets += map_to_source(local, crop, src_w, src_h)
         dets = nms(dets, iou_thr=0.5)
+        dets = [d for d in dets if d.cls in TRACKED_CLASSES]
         res.frame_dets[frame_idx] = dets
 
         persons = [d for d in dets if d.cls == person_cls]
@@ -82,7 +85,7 @@ def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
 
 
 def emit_frames_json(res: RunResult, label: str, out_path: Path,
-                     class_labels=("person", "vehicle", "face", "license_plate")) -> None:
+                     class_labels=LABELS) -> None:
     """Write a frames.json the existing overlay_viewer can load."""
     frames = []
     for f, dets in sorted(res.frame_dets.items()):
@@ -99,7 +102,7 @@ def emit_frames_json(res: RunResult, label: str, out_path: Path,
 def run_multi(frames, src_w: int, src_h: int,
               scheduler: MultiTargetTileScheduler,
               lock: MultiTargetLock, backend, meter, gt_traj: dict,
-              gt_cls: int = 0) -> RunResult:
+              gt_cls: int = PERSON) -> RunResult:
     """Multi-target replay loop.
 
     Feeds all allowed-class dets to the lock, asks the scheduler for
@@ -133,6 +136,7 @@ def run_multi(frames, src_w: int, src_h: int,
             local = backend.infer(frame, tile.crop, frame_idx)
             dets += map_to_source(local, tile.crop, src_w, src_h)
         dets = nms(dets, iou_thr=0.5)
+        dets = [d for d in dets if d.cls in TRACKED_CLASSES]
         res.frame_dets[frame_idx] = dets
 
         # Feed all allowed-class dets to the multi-target lock.

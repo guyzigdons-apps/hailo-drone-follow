@@ -4,6 +4,7 @@ from dynamic_tiling.budget import BudgetMeter
 from dynamic_tiling.scheduler import TileScheduler, MultiTargetTileScheduler
 from dynamic_tiling.target_lock import TargetLock, MultiTargetLock
 from dynamic_tiling.replay import run, run_multi
+from hailo_tiling.classes import PERSON, TRACKED_CLASSES
 
 
 def test_replay_tracks_target_with_replay_backend():
@@ -23,7 +24,8 @@ def test_replay_tracks_target_with_replay_backend():
             ly = (gcy - crop.y) / crop.h
             lw = gw * src_w / crop.w
             lh = gh * src_h / crop.h
-            return [type("D", (), dict(cls=0, x=lx - lw / 2, y=ly - lh / 2,
+            # cls=PERSON (1) — aligned to person=1 convention (was cls=0, off-by-one).
+            return [type("D", (), dict(cls=PERSON, x=lx - lw / 2, y=ly - lh / 2,
                                        w=lw, h=lh, score=0.9))()]
 
     frames = [np.zeros((src_h, src_w, 3), np.uint8) for _ in range(n_frames)]
@@ -80,7 +82,8 @@ def test_replay_records_per_frame_tagged_tiles():
             ly = (gcy - crop.y) / crop.h
             lw = gw * src_w / crop.w
             lh = gh * src_h / crop.h
-            return [type("D", (), dict(cls=0, x=lx - lw / 2, y=ly - lh / 2,
+            # cls=PERSON (1) — aligned to person=1 convention (was cls=0, off-by-one).
+            return [type("D", (), dict(cls=PERSON, x=lx - lw / 2, y=ly - lh / 2,
                                        w=lw, h=lh, score=0.9))()]
 
     frames = [np.zeros((src_h, src_w, 3), np.uint8) for _ in range(n_frames)]
@@ -133,14 +136,16 @@ def test_run_multi_records_per_target_rois():
                 ly = (gcy - crop.y) / crop.h
                 lw = gw * src_w / crop.w
                 lh = gh * src_h / crop.h
+                # cls=PERSON (1) — aligned to person=1 convention (was cls=0, off-by-one).
                 results.append(
-                    type("D", (), dict(cls=0, x=lx - lw / 2, y=ly - lh / 2,
+                    type("D", (), dict(cls=PERSON, x=lx - lw / 2, y=ly - lh / 2,
                                        w=lw, h=lh, score=0.9))()
                 )
             return results
 
     frames = [np.zeros((src_h, src_w, 3), np.uint8) for _ in range(n_frames)]
-    lock = MultiTargetLock(target_classes={0, 1})
+    # target_classes uses TRACKED_CLASSES convention: PERSON=1, VEHICLE=2.
+    lock = MultiTargetLock(target_classes=set(TRACKED_CLASSES))
     sched = MultiTargetTileScheduler(src_w, src_h, discovery_period=2)
     result = run_multi(
         frames=frames, src_w=src_w, src_h=src_h,
@@ -149,7 +154,7 @@ def test_run_multi_records_per_target_rois():
         backend=_TwoPersonBackend(),
         meter=BudgetMeter(budget_inf_per_s=300, fps=30),
         gt_traj=gt_traj,
-        gt_cls=0,
+        gt_cls=PERSON,
     )
     assert result.n_frames == n_frames
     # After a couple of frames to establish tracks, expect >= 2 frames with "dynamic" tiles.

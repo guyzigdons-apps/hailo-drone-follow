@@ -26,7 +26,8 @@ class HefBackend(InferenceBackend):
     """
 
     def __init__(self, *args, **kwargs):
-        # Test-injection mode: (handle, decode) positional, no kwargs.
+        self._class_offset = kwargs.pop("class_offset", 0)
+        # Test-injection mode: (handle, decode) positional, no remaining kwargs.
         if len(args) == 2 and not kwargs:
             handle, decode = args
             self._handle = handle
@@ -43,11 +44,20 @@ class HefBackend(InferenceBackend):
         self._decode = decode_nms_output
 
     def _infer_one(self, frame: np.ndarray, crop: CropRect) -> list:
-        import cv2  # noqa: WPS433 — lazy so headless tests don't import cv2
-        sub = frame[crop.y:crop.y + crop.h, crop.x:crop.x + crop.w]
-        resized = cv2.resize(sub, (MODEL_W, MODEL_H), interpolation=cv2.INTER_LINEAR)
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        return self._decode(self._handle.infer(rgb))
+        if frame is None:
+            # Test-injection mode: the injected handle ignores its argument.
+            raw = self._handle.infer(None)
+        else:
+            import cv2  # noqa: WPS433 — lazy so headless tests don't import cv2
+            sub = frame[crop.y:crop.y + crop.h, crop.x:crop.x + crop.w]
+            resized = cv2.resize(sub, (MODEL_W, MODEL_H), interpolation=cv2.INTER_LINEAR)
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            raw = self._handle.infer(rgb)
+        dets = self._decode(raw)
+        if self._class_offset:
+            dets = [Det(cls=d.cls + self._class_offset, score=d.score,
+                        x=d.x, y=d.y, w=d.w, h=d.h) for d in dets]
+        return dets
 
     def infer(self, frame, crops: Sequence[CropRect], frame_idx: int) -> list[list[Det]]:
         return [self._infer_one(frame, c) for c in crops]
