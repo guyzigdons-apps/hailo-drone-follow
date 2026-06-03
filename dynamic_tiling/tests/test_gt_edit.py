@@ -1,5 +1,10 @@
 from dynamic_tiling.gt_clean import GtTrack
-from dynamic_tiling.gt_edit import clip_frame_range, interp_track_gaps, pin_static_tracks
+from dynamic_tiling.gt_edit import (
+    clip_frame_range,
+    despike_track_heights,
+    interp_track_gaps,
+    pin_static_tracks,
+)
 
 
 def _t(tid, cls, frames):
@@ -45,6 +50,52 @@ def test_interp_respects_max_gap():
     out = interp_track_gaps([p], track_ids=[3], max_gap=5)
     # gap (10) exceeds max_gap (5) -> not filled
     assert sorted(out[0].frames) == [0, 10]
+
+
+def test_despike_restores_truncated_heights_anchored_at_top():
+    # steady person h=0.07 (top-left ymin=0.7), two truncated frames (legs cut)
+    frames = {i: (0.5, 0.7, 0.02, 0.07) for i in range(41)}
+    frames[20] = (0.5, 0.7, 0.02, 0.03)   # truncated: only top boxed
+    frames[21] = (0.5, 0.7, 0.02, 0.025)
+    out = despike_track_heights([_t(3, 1, frames)], track_ids=[3],
+                                min_ratio=0.7, window=31)
+    got = out[0].frames
+    # truncated frames restored to local median height (0.07)
+    assert got[20] == (0.5, 0.7, 0.02, 0.07)
+    assert got[21] == (0.5, 0.7, 0.02, 0.07)
+    # top edge (ymin) and width preserved -> box grows DOWNWARD
+    assert got[20][1] == 0.7 and got[20][2] == 0.02
+    # a healthy frame is untouched
+    assert got[10] == (0.5, 0.7, 0.02, 0.07)
+
+
+def test_despike_converges_on_gradual_dip():
+    # a gradual V-shaped truncation: fixing the bottom raises the local median
+    # and would expose the shoulders on a single pass -> must converge.
+    frames = {i: (0.5, 0.7, 0.02, 0.07) for i in range(61)}
+    dip = {28: 0.060, 29: 0.050, 30: 0.038, 31: 0.050, 32: 0.060}
+    for f, h in dip.items():
+        frames[f] = (0.5, 0.7, 0.02, h)
+    out = despike_track_heights([_t(3, 1, frames)], track_ids=[3],
+                                min_ratio=0.8, window=31)
+    fr = out[0].frames
+    import statistics as _st
+    fis = sorted(fr); H = [fr[f][3] for f in fis]; half = 15
+    # after convergence NO frame is below 0.8 * its local median
+    assert all(fr[f][3] >= 0.8 * _st.median(H[max(0, i - half):i + half + 1])
+               for i, f in enumerate(fis))
+
+
+def test_despike_only_touches_selected_tracks_and_respects_ratio():
+    short = {i: (0.5, 0.7, 0.02, 0.07) for i in range(41)}
+    short[20] = (0.5, 0.7, 0.02, 0.062)   # 0.886*median -> above 0.7 ratio, keep
+    p3 = _t(3, 1, short)
+    p4 = _t(4, 1, {i: (0.1, 0.1, 0.02, 0.03) for i in range(41)})  # not selected
+    out = despike_track_heights([p3, p4], track_ids=[3], min_ratio=0.7, window=31)
+    got3 = next(t for t in out if t.track_id == 3).frames
+    assert got3[20] == (0.5, 0.7, 0.02, 0.062)  # within ratio -> unchanged
+    got4 = next(t for t in out if t.track_id == 4).frames
+    assert got4 == p4.frames  # untouched track identical
 
 
 def test_pin_requires_ref_frame_present():

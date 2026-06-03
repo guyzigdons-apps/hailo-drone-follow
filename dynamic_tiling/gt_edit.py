@@ -1,6 +1,7 @@
 """Reproducible GT corrections (replayable, not hand-edits)."""
 from __future__ import annotations
 
+import statistics
 from dataclasses import replace
 
 from .gt_clean import GtTrack, interpolate_gaps
@@ -21,6 +22,47 @@ def interp_track_gaps(tracks, *, track_ids, max_gap):
     ids = set(track_ids)
     return [interpolate_gaps(t, max_gap=max_gap) if t.track_id in ids else t
             for t in tracks]
+
+
+def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31, max_iter=20):
+    """Restore detector-truncated bbox heights on each track in track_ids.
+
+    When a detection boxes only the top of an object (legs cut off), its height
+    collapses while the top edge (ymin) stays put. For each frame whose height
+    is below ``min_ratio`` * the local windowed-median height, the height is
+    reset to that local median while x, ymin and width are preserved -- so the
+    box grows back DOWNWARD to the feet. ``window`` (odd) sets the centered
+    median window so genuine scale change (object walking nearer/farther) is
+    tracked rather than flattened.
+
+    Applied iteratively to convergence: restoring one frame raises the local
+    median, which can expose the shoulders of a gradual dip, so the pass repeats
+    until no frame is below the threshold (or ``max_iter`` is hit). Heights only
+    ever rise (capped at the local median), so this terminates. Tracks outside
+    track_ids pass through unchanged. Assumes (xmin, ymin, w, h) top-left
+    normalized bboxes."""
+    ids = set(track_ids)
+    half = window // 2
+    out = []
+    for t in tracks:
+        if t.track_id not in ids:
+            out.append(t)
+            continue
+        fis = sorted(t.frames)
+        frames = dict(t.frames)
+        for _ in range(max_iter):
+            heights = [frames[f][3] for f in fis]
+            changed = False
+            for i, f in enumerate(fis):
+                local_med = statistics.median(heights[max(0, i - half):i + half + 1])
+                x, y, w, h = frames[f]
+                if h < min_ratio * local_med:
+                    frames[f] = (x, y, w, local_med)
+                    changed = True
+            if not changed:
+                break
+        out.append(replace(t, frames=frames))
+    return out
 
 
 def pin_static_tracks(tracks, *, track_ids, ref_frame, frame_range):
