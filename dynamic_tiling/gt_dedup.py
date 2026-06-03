@@ -7,6 +7,13 @@ same-class boxes whose IoU with it exceeds the threshold.
 from __future__ import annotations
 
 
+def det_cls(d) -> int:
+    """Class id of a dense detection, tolerating both schemas: `cls` (legacy
+    adapted files) or `class_id` (run_pxt_bench output). Returns -1 if absent."""
+    v = d.get("cls", d.get("class_id"))
+    return int(v) if v is not None else -1
+
+
 def _iomin(a, b) -> float:
     """Intersection over minimum area (IoMin).
 
@@ -33,11 +40,11 @@ def dedup_frame(dets, *, iou_thr: float = 0.5):
     order = sorted(dets, key=lambda d: -float(d.get("confidence", 0.0)))
     kept = []
     for d in order:
-        b, c = d["bbox"], int(d.get("cls", -1))
+        b, c = d["bbox"], det_cls(d)
         # IoMin treats a contained same-class box as a duplicate; a genuinely
         # distinct small object inside a larger one's box can be suppressed here
         # (recoverable downstream via keep_short flags + human review).
-        if any(int(k.get("cls", -1)) == c and _iomin(b, k["bbox"]) > iou_thr for k in kept):
+        if any(det_cls(k) == c and _iomin(b, k["bbox"]) > iou_thr for k in kept):
             continue
         kept.append(d)
     return kept

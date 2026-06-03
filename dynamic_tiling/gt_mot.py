@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from hailo_tiling.classes import TRACKED_CLASSES
-from .gt_dedup import dedup_frame
+from .gt_dedup import dedup_frame, det_cls
 
 
 @dataclass
@@ -26,7 +26,7 @@ def _dets_to_xyxy(frame_doc, classes):
     """Return (N,6) array [x1,y1,x2,y2,score,cls] in NORMALIZED coords."""
     rows = []
     for d in frame_doc.get("detections", []):
-        c = int(d.get("cls", -1))
+        c = det_cls(d)
         if c not in classes:
             continue
         x, y, w, h = d["bbox"]
@@ -118,7 +118,7 @@ def build_raw_tracks_from_video(doc, video_path, *, tracker_factory=make_botsort
                 raw_dets = fr.get("detections", [])
                 dets_in = dedup_frame(raw_dets, iou_thr=dedup_iou) if dedup_iou is not None else raw_dets
                 for d in dets_in:
-                    c = int(d.get("cls", -1))
+                    c = det_cls(d)
                     if c not in classes:
                         continue
                     x, y, bw, bh = d["bbox"]

@@ -1,4 +1,4 @@
-from dynamic_tiling.gt_dedup import dedup_frame, dedup_doc
+from dynamic_tiling.gt_dedup import dedup_frame, dedup_doc, det_cls
 
 
 def test_dedup_merges_overlapping_same_class():
@@ -28,3 +28,13 @@ def test_dedup_doc_processes_all_frames():
             {"bbox": [0.405, 0.6, 0.02, 0.05], "confidence": 0.8, "cls": 1}]}]}
     out = dedup_doc(doc, iou_thr=0.5)
     assert len(out["frames"][0]["detections"]) == 1
+
+
+def test_dedup_reads_class_id_key():
+    assert det_cls({"class_id": 2}) == 2
+    assert det_cls({"cls": 1}) == 1
+    assert det_cls({"label": "x"}) == -1
+    # two same-class (class_id) overlapping dets dedup to one
+    dets = [{"bbox": [0.4, 0.6, 0.02, 0.05], "confidence": 0.9, "class_id": 1},
+            {"bbox": [0.405, 0.6, 0.02, 0.05], "confidence": 0.8, "class_id": 1}]
+    assert len(dedup_frame(dets, iou_thr=0.5)) == 1

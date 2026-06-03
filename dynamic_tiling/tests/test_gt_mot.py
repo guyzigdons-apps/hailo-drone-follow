@@ -38,3 +38,14 @@ def test_build_raw_tracks_drops_untracked_classes():
         {"bbox": [0.1, 0.1, 0.05, 0.1], "confidence": 0.9, "cls": 3, "label": "face"}]}]}
     tracks = build_raw_tracks(doc, tracker=FakeTracker(), classes=(1, 2))
     assert tracks == []
+
+
+def test_build_raw_tracks_reads_class_id():
+    doc = {"frames": [
+        {"frame": 0, "detections": [
+            {"bbox": [0.1, 0.1, 0.05, 0.1], "confidence": 0.9, "class_id": 1, "label": "person"}]},
+        {"frame": 1, "detections": [
+            {"bbox": [0.12, 0.1, 0.05, 0.1], "confidence": 0.9, "class_id": 1, "label": "person"}]},
+    ]}
+    tracks = build_raw_tracks(doc, tracker=FakeTracker(), classes=(1, 2))
+    assert tracks and all(t.cls == 1 for t in tracks)
