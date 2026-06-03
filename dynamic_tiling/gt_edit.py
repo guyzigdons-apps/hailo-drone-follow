@@ -3,13 +3,24 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from .gt_clean import GtTrack
+from .gt_clean import GtTrack, interpolate_gaps
 
 
 def clip_frame_range(tracks):
     """(min_frame, max_frame) inclusive over all tracks' frames."""
     frames = [f for t in tracks for f in t.frames]
     return (min(frames), max(frames)) if frames else (0, 0)
+
+
+def interp_track_gaps(tracks, *, track_ids, max_gap):
+    """Linearly interpolate in-span frame gaps of length <= max_gap for each
+    track in track_ids (fixes detection-dropout flicker on a track that is
+    genuinely present throughout its span). Tracks outside track_ids pass
+    through unchanged. Out-of-span absence (before a track's first frame /
+    after its last) is never filled."""
+    ids = set(track_ids)
+    return [interpolate_gaps(t, max_gap=max_gap) if t.track_id in ids else t
+            for t in tracks]
 
 
 def pin_static_tracks(tracks, *, track_ids, ref_frame, frame_range):
