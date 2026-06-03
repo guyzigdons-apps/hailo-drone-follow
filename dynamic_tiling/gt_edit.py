@@ -213,6 +213,34 @@ def restore_track_width(tracks, *, track_ids, anchor="left", percentile=90,
     return out
 
 
+def smooth_track_bbox(tracks, *, track_ids, window=15, dims=("x", "w")):
+    """Centered moving-average smoothing of selected bbox components over time,
+    to remove per-frame detector jitter while preserving slow motion (e.g. a
+    static car's camera drift). ``dims`` selects which of x/y/w/h to smooth
+    (default horizontal only: x position + width). The window shrinks at the
+    track ends. Assumes a (near-)contiguous track (window is by frame-index
+    position). Tracks outside track_ids pass through unchanged."""
+    comp = {"x": 0, "y": 1, "w": 2, "h": 3}
+    sel = [comp[d] for d in dims]
+    half = window // 2
+    ids = set(track_ids)
+    out = []
+    for t in tracks:
+        if t.track_id not in ids:
+            out.append(t)
+            continue
+        fis = sorted(t.frames)
+        raw = [list(t.frames[f]) for f in fis]
+        smoothed = [list(b) for b in raw]
+        for i in range(len(fis)):
+            lo, hi = max(0, i - half), min(len(fis), i + half + 1)
+            n = hi - lo
+            for c in sel:
+                smoothed[i][c] = sum(raw[j][c] for j in range(lo, hi)) / n
+        out.append(replace(t, frames={f: tuple(smoothed[i]) for i, f in enumerate(fis)}))
+    return out
+
+
 def pin_static_tracks(tracks, *, track_ids, ref_frame, frame_range):
     """For each track in track_ids, replace its frames with the ref_frame bbox
     held constant across frame_range inclusive (for static objects under a fixed

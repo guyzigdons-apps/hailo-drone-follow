@@ -11,6 +11,7 @@ from dynamic_tiling.gt_edit import (
     project_bbox,
     remap_track_ids,
     restore_track_width,
+    smooth_track_bbox,
 )
 
 
@@ -154,6 +155,31 @@ def test_crossfov_fill_requires_target_present():
         assert False, "expected error"
     except ValueError:
         pass
+
+
+def test_smooth_track_bbox_horizontal_only():
+    # x jitters, y is constant; smoothing x,w must not touch y,h
+    frames = {0: (0.50, 0.30, 0.040, 0.04),
+              1: (0.54, 0.30, 0.060, 0.04),
+              2: (0.50, 0.30, 0.040, 0.04),
+              3: (0.54, 0.30, 0.060, 0.04),
+              4: (0.50, 0.30, 0.040, 0.04)}
+    out = smooth_track_bbox([_t(2, 2, frames)], track_ids=[2], window=3, dims=("x", "w"))
+    fr = out[0].frames
+    # frame 2 x = mean(0.54,0.50,0.54)=0.5266..., w = mean(0.06,0.04,0.06)=0.0533...
+    assert abs(fr[2][0] - (0.54 + 0.50 + 0.54) / 3) < 1e-9
+    assert abs(fr[2][2] - (0.060 + 0.040 + 0.060) / 3) < 1e-9
+    # y and h untouched (not in dims)
+    assert fr[2][1] == 0.30 and fr[2][3] == 0.04
+    # endpoints average over the available (shrunk) window
+    assert abs(fr[0][0] - (0.50 + 0.54) / 2) < 1e-9
+
+
+def test_smooth_track_bbox_only_selected_tracks():
+    a = _t(2, 2, {i: (0.5 + 0.02 * (i % 2), 0.3, 0.05, 0.04) for i in range(5)})
+    b = _t(1, 2, {i: (0.7 + 0.02 * (i % 2), 0.3, 0.05, 0.04) for i in range(5)})
+    out = smooth_track_bbox([a, b], track_ids=[2], window=3, dims=("x", "w"))
+    assert next(t for t in out if t.track_id == 1).frames == b.frames  # untouched
 
 
 def test_restore_track_width_left_anchored_to_high_pctile():
