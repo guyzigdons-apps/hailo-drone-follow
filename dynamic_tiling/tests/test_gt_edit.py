@@ -3,6 +3,7 @@ from dynamic_tiling.gt_edit import (
     clip_frame_range,
     crossfov_fill_track,
     despike_track_heights,
+    drift_extend_track,
     drop_tracks,
     hold_track_tail,
     interp_track_gaps,
@@ -152,6 +153,33 @@ def test_crossfov_fill_requires_target_present():
         assert False, "expected error"
     except ValueError:
         pass
+
+
+def test_drift_extend_track_follows_reference_drift():
+    # target present only 10..11; reference (a dense static object) drifts each frame
+    tgt = _t(5, 2, {10: (0.40, 0.90, 0.05, 0.07), 11: (0.40, 0.90, 0.05, 0.07)})
+    # ref moves left+up over time (camera drift); at f10 it's at (0.70,0.50)
+    ref_frames = {f: (0.70 - 0.001 * (10 - f), 0.50 - 0.002 * (10 - f), 0.04, 0.04)
+                  for f in range(0, 12)}
+    out = drift_extend_track([tgt], track_id=5, ref_frames=ref_frames, frame_range=(8, 11))
+    fr = next(t for t in out if t.track_id == 5).frames
+    assert sorted(fr) == [8, 9, 10, 11]
+    # frame 9 = anchor(10) box shifted by ref(9)-ref(10) drift
+    dx = ref_frames[9][0] - ref_frames[10][0]
+    dy = ref_frames[9][1] - ref_frames[10][1]
+    assert abs(fr[9][0] - (0.40 + dx)) < 1e-12
+    assert abs(fr[9][1] - (0.90 + dy)) < 1e-12
+    assert fr[9][2] == 0.05 and fr[9][3] == 0.07  # size unchanged
+    # existing native frames untouched
+    assert fr[10] == (0.40, 0.90, 0.05, 0.07)
+
+
+def test_drift_extend_track_skips_frames_missing_in_reference():
+    tgt = _t(5, 2, {10: (0.4, 0.9, 0.05, 0.07)})
+    ref_frames = {10: (0.7, 0.5, 0.04, 0.04)}  # ref has no frame 8/9
+    out = drift_extend_track([tgt], track_id=5, ref_frames=ref_frames, frame_range=(8, 10))
+    fr = out[0].frames
+    assert sorted(fr) == [10]  # nothing added (no ref to derive drift)
 
 
 def test_drop_tracks_removes_only_listed_ids():

@@ -106,6 +106,35 @@ def crossfov_fill_track(tracks, *, track_id, source_frames, sx, sy):
     return out
 
 
+def drift_extend_track(tracks, *, track_id, ref_frames, frame_range):
+    """Extend a static object's track into frames outside its detected span by
+    propagating camera drift from a reference track. For each frame in
+    frame_range not already present, the target's nearest-end bbox is translated
+    by the reference track's motion between that frame and the anchor frame
+    (x, y shifted; w, h kept). Used when a parked object is present but
+    undetected for part of the clip and a frozen box would mis-track the drift.
+    A frame is skipped if the reference lacks it or the anchor frame. Raises
+    ValueError if track_id is absent."""
+    target = next((t for t in tracks if t.track_id == track_id), None)
+    if target is None:
+        raise ValueError(f"drift_extend: target track {track_id} not found")
+    fis = sorted(target.frames)
+    first, last = fis[0], fis[-1]
+    new = dict(target.frames)
+    lo, hi = frame_range
+    for f in range(lo, hi + 1):
+        if f in new:
+            continue
+        anchor = first if f < first else last
+        if f not in ref_frames or anchor not in ref_frames:
+            continue
+        ax, ay, aw, ah = target.frames[anchor]
+        dx = ref_frames[f][0] - ref_frames[anchor][0]
+        dy = ref_frames[f][1] - ref_frames[anchor][1]
+        new[f] = (ax + dx, ay + dy, aw, ah)
+    return [replace(t, frames=new) if t.track_id == track_id else t for t in tracks]
+
+
 def drop_tracks(tracks, *, track_ids):
     """Remove the tracks whose ids are in track_ids (spurious / false-positive
     trajectories rejected during human review). All others pass through."""
