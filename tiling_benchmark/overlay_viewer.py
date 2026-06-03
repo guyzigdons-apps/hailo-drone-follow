@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import tkinter as tk
 from collections import OrderedDict
 from pathlib import Path
@@ -70,7 +71,7 @@ ZOOM_MIN = 0.5
 ZOOM_MAX = 16.0
 ZOOM_STEP = 1.25  # multiplicative step per wheel tick
 
-SIDEBAR_WIDTH = 250
+SIDEBAR_WIDTH = 270  # includes the ~16px vertical scrollbar
 
 
 def bgr_to_hex(bgr: tuple[int, int, int]) -> str:
@@ -236,6 +237,7 @@ class OverlayViewer:
         self.frame_no = max(0, min(start_frame, self.total_frames - 1))
         self.speed = 0.0  # paused initially
         self._after_id: str | None = None
+        self._last_work_ms = 0.0  # decode+render cost of the last frame
         self._suppress_scrubber_cb = False
 
         # View transform — pan is the source-px coord of the centre of the viewport.
@@ -334,22 +336,70 @@ class OverlayViewer:
                                 cursor="crosshair")
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # --- Sidebar ---
-        sidebar = tk.Frame(main, width=SIDEBAR_WIDTH, bg="#202020")
-        sidebar.pack(side=tk.RIGHT, fill=tk.Y)
-        sidebar.pack_propagate(False)
+        # --- Sidebar (scrollable) ---
+        # Fixed-width container holding a canvas + vertical scrollbar, so that
+        # with many runs the lower sections (Video / Keys) can be scrolled to
+        # instead of being pushed off the bottom of the screen.
+        sidebar_container = tk.Frame(main, width=SIDEBAR_WIDTH, bg="#202020")
+        sidebar_container.pack(side=tk.RIGHT, fill=tk.Y)
+        sidebar_container.pack_propagate(False)
+
+        sidebar_canvas = tk.Canvas(sidebar_container, bg="#202020",
+                                   highlightthickness=0)
+        sb_scroll = tk.Scrollbar(sidebar_container, orient=tk.VERTICAL,
+                                 command=sidebar_canvas.yview)
+        sidebar_canvas.configure(yscrollcommand=sb_scroll.set)
+        sb_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        sidebar_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Inner frame that actually holds the controls. Keeping the variable
+        # name ``sidebar`` means every downstream ``tk.LabelFrame(sidebar, …)``
+        # call below is unchanged.
+        sidebar = tk.Frame(sidebar_canvas, bg="#202020")
+        sidebar_window = sidebar_canvas.create_window((0, 0), window=sidebar,
+                                                      anchor="nw")
+
+        def _on_sidebar_configure(_event=None):
+            sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all"))
+        sidebar.bind("<Configure>", _on_sidebar_configure)
+
+        def _on_sidebar_canvas_configure(event):
+            # Make the inner frame track the canvas width so content fills it.
+            sidebar_canvas.itemconfigure(sidebar_window, width=event.width)
+        sidebar_canvas.bind("<Configure>", _on_sidebar_canvas_configure)
+
+        # Mouse-wheel scrolling for the sidebar. Bound globally but gated on the
+        # pointer being over the sidebar subtree, so the image canvas keeps its
+        # own widget-level wheel-zoom binding when the pointer is over it.
+        def _sidebar_wheel(event):
+            w = self.root.winfo_containing(event.x_root, event.y_root)
+            while w is not None:
+                if w is sidebar_container:
+                    if getattr(event, "num", None) == 4:
+                        sidebar_canvas.yview_scroll(-1, "units")
+                    elif getattr(event, "num", None) == 5:
+                        sidebar_canvas.yview_scroll(1, "units")
+                    else:
+                        sidebar_canvas.yview_scroll(
+                            -1 if event.delta > 0 else 1, "units")
+                    return
+                w = getattr(w, "master", None)
+        sidebar_canvas.bind_all("<MouseWheel>", _sidebar_wheel, add="+")
+        sidebar_canvas.bind_all("<Button-4>", _sidebar_wheel, add="+")
+        sidebar_canvas.bind_all("<Button-5>", _sidebar_wheel, add="+")
 
         # Runs section
         runs_lf = tk.LabelFrame(sidebar, text="Runs", fg="white", bg="#202020",
                                 labelanchor="nw", padx=6, pady=4)
         runs_lf.pack(fill=tk.X, padx=6, pady=(8, 4))
-        # Two-column grid of run-visibility toggles (swatch + checkbox).
+        # Single-column list of run-visibility toggles (swatch + checkbox).
+        # One row per run so long labels never clip past the fixed-width
+        # sidebar (a two-column grid overflowed the right edge).
         # Re-render is driven by the trace_add on each r.visible_var, which
         # also refreshes the tile-source dropdown.
         for i, r in enumerate(self.runs):
             cell = tk.Frame(runs_lf, bg="#202020")
-            cell.grid(row=i // 2, column=i % 2, sticky="w",
-                      padx=(0, 10), pady=1)
+            cell.grid(row=i, column=0, sticky="w", pady=1)
             swatch = tk.Label(cell, text="  ", bg=bgr_to_hex(r.colour_bgr),
                               width=2, relief=tk.RAISED, bd=1)
             swatch.pack(side=tk.LEFT, padx=(0, 4))
@@ -1188,7 +1238,12 @@ class OverlayViewer:
         self._cancel_playback()
         if self.speed == 0.0:
             return
-        delay_ms = max(1, int(1000.0 / (self.fps * abs(self.speed))))
+        # Real-time pacing: subtract the time already spent decoding+rendering
+        # the current frame from the target frame period, so a heavy frame
+        # (e.g. 4K decode + overlay draw) doesn't add on top of the period and
+        # drag playback into slow motion. Clamps to >=1ms when work overruns.
+        target_ms = 1000.0 / (self.fps * abs(self.speed))
+        delay_ms = max(1, int(round(target_ms - self._last_work_ms)))
         self._after_id = self.root.after(delay_ms, self._advance_frame)
 
     def _advance_frame(self) -> None:
@@ -1201,8 +1256,10 @@ class OverlayViewer:
             # Hit an end — pause.
             self._pause()
             return
+        t0 = time.perf_counter()
         self._seek_to(new_n)
         self._render()
+        self._last_work_ms = (time.perf_counter() - t0) * 1000.0
         self._schedule_advance()
 
     # ----- mouse
@@ -1298,6 +1355,125 @@ class OverlayViewer:
             pass
 
 
+def export_runs(video_path: Path, runs: list["Run"], out_path: Path, *,
+                fps: float | None = None,
+                out_width: int | None = None,
+                start: int = 0,
+                end: int | None = None,
+                conf_min: float = 0.25,
+                hide_phantoms: bool = True,
+                containment: bool = True,
+                tiles_source: str | None = None) -> int:
+    """Headless render of all loaded runs' overlays straight to an MP4.
+
+    Re-uses the viewer's draw logic (phantom hide, containment merge, per-run
+    BGR palette, per-frame dynamic tiles) but skips Tk entirely: each frame is
+    decoded, overlays are drawn at the chosen output resolution, and the frame
+    is written via cv2.VideoWriter. Output colours match the GUI swatches
+    because both the source frame and the palette are BGR.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"ERROR: cannot open video {video_path}")
+        return 1
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    out_fps = fps or src_fps
+    if out_width and out_width < src_w:
+        out_w = out_width
+        out_h = int(round(src_h * out_width / src_w))
+        out_h -= out_h % 2  # keep even dims for the encoder
+    else:
+        out_w, out_h = src_w, src_h
+    first = max(0, start)
+    last = (total - 1) if end is None else min(end, total - 1)
+
+    tile_run: "Run | None" = None
+    if tiles_source:
+        tile_run = next((r for r in runs if r.label == tiles_source), None)
+        if tile_run is None:
+            print(f"WARN: --export-tiles source '{tiles_source}' not found; "
+                  f"available labels: {[r.label for r in runs]}")
+
+    writer = cv2.VideoWriter(str(out_path),
+                             cv2.VideoWriter_fourcc(*"mp4v"),
+                             out_fps, (out_w, out_h))
+    if not writer.isOpened():
+        print(f"ERROR: cannot open VideoWriter for {out_path}")
+        cap.release()
+        return 1
+
+    CAT_COLOURS = {
+        "multi-scale":    (255, 200, 0),
+        "single-scale":   (0, 255, 255),
+        "dynamic":        (0, 255, 100),
+        "dynamic-merged": (255, 0, 200),
+    }
+    sx, sy = float(out_w), float(out_h)
+    resize_needed = (out_w, out_h) != (src_w, src_h)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, first)
+    n = first
+    written = 0
+    while n <= last:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+        if resize_needed:
+            frame = cv2.resize(frame, (out_w, out_h),
+                               interpolation=cv2.INTER_AREA)
+
+        # Tiles first so bboxes win the foreground.
+        if tile_run is not None:
+            per_frame = tile_run.tiles_by_frame.get(n)
+            rects = per_frame if per_frame else tile_run.tile_rects_typed
+            for (tx, ty, tw, th, cat) in rects:
+                cv2.rectangle(frame,
+                              (int(tx * sx), int(ty * sy)),
+                              (int((tx + tw) * sx), int((ty + th) * sy)),
+                              CAT_COLOURS.get(cat, (255, 255, 255)), 1)
+
+        for r in runs:
+            colour = r.colour_bgr  # frame and palette are both BGR
+            dets = []
+            for det in r.idx.get(n, []):
+                if hide_phantoms and r.tile_rects and is_phantom(det, r.tile_rects):
+                    continue
+                dets.append(det)
+            if containment:
+                dets = containment_merge(dets, area_ratio_max=0.5,
+                                         center_slack=0.0)
+            for det in dets:
+                conf = float(det.get("confidence", 0.0))
+                if conf < conf_min:
+                    continue
+                bx, by, bw, bh = det["bbox"]
+                p1 = (int(bx * sx), int(by * sy))
+                p2 = (int((bx + bw) * sx), int((by + bh) * sy))
+                cv2.rectangle(frame, p1, p2, colour, 2)
+                tag = f"{det.get('label', '?')} {conf:.2f}"
+                cv2.putText(frame, tag, (p1[0], max(15, p1[1] - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1,
+                            cv2.LINE_AA)
+
+        cv2.putText(frame, f"frame {n}", (8, 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
+                    cv2.LINE_AA)
+        writer.write(frame)
+        written += 1
+        n += 1
+        if written % 100 == 0:
+            print(f"  ... {written} frames written (frame {n - 1})")
+
+    writer.release()
+    cap.release()
+    print(f"Wrote {written} frames to {out_path} "
+          f"({out_w}x{out_h} @ {out_fps:.2f} fps)")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -1320,6 +1496,26 @@ def main(argv=None) -> int:
                     help="Preview cache target width (default 1920).")
     ap.add_argument("--cache-height", type=int, default=1080,
                     help="Preview cache target height (default 1080).")
+    # --- Headless export (no GUI): render overlays straight to an MP4 ---
+    ap.add_argument("--export", type=Path, default=None,
+                    help="Headless mode: render all --frames overlays onto the "
+                         "video and write to this MP4 path (no GUI window).")
+    ap.add_argument("--export-fps", type=float, default=None,
+                    help="Output FPS for --export (default: source FPS).")
+    ap.add_argument("--export-width", type=int, default=None,
+                    help="Downscale --export output to this width, preserving "
+                         "aspect (default: full source resolution).")
+    ap.add_argument("--export-end", type=int, default=None,
+                    help="Last frame (inclusive) for --export (default: last).")
+    ap.add_argument("--export-tiles", metavar="RUN_LABEL", default=None,
+                    help="Draw tile rectangles from the run with this label "
+                         "in the exported video.")
+    ap.add_argument("--no-hide-phantoms", action="store_true",
+                    help="Keep tile-edge phantom detections in --export "
+                         "(default: hidden, matching the GUI default).")
+    ap.add_argument("--no-containment-merge", action="store_true",
+                    help="Disable containment-merge in --export "
+                         "(default: on, matching the GUI default).")
     args = ap.parse_args(argv)
 
     if not args.video.is_file():
@@ -1338,6 +1534,19 @@ def main(argv=None) -> int:
         colour = PALETTE[i % len(PALETTE)]
         runs.append(Run(label=lbl, idx=idx, colour_bgr=colour, config=cfg,
                         tiles_by_frame=tiles_by_frame))
+
+    if args.export is not None:
+        return export_runs(
+            args.video, runs, args.export,
+            fps=args.export_fps,
+            out_width=args.export_width,
+            start=args.start_frame,
+            end=args.export_end,
+            conf_min=args.conf_min,
+            hide_phantoms=not args.no_hide_phantoms,
+            containment=not args.no_containment_merge,
+            tiles_source=args.export_tiles,
+        )
 
     root = tk.Tk()
     try:
