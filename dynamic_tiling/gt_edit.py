@@ -65,6 +65,47 @@ def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31, max_it
     return out
 
 
+def remap_track_ids(tracks, *, mapping):
+    """Rename track ids per ``mapping`` (old_id -> new_id); ids absent from the
+    mapping keep their value. Used to align ids to a canonical scheme across
+    clips/fovs (same physical object -> same id everywhere). Raises ValueError
+    if the result would have duplicate ids."""
+    out = [replace(t, track_id=mapping.get(t.track_id, t.track_id)) for t in tracks]
+    ids = [t.track_id for t in out]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"remap produced duplicate track ids: {sorted(ids)}")
+    return out
+
+
+def project_bbox(bbox, sx, sy):
+    """Project a normalized (xmin, ymin, w, h) bbox from one center-crop FOV to
+    another. Both FOVs are centered crops of the same source scaled to the same
+    output, so normalized coords map affinely about the center (0.5): a point
+    moves toward/away from 0.5 by the scale factor and the box scales likewise.
+    ``sx = crop_w(src)/crop_w(dst)``, ``sy = crop_h(src)/crop_h(dst)``."""
+    x, y, w, h = bbox
+    return (0.5 + (x - 0.5) * sx, 0.5 + (y - 0.5) * sy, w * sx, h * sy)
+
+
+def crossfov_fill_track(tracks, *, track_id, source_frames, sx, sy):
+    """Replace the target track's frames with ``source_frames`` (a frame->bbox
+    dict from another FOV's GT) projected into this FOV via project_bbox. Used
+    to fill an unstable/short track from the same object's clean track in a
+    different FOV of the same clip (same frames, exact geometry). Raises
+    ValueError if track_id is not present."""
+    projected = {f: project_bbox(b, sx, sy) for f, b in source_frames.items()}
+    out, found = [], False
+    for t in tracks:
+        if t.track_id == track_id:
+            out.append(replace(t, frames=projected))
+            found = True
+        else:
+            out.append(t)
+    if not found:
+        raise ValueError(f"crossfov_fill: target track {track_id} not found")
+    return out
+
+
 def drop_tracks(tracks, *, track_ids):
     """Remove the tracks whose ids are in track_ids (spurious / false-positive
     trajectories rejected during human review). All others pass through."""

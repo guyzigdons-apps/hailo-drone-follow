@@ -1,11 +1,14 @@
 from dynamic_tiling.gt_clean import GtTrack
 from dynamic_tiling.gt_edit import (
     clip_frame_range,
+    crossfov_fill_track,
     despike_track_heights,
     drop_tracks,
     hold_track_tail,
     interp_track_gaps,
     pin_static_tracks,
+    project_bbox,
+    remap_track_ids,
 )
 
 
@@ -98,6 +101,57 @@ def test_despike_only_touches_selected_tracks_and_respects_ratio():
     assert got3[20] == (0.5, 0.7, 0.02, 0.062)  # within ratio -> unchanged
     got4 = next(t for t in out if t.track_id == 4).frames
     assert got4 == p4.frames  # untouched track identical
+
+
+def test_remap_track_ids_renames_per_mapping():
+    a = _t(1, 2, {0: (0, 0, 1, 1)})
+    b = _t(3, 2, {0: (0, 0, 1, 1)})
+    c = _t(2, 1, {0: (0, 0, 1, 1)})
+    out = remap_track_ids([a, b, c], mapping={1: 1, 3: 2, 2: 3})
+    assert sorted((t.track_id, t.cls) for t in out) == [(1, 2), (2, 2), (3, 1)]
+
+
+def test_remap_track_ids_rejects_id_collision():
+    a = _t(1, 2, {0: (0, 0, 1, 1)})
+    b = _t(2, 2, {0: (0, 0, 1, 1)})
+    try:
+        remap_track_ids([a, b], mapping={1: 5, 2: 5})  # both -> 5
+        assert False, "expected collision error"
+    except ValueError:
+        pass
+
+
+def test_project_bbox_affine_about_center():
+    # at the exact center, projection is identity for position; size scales
+    assert project_bbox((0.5, 0.5, 0.10, 0.20), sx=0.5, sy=0.5) == (0.5, 0.5, 0.05, 0.10)
+    # off-center point pulled toward 0.5 by the scale factor
+    x, y, w, h = project_bbox((0.7, 0.3, 0.10, 0.10), sx=0.5, sy=0.5)
+    assert abs(x - (0.5 + 0.2 * 0.5)) < 1e-12  # 0.6
+    assert abs(y - (0.5 - 0.2 * 0.5)) < 1e-12  # 0.4
+    assert abs(w - 0.05) < 1e-12 and abs(h - 0.05) < 1e-12
+
+
+def test_crossfov_fill_replaces_target_with_projected_source():
+    # target track 4 has jittery native frames; replace with projected source
+    tgt = _t(4, 1, {10: (0.9, 0.9, 0.02, 0.02)})
+    keep = _t(3, 1, {0: (0.1, 0.1, 0.05, 0.05)})
+    src_frames = {10: (0.7, 0.3, 0.10, 0.10), 11: (0.7, 0.3, 0.10, 0.10)}
+    out = crossfov_fill_track([tgt, keep], track_id=4,
+                              source_frames=src_frames, sx=0.5, sy=0.5)
+    got = next(t for t in out if t.track_id == 4).frames
+    assert sorted(got) == [10, 11]
+    assert got[10] == project_bbox(src_frames[10], 0.5, 0.5)
+    # other track untouched
+    assert next(t for t in out if t.track_id == 3).frames == keep.frames
+
+
+def test_crossfov_fill_requires_target_present():
+    try:
+        crossfov_fill_track([_t(3, 1, {0: (0, 0, 1, 1)})], track_id=99,
+                            source_frames={0: (0.5, 0.5, 0.1, 0.1)}, sx=1.0, sy=1.0)
+        assert False, "expected error"
+    except ValueError:
+        pass
 
 
 def test_drop_tracks_removes_only_listed_ids():
