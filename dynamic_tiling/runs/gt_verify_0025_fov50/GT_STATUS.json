@@ -1,0 +1,18 @@
+{
+  "status": "approved",
+  "locked": true,
+  "clip": "DJI_20260528155151_0025_D",
+  "fov": "fov50",
+  "approved_on": "2026-06-03",
+  "approved_by": "Gilad Nahor",
+  "gt_file": "gt_tracks.verified.json",
+  "sha256": "e85275f3dfd23137a7bfaed2aa9cc31db4bff97dceecbadd3293f44049e2a8ad",
+  "tracks": {"vehicle": [1, 2], "person": [3, 4]},
+  "corrections_chain": [
+    "pin_static_tracks",
+    "interp_track_gaps",
+    "despike_track_heights",
+    "hold_track_tail"
+  ],
+  "note": "LOCKED ground-truth. Do not overwrite gt_tracks.verified.json. It is reproducible by replaying corrections.json over gt_tracks.json; the sha256 above must match the approved bytes. File is chmod 444 on disk to block accidental re-run overwrites."
+}

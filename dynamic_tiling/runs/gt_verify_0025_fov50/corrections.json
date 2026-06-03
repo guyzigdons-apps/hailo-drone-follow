@@ -1,0 +1,38 @@
+{
+  "pin_static_tracks": {
+    "track_ids": [
+      1,
+      2
+    ],
+    "ref_frame": 330,
+    "frame_range": [
+      0,
+      1313
+    ],
+    "source": "gt_tracks.json"
+  },
+  "interp_track_gaps": {
+    "track_ids": [
+      3,
+      4
+    ],
+    "max_gap": 10,
+    "source": "gt_tracks.verified.json"
+  },
+  "despike_track_heights": {
+    "track_ids": [
+      3,
+      4
+    ],
+    "min_ratio": 0.8,
+    "window": 31,
+    "source": "gt_tracks.verified.json"
+  },
+  "hold_track_tail": {
+    "track_ids": [
+      4
+    ],
+    "until_frame": 1313,
+    "source": "gt_tracks.verified.json"
+  }
+}
