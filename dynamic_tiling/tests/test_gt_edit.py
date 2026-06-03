@@ -8,6 +8,7 @@ from dynamic_tiling.gt_edit import (
     hold_track_tail,
     interp_track_gaps,
     pin_static_tracks,
+    merge_tracks,
     project_bbox,
     remap_track_ids,
     restore_track_width,
@@ -242,6 +243,27 @@ def test_drift_extend_track_skips_frames_missing_in_reference():
     out = drift_extend_track([tgt], track_id=5, ref_frames=ref_frames, frame_range=(8, 10))
     fr = out[0].frames
     assert sorted(fr) == [10]  # nothing added (no ref to derive drift)
+
+
+def test_merge_tracks_concatenates_fragments_to_min_id():
+    a = _t(3, 1, {0: (0.1, 0.1, 0.05, 0.05), 1: (0.1, 0.1, 0.05, 0.05)})
+    b = _t(7, 1, {5: (0.2, 0.2, 0.05, 0.05)})
+    c = _t(12, 1, {9: (0.3, 0.3, 0.05, 0.05)})
+    keep = _t(1, 2, {0: (0.9, 0.9, 0.1, 0.1)})
+    out = merge_tracks([a, b, c, keep], groups=[[3, 7, 12]])
+    merged = next(t for t in out if t.track_id == 3)  # min id of the group
+    assert sorted(merged.frames) == [0, 1, 5, 9]
+    assert merged.cls == 1
+    # ids 7 and 12 are gone; untouched track stays
+    assert sorted(t.track_id for t in out) == [1, 3]
+    assert next(t for t in out if t.track_id == 1).frames == keep.frames
+
+
+def test_merge_tracks_first_listed_wins_on_frame_conflict():
+    a = _t(3, 1, {5: (0.1, 0.1, 0.05, 0.05)})
+    b = _t(7, 1, {5: (0.9, 0.9, 0.05, 0.05)})  # same frame
+    out = merge_tracks([a, b], groups=[[3, 7]])
+    assert out[0].frames[5] == (0.1, 0.1, 0.05, 0.05)  # id3 listed first wins
 
 
 def test_drop_tracks_removes_only_listed_ids():

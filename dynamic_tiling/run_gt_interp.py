@@ -40,8 +40,12 @@ def main():
 
     corr_path = out / "corrections.json"
     corrections = json.loads(corr_path.read_text()) if corr_path.exists() else {}
-    corrections["interp_track_gaps"] = {"track_ids": ids, "max_gap": args.max_gap,
-                                        "source": args.source}
+    # interp can run more than once per chain (different tracks / max_gaps) -> list
+    recs = corrections.get("interp_track_gaps", [])
+    if isinstance(recs, dict):  # back-compat with the single-dict format
+        recs = [recs]
+    recs.append({"track_ids": ids, "max_gap": args.max_gap, "source": args.source})
+    corrections["interp_track_gaps"] = recs
     corr_path.write_text(json.dumps(corrections, indent=2))
     print(f"interpolated in-span gaps (<= {args.max_gap}) for tracks {ids}")
     print(f"wrote {out/'gt_tracks.verified.json'} + overlay + corrections.json")

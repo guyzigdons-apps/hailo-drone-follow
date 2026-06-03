@@ -135,6 +135,27 @@ def drift_extend_track(tracks, *, track_id, ref_frames, frame_range):
     return [replace(t, frames=new) if t.track_id == track_id else t for t in tracks]
 
 
+def merge_tracks(tracks, *, groups):
+    """Merge each group of track ids into a single track (same physical object
+    that the tracker ID-split). The merged track keeps the min id of its group,
+    the cls of the first-listed member, and the union of frames; on a frame
+    conflict the earlier-listed member wins. Tracks in no group pass through.
+    Order is not preserved."""
+    by_id = {t.track_id: t for t in tracks}
+    grouped = {tid for g in groups for tid in g}
+    out = [t for t in tracks if t.track_id not in grouped]
+    for group in groups:
+        members = [by_id[i] for i in group if i in by_id]
+        if not members:
+            continue
+        frames = {}
+        for m in members:
+            for f, b in m.frames.items():
+                frames.setdefault(f, b)  # first-listed member wins on conflict
+        out.append(replace(members[0], track_id=min(group), frames=frames))
+    return out
+
+
 def drop_tracks(tracks, *, track_ids):
     """Remove the tracks whose ids are in track_ids (spurious / false-positive
     trajectories rejected during human review). All others pass through."""
