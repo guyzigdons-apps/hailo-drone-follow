@@ -2,6 +2,7 @@ from dynamic_tiling.gt_clean import GtTrack
 from dynamic_tiling.gt_edit import (
     clip_frame_range,
     despike_track_heights,
+    hold_track_tail,
     interp_track_gaps,
     pin_static_tracks,
 )
@@ -96,6 +97,26 @@ def test_despike_only_touches_selected_tracks_and_respects_ratio():
     assert got3[20] == (0.5, 0.7, 0.02, 0.062)  # within ratio -> unchanged
     got4 = next(t for t in out if t.track_id == 4).frames
     assert got4 == p4.frames  # untouched track identical
+
+
+def test_hold_track_tail_repeats_last_bbox_to_end():
+    last = (0.4, 0.3, 0.05, 0.06)
+    p4 = _t(4, 1, {5: (0.1, 0.1, 0.05, 0.06), 8: last})  # ends at frame 8
+    other = _t(3, 1, {0: (0.2, 0.2, 0.05, 0.06)})
+    out = hold_track_tail([p4, other], track_ids=[4], until_frame=11)
+    got = next(t for t in out if t.track_id == 4).frames
+    # frames 9,10,11 added, all equal to the last (frame-8) bbox
+    assert sorted(got) == [5, 8, 9, 10, 11]
+    assert got[9] == last and got[10] == last and got[11] == last
+    # original frames untouched; out-of-ids track untouched
+    assert got[5] == (0.1, 0.1, 0.05, 0.06)
+    assert next(t for t in out if t.track_id == 3).frames == other.frames
+
+
+def test_hold_track_tail_noop_when_until_not_past_last():
+    p4 = _t(4, 1, {5: (0.1, 0.1, 0.05, 0.06), 8: (0.4, 0.3, 0.05, 0.06)})
+    out = hold_track_tail([p4], track_ids=[4], until_frame=8)
+    assert sorted(out[0].frames) == [5, 8]  # nothing added
 
 
 def test_pin_requires_ref_frame_present():

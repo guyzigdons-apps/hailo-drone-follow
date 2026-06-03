@@ -65,6 +65,26 @@ def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31, max_it
     return out
 
 
+def hold_track_tail(tracks, *, track_ids, until_frame):
+    """For each track in track_ids, repeat its last-frame bbox forward through
+    ``until_frame`` inclusive (the object is still present at the clip end but
+    the detector dropped it). No-op for a track whose last frame is already at
+    or past until_frame. Tracks outside track_ids pass through unchanged."""
+    ids = set(track_ids)
+    out = []
+    for t in tracks:
+        if t.track_id not in ids or not t.frames:
+            out.append(t)
+            continue
+        last = max(t.frames)
+        box = t.frames[last]
+        frames = dict(t.frames)
+        for f in range(last + 1, until_frame + 1):
+            frames[f] = box
+        out.append(replace(t, frames=frames))
+    return out
+
+
 def pin_static_tracks(tracks, *, track_ids, ref_frame, frame_range):
     """For each track in track_ids, replace its frames with the ref_frame bbox
     held constant across frame_range inclusive (for static objects under a fixed
