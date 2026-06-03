@@ -10,6 +10,7 @@ from dynamic_tiling.gt_edit import (
     pin_static_tracks,
     project_bbox,
     remap_track_ids,
+    restore_track_width,
 )
 
 
@@ -153,6 +154,41 @@ def test_crossfov_fill_requires_target_present():
         assert False, "expected error"
     except ValueError:
         pass
+
+
+def test_restore_track_width_left_anchored_to_high_pctile():
+    # static car, full width 0.05 most frames; occluded (right side cut) on a few
+    frames = {i: (0.50, 0.30, 0.05, 0.04) for i in range(41)}
+    for f in (18, 19, 20, 21, 22):
+        frames[f] = (0.50, 0.30, 0.03, 0.04)  # narrowed from the right
+    out = restore_track_width([_t(2, 2, frames)], track_ids=[2], anchor="left",
+                              percentile=90, min_ratio=0.85, window=31)
+    fr = out[0].frames
+    # occluded frame restored to ~full width, LEFT edge (xmin) preserved
+    assert abs(fr[20][2] - 0.05) < 1e-9
+    assert fr[20][0] == 0.50           # xmin unchanged (left-anchored)
+    assert fr[20][1] == 0.30 and fr[20][3] == 0.04  # y,h untouched
+    # an already-full frame is unchanged
+    assert fr[0] == (0.50, 0.30, 0.05, 0.04)
+
+
+def test_restore_track_width_right_anchor_keeps_xmax():
+    frames = {i: (0.50, 0.30, 0.05, 0.04) for i in range(41)}
+    frames[20] = (0.52, 0.30, 0.03, 0.04)  # narrowed, right edge (xmax=0.55) fixed
+    out = restore_track_width([_t(2, 2, frames)], track_ids=[2], anchor="right",
+                              percentile=90, min_ratio=0.85, window=31)
+    fr = out[0].frames
+    assert abs(fr[20][2] - 0.05) < 1e-9
+    assert abs((fr[20][0] + fr[20][2]) - 0.55) < 1e-9  # xmax preserved
+
+
+def test_restore_track_width_only_selected_tracks():
+    a = _t(2, 2, {i: (0.5, 0.3, 0.03, 0.04) for i in range(41)})
+    b = _t(1, 2, {i: (0.7, 0.3, 0.03, 0.04) for i in range(41)})
+    out = restore_track_width([a, b], track_ids=[2], percentile=90,
+                              min_ratio=0.85, window=31)
+    # track 1 untouched (uniform width -> nothing to restore anyway, but also not selected)
+    assert next(t for t in out if t.track_id == 1).frames == b.frames
 
 
 def test_drift_extend_track_follows_reference_drift():

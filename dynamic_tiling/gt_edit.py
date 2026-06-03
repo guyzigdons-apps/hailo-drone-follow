@@ -162,6 +162,57 @@ def hold_track_tail(tracks, *, track_ids, until_frame):
     return out
 
 
+def _percentile(values, p):
+    """Linear-interpolated p-th percentile (0..100) of a non-empty list."""
+    vals = sorted(values)
+    if len(vals) == 1:
+        return vals[0]
+    k = (len(vals) - 1) * p / 100.0
+    lo = int(k)
+    frac = k - lo
+    hi = min(lo + 1, len(vals) - 1)
+    return vals[lo] + (vals[hi] - vals[lo]) * frac
+
+
+def restore_track_width(tracks, *, track_ids, anchor="left", percentile=90,
+                        min_ratio=0.85, window=151, max_iter=20):
+    """Restore the width of a track that is intermittently occluded on one side
+    (e.g. a parked car partly hidden behind another). For each frame whose width
+    is below ``min_ratio`` * the local windowed ``percentile``-th width (the
+    unoccluded width), the width is reset to that target while the stable edge
+    is held: ``anchor='left'`` keeps xmin, ``'right'`` keeps xmax, ``'center'``
+    keeps the centre; y and h are untouched. Applied iteratively to convergence.
+    Tracks outside track_ids pass through unchanged. (xmin, ymin, w, h) bboxes."""
+    ids = set(track_ids)
+    half = window // 2
+    out = []
+    for t in tracks:
+        if t.track_id not in ids:
+            out.append(t)
+            continue
+        fis = sorted(t.frames)
+        frames = dict(t.frames)
+        for _ in range(max_iter):
+            widths = [frames[f][2] for f in fis]
+            changed = False
+            for i, f in enumerate(fis):
+                target = _percentile(widths[max(0, i - half):i + half + 1], percentile)
+                x, y, w, h = frames[f]
+                if w < min_ratio * target:
+                    if anchor == "right":
+                        nx = x + w - target
+                    elif anchor == "center":
+                        nx = x + w / 2.0 - target / 2.0
+                    else:  # left
+                        nx = x
+                    frames[f] = (nx, y, target, h)
+                    changed = True
+            if not changed:
+                break
+        out.append(replace(t, frames=frames))
+    return out
+
+
 def pin_static_tracks(tracks, *, track_ids, ref_frame, frame_range):
     """For each track in track_ids, replace its frames with the ref_frame bbox
     held constant across frame_range inclusive (for static objects under a fixed
