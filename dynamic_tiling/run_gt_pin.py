@@ -33,9 +33,11 @@ def main():
     pinned = pin_static_tracks(tracks, track_ids=ids, ref_frame=args.ref_frame, frame_range=rng)
     (out / "gt_tracks.verified.json").write_text(json.dumps(tracks_to_doc(pinned, clip=out.name)))
     (out / "overlay_verified.frames.json").write_text(json.dumps(overlay_doc_by_id(pinned)))
-    (out / "corrections.json").write_text(json.dumps(
-        {"pin_static_tracks": {"track_ids": ids, "ref_frame": args.ref_frame,
-                               "frame_range": list(rng), "source": args.source}}, indent=2))
+    corr_path = out / "corrections.json"
+    corrections = json.loads(corr_path.read_text()) if corr_path.exists() else {}
+    corrections["pin_static_tracks"] = {"track_ids": ids, "ref_frame": args.ref_frame,
+                                        "frame_range": list(rng), "source": args.source}
+    corr_path.write_text(json.dumps(corrections, indent=2))
     print(f"pinned tracks {ids} to frame {args.ref_frame} over {rng}")
     print(f"wrote {out/'gt_tracks.verified.json'} + overlay + corrections.json")
 

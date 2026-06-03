@@ -65,6 +65,13 @@ def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31, max_it
     return out
 
 
+def drop_tracks(tracks, *, track_ids):
+    """Remove the tracks whose ids are in track_ids (spurious / false-positive
+    trajectories rejected during human review). All others pass through."""
+    ids = set(track_ids)
+    return [t for t in tracks if t.track_id not in ids]
+
+
 def hold_track_tail(tracks, *, track_ids, until_frame):
     """For each track in track_ids, repeat its last-frame bbox forward through
     ``until_frame`` inclusive (the object is still present at the clip end but

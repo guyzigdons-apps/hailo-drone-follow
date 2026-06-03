@@ -2,6 +2,7 @@ from dynamic_tiling.gt_clean import GtTrack
 from dynamic_tiling.gt_edit import (
     clip_frame_range,
     despike_track_heights,
+    drop_tracks,
     hold_track_tail,
     interp_track_gaps,
     pin_static_tracks,
@@ -97,6 +98,20 @@ def test_despike_only_touches_selected_tracks_and_respects_ratio():
     assert got3[20] == (0.5, 0.7, 0.02, 0.062)  # within ratio -> unchanged
     got4 = next(t for t in out if t.track_id == 4).frames
     assert got4 == p4.frames  # untouched track identical
+
+
+def test_drop_tracks_removes_only_listed_ids():
+    a = _t(1, 2, {0: (0, 0, 1, 1)})
+    b = _t(6, 2, {0: (0, 0, 1, 1)})
+    c = _t(2, 1, {0: (0, 0, 1, 1)})
+    out = drop_tracks([a, b, c], track_ids=[6])
+    assert [t.track_id for t in out] == [1, 2]
+
+
+def test_drop_tracks_empty_list_is_noop():
+    a = _t(1, 2, {0: (0, 0, 1, 1)})
+    out = drop_tracks([a], track_ids=[])
+    assert [t.track_id for t in out] == [1]
 
 
 def test_hold_track_tail_repeats_last_bbox_to_end():
