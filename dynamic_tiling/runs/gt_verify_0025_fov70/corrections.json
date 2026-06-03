@@ -1,16 +1,17 @@
 {
   "drop_tracks": {
     "track_ids": [
-      6
+      3,
+      6,
+      7
     ],
     "source": "gt_tracks.json"
   },
   "remap_track_ids": {
     "mapping": {
-      "1": 1,
-      "3": 2,
-      "2": 3,
-      "5": 4
+      "8": 3,
+      "9": 4,
+      "10": 5
     },
     "source": "gt_tracks.verified.json"
   },
@@ -18,28 +19,41 @@
     "track_ids": [
       1,
       2,
-      3
+      5
     ],
     "max_gap": 25,
     "source": "gt_tracks.verified.json"
   },
-  "despike_track_heights": {
-    "track_ids": [
-      3
-    ],
-    "min_ratio": 0.8,
-    "window": 31,
-    "source": "gt_tracks.verified.json"
-  },
+  "drift_extend_track": [
+    {
+      "track_id": 5,
+      "ref_track_id": 1,
+      "frame_range": [
+        0,
+        1018
+      ],
+      "source": "gt_tracks.verified.json"
+    }
+  ],
   "crossfov_fill_track": [
+    {
+      "track_id": 3,
+      "src_dir": "dynamic_tiling/runs/gt_verify_0025_fov50",
+      "src_track_id": 3,
+      "src_fov": 50,
+      "dst_fov": 70,
+      "sx": 0.6660571808510638,
+      "sy": 0.6660756501182034,
+      "source": "gt_tracks.verified.json"
+    },
     {
       "track_id": 4,
       "src_dir": "dynamic_tiling/runs/gt_verify_0025_fov50",
       "src_track_id": 4,
       "src_fov": 50,
-      "dst_fov": 60,
-      "sx": 0.8073745718315535,
-      "sy": 0.8073065902578797,
+      "dst_fov": 70,
+      "sx": 0.6660571808510638,
+      "sy": 0.6660756501182034,
       "source": "gt_tracks.verified.json"
     }
   ],

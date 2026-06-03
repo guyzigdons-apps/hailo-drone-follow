@@ -2,15 +2,16 @@
   "status": "approved",
   "locked": true,
   "clip": "DJI_20260528155151_0025_D",
-  "fov": "fov60",
+  "fov": "fov70",
   "approved_on": "2026-06-03",
   "approved_by": "Gilad Nahor",
   "gt_file": "gt_tracks.verified.json",
-  "sha256": "2b16b5bbaf0ba05d443ae11c95fcb724d328cf9b8bc07f61dc96949207955eed",
+  "sha256": "a1970af6a8ea7eb415f7d02580ad674a8ad6d8ff0000de9ea09beb7a44316f78",
   "tracks": {
     "vehicle": [
       1,
-      2
+      2,
+      5
     ],
     "person": [
       3,
@@ -21,13 +22,14 @@
     "1": "car-right",
     "2": "car-left",
     "3": "walker",
-    "4": "bg-person"
+    "4": "bg-person",
+    "5": "car-bottom(fov70-only)"
   },
   "corrections_chain": [
     "drop_tracks",
     "remap_track_ids",
     "interp_track_gaps",
-    "despike_track_heights",
+    "drift_extend_track",
     "crossfov_fill_track",
     "restore_track_width",
     "smooth_track_bbox"

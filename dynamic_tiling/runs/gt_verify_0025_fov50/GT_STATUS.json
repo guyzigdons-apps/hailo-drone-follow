@@ -6,13 +6,29 @@
   "approved_on": "2026-06-03",
   "approved_by": "Gilad Nahor",
   "gt_file": "gt_tracks.verified.json",
-  "sha256": "e85275f3dfd23137a7bfaed2aa9cc31db4bff97dceecbadd3293f44049e2a8ad",
-  "tracks": {"vehicle": [1, 2], "person": [3, 4]},
+  "sha256": "04bdb0be098b2d2d80fdc17b376d0ff64046e6b171da03c3e6d45164dee3bb18",
+  "tracks": {
+    "vehicle": [
+      1,
+      2
+    ],
+    "person": [
+      3,
+      4
+    ]
+  },
+  "id_scheme": {
+    "1": "car-right",
+    "2": "car-left",
+    "3": "walker",
+    "4": "bg-person"
+  },
   "corrections_chain": [
-    "pin_static_tracks",
     "interp_track_gaps",
     "despike_track_heights",
-    "hold_track_tail"
+    "hold_track_tail",
+    "restore_track_width",
+    "smooth_track_bbox"
   ],
-  "note": "LOCKED ground-truth. Do not overwrite gt_tracks.verified.json. It is reproducible by replaying corrections.json over gt_tracks.json; the sha256 above must match the approved bytes. File is chmod 444 on disk to block accidental re-run overwrites."
+  "note": "LOCKED ground-truth. ids aligned to canonical scheme across fovs. Cars use native drift-following detections (not pinned). vehicle-2 width restored (occluded by vehicle-1) + horizontally smoothed. People in fov60/fov70 are fov50 cross-fov reprojections. Reproducible by replaying corrections.json over gt_tracks.json; sha256 must match. chmod 444."
 }
