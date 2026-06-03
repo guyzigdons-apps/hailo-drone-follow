@@ -58,10 +58,13 @@ def main():
 
     corr_path = out / "corrections.json"
     corrections = json.loads(corr_path.read_text()) if corr_path.exists() else {}
-    corrections["crossfov_fill_track"] = {
+    # this correction can run once per filled track, so accumulate a list
+    fills = corrections.get("crossfov_fill_track", [])
+    fills.append({
         "track_id": args.track_id, "src_dir": str(args.src_dir),
         "src_track_id": args.src_track_id, "src_fov": args.src_fov,
-        "dst_fov": args.dst_fov, "sx": sx, "sy": sy, "source": args.source}
+        "dst_fov": args.dst_fov, "sx": sx, "sy": sy, "source": args.source})
+    corrections["crossfov_fill_track"] = fills
     corr_path.write_text(json.dumps(corrections, indent=2))
     print(f"filled track {args.track_id} from {args.src_dir} track {args.src_track_id} "
           f"(fov{args.src_fov}->fov{args.dst_fov}, sx={sx:.4f}, sy={sy:.4f}); "
