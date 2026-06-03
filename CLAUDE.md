@@ -36,6 +36,7 @@ A Hailo-based robot-follow application that uses an AI pipeline (GStreamer + Hai
 - `--serial-baud RATE` — Baud rate (default: 57600)
 - `--connection URL` — MAVSDK connection string (default: `udpin://0.0.0.0:14540` for simulation)
 - `--takeoff-landing` — Enable auto arm/takeoff/land (default: off — drone must already be airborne)
+- `--auto-offboard` — Activate OFFBOARD mode programmatically at startup (`drone.offboard.start()`). Default off: stream zero setpoints and wait for the operator to flip OFFBOARD via the GCS, then watch for OFFBOARD-loss mid-flight and pause control while the pilot is in manual mode. Pass `--auto-offboard` for SITL or bench tests where there's no GCS to flip; in that mode the resilience pause is skipped.
 - `--target-altitude M` — Target altitude in metres (default: 3.0). Held by a fixed-altitude P loop; also used as takeoff height with `--takeoff-landing`. Adjustable mid-flight via UI.
 - `--target-bbox-height` — Desired person size in frame 0–0.25 (default: 0.25). Drives forward/backward distance. Adjustable mid-flight via UI "Target Size" slider.
 - `--mission-duration SECONDS` — Mission watchdog timeout (default: 300.0 = 5 min). With `--takeoff-landing`, the drone auto-lands at expiry. Without `--takeoff-landing`, the control loop restarts (process keeps running, MAVSDK reconnects). Pass a large value (e.g. `86400` for 24 h) to effectively disable the watchdog. Note: silent auto-land at 300 s is a surprise hazard — set explicitly for long flights.
@@ -102,7 +103,9 @@ If ByteTracker activates zero tracks for the locked person (e.g. detector confid
 ## PX4 Offboard Mode
 
 ### How it works in this app
-By default (no `--takeoff-landing`), the app streams zero setpoints and waits for the pilot to switch to OFFBOARD mode via GCS or RC. The app never commands the mode switch itself. Use `--takeoff-landing` to enable auto arm/takeoff/land.
+Default (no `--takeoff-landing`, no `--auto-offboard`): the app streams zero setpoints and waits for the pilot to switch to OFFBOARD via GCS/RC — the app never commands the mode switch itself. Once OFFBOARD is detected, a background monitor watches for the pilot leaving OFFBOARD mid-flight (RC override, mode change): on loss, `send_command` and `on_target_lost` short-circuit so the wire stays idle while the pilot has manual control; on re-acquisition the smoothing filter is reset and control resumes from a clean state.
+
+Use `--takeoff-landing` to enable auto arm/takeoff/land. Use `--auto-offboard` to skip the wait-for-GCS handshake (SITL / bench testing); the mid-flight resilience pause is also skipped in that mode.
 
 ### Required PX4 Parameters (set via QGroundControl)
 - `COM_RC_IN_MODE = 4` — Allow flight without RC transmitter
