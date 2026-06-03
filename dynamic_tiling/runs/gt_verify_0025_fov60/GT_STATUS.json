@@ -1,0 +1,14 @@
+{
+  "status": "approved",
+  "locked": true,
+  "clip": "DJI_20260528155151_0025_D",
+  "fov": "fov60",
+  "approved_on": "2026-06-03",
+  "approved_by": "Gilad Nahor",
+  "gt_file": "gt_tracks.verified.json",
+  "sha256": "73ad5f6764ed3b59344bbf959c94a2855231b7f9e6ddefa5df0bff1f4e7459bb",
+  "tracks": {"vehicle": [1, 2], "person": [3, 4]},
+  "id_scheme": {"1": "car-right", "2": "car-left", "3": "walker", "4": "bg-person"},
+  "corrections_chain": ["drop_tracks", "remap_track_ids", "pin_static_tracks", "interp_track_gaps", "despike_track_heights", "crossfov_fill_track"],
+  "note": "LOCKED ground-truth. ids aligned to fov50 canonical scheme. bg-person (id4) is fov50 id4 projected into fov60 (validated to ~3e-4 vs native). Reproducible by replaying corrections.json over gt_tracks.json; sha256 must match. chmod 444 to block accidental overwrites."
+}
