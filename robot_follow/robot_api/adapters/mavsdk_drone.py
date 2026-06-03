@@ -599,11 +599,10 @@ class MavsdkDroneAdapter:
         # Lazy-initialised in start_session to avoid binding to the
         # wrong event loop when the adapter is constructed in tests.
         self._shutdown_event: Optional[asyncio.Event] = None
-        # OFFBOARD-loss resilience (manual-handshake path only). Tracks
-        # whether PX4 is currently in OFFBOARD; gated on send_command so
-        # we don't fight a pilot who has taken manual control mid-flight.
-        # Auto-offboard path keeps this True throughout (the app drove
-        # the mode, so any mid-flight change is exceptional).
+        # True while PX4 is in OFFBOARD. send_command and on_target_lost
+        # gate on this so the wire stays idle when the pilot has manual
+        # control. Only the manual-handshake path spawns the monitor that
+        # flips this flag; the auto-offboard path leaves it True.
         self._offboard_active: bool = True
         self._offboard_monitor_task: Optional[asyncio.Task] = None
 
@@ -689,38 +688,28 @@ class MavsdkDroneAdapter:
                         await asyncio.sleep(_ARM_SHUTDOWN_POLL_S)
             await self._drone.action.takeoff()
             await asyncio.sleep(5)
-        # Offboard handshake. After 03-07 deleted VelocityCommandAPI,
-        # _start_offboard operates on the MAVSDK drone directly (sends
-        # zero VelocityBodyYawspeed setpoints inline).
-        #
-        # The pre-03-07 default was to *wait* for the operator to flip
-        # OFFBOARD on the GCS — safer for real flights, since the pilot
-        # retains the moment of transition. 03-07 collapsed this to
-        # unconditional auto-start. We restore the choice via
-        # --auto-offboard: opt in for SITL / bench tests; default is the
-        # safer wait-for-GCS handshake.
+        # OFFBOARD handshake. --auto-offboard tells the app to set the
+        # mode itself (SITL / bench). Without it, stream zero setpoints
+        # and wait for the operator to flip OFFBOARD on the GCS, then
+        # spawn the resilience monitor that pauses send_command if the
+        # pilot leaves OFFBOARD mid-flight.
         if getattr(self._args, "auto_offboard", False):
             await _start_offboard(self._drone, self._shutdown_event)
-            # Auto-offboard skips resilience: the app drove the mode and
-            # any later change is exceptional (RC override, failsafe).
         else:
             await _wait_for_offboard_mode(self._drone, self._shutdown_event)
             if self._shutdown_event.is_set():
                 return
-            # Spawn the OFFBOARD-loss resilience monitor. send_command
-            # gates on self._offboard_active; the monitor flips it.
             self._offboard_monitor_task = asyncio.create_task(
                 self._offboard_resilience_loop())
 
     async def _offboard_resilience_loop(self) -> None:
-        """Watch for OFFBOARD-loss and re-acquire on pilot's mode toggle.
+        """Pause control while the pilot is in manual mode, resume when OFFBOARD returns.
 
-        Restores the pre-7f602d2 default-path behavior: when the pilot
-        switches out of OFFBOARD mid-flight (RC override, mode change),
-        we pause active control (send_command short-circuits to a zero
-        setpoint) until OFFBOARD is re-engaged. On re-acquisition the
-        smoothing filter is reset so the next command starts from a
-        clean state.
+        When the flight mode leaves OFFBOARD mid-flight (RC override,
+        GCS mode switch), clear _offboard_active so send_command and
+        on_target_lost short-circuit. When OFFBOARD comes back, reset
+        the smoothing filter and re-arm the flag so the next command
+        starts from a clean state.
         """
         assert self._shutdown_event is not None
         assert self._drone is not None
