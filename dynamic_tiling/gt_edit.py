@@ -135,6 +135,28 @@ def drift_extend_track(tracks, *, track_id, ref_frames, frame_range):
     return [replace(t, frames=new) if t.track_id == track_id else t for t in tracks]
 
 
+def plan_gap_recovery(frames):
+    """Predict (cx, cy, w, h) for every frame missing INSIDE a track's span, by
+    linear interpolation of the bounding present detections. Used to seed a
+    zoomed re-detection pass: each predicted centre is where to place the 2x ROI
+    so the detector can recover a small target the dense pass missed. Returns
+    {frame -> (cx, cy, w, h)} (centre-normalized). Empty if <2 present frames."""
+    fis = sorted(frames)
+    plan = {}
+    for a, b in zip(fis, fis[1:]):
+        if b - a <= 1:
+            continue
+        xa, ya, wa, ha = frames[a]
+        xb, yb, wb, hb = frames[b]
+        cax, cay = xa + wa / 2, ya + ha / 2
+        cbx, cby = xb + wb / 2, yb + hb / 2
+        for f in range(a + 1, b):
+            t = (f - a) / (b - a)
+            plan[f] = (cax + (cbx - cax) * t, cay + (cby - cay) * t,
+                       wa + (wb - wa) * t, ha + (hb - ha) * t)
+    return plan
+
+
 def merge_tracks(tracks, *, groups):
     """Merge each group of track ids into a single track (same physical object
     that the tracker ID-split). The merged track keeps the min id of its group,

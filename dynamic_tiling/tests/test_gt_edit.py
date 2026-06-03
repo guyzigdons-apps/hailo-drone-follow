@@ -9,6 +9,7 @@ from dynamic_tiling.gt_edit import (
     interp_track_gaps,
     pin_static_tracks,
     merge_tracks,
+    plan_gap_recovery,
     project_bbox,
     remap_track_ids,
     restore_track_width,
@@ -243,6 +244,21 @@ def test_drift_extend_track_skips_frames_missing_in_reference():
     out = drift_extend_track([tgt], track_id=5, ref_frames=ref_frames, frame_range=(8, 10))
     fr = out[0].frames
     assert sorted(fr) == [10]  # nothing added (no ref to derive drift)
+
+
+def test_plan_gap_recovery_predicts_centers_in_gaps():
+    frames = {0: (0.0, 0.0, 0.10, 0.10), 4: (0.40, 0.40, 0.10, 0.10)}
+    plan = plan_gap_recovery(frames)
+    assert sorted(plan) == [1, 2, 3]  # only the missing in-span frames
+    # frame 2 = midpoint: centers 0->(0.05,0.05), 4->(0.45,0.45) -> (0.25,0.25)
+    cx, cy, w, h = plan[2]
+    assert abs(cx - 0.25) < 1e-9 and abs(cy - 0.25) < 1e-9
+    assert abs(w - 0.10) < 1e-9 and abs(h - 0.10) < 1e-9
+
+
+def test_plan_gap_recovery_empty_when_no_gaps():
+    assert plan_gap_recovery({0: (0, 0, 1, 1), 1: (0, 0, 1, 1)}) == {}
+    assert plan_gap_recovery({5: (0, 0, 1, 1)}) == {}
 
 
 def test_merge_tracks_concatenates_fragments_to_min_id():
