@@ -81,6 +81,12 @@ def main():
                     help="fraction of a grid cell shared with each neighbour "
                          "(matches the static-ablation 0.25 convention; 0 = edge-to-edge)")
     ap.add_argument("--target-model-h", type=float, default=40.0)
+    ap.add_argument("--reacq-motion", choices=("frozen", "velocity"), default="frozen",
+                    help="re-acquisition anchor motion model (frozen = legacy; "
+                         "velocity = extrapolate the anchor during loss)")
+    ap.add_argument("--reacq-radius-growth", type=float, default=0.0,
+                    help="per-lost-frame growth of the centre-distance reacq gate "
+                         "(0 = strict IoU-only legacy behaviour)")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--nms-thresh", type=float, default=0.25)
     ap.add_argument("--out", type=Path, default=None,
@@ -134,6 +140,8 @@ def main():
         budget=args.budget, fps=args.fps, discovery_fps=args.discovery_fps,
         max_zoom=args.max_zoom, target_model_h=args.target_model_h,
         discovery_grid=discovery_grid, grid_overlap=args.discovery_overlap,
+        reacq_motion=args.reacq_motion,
+        reacq_radius_growth=args.reacq_radius_growth,
         on_result=on_result)
 
     print(format_aggregate(agg, budget=args.budget, fps=args.fps))
@@ -146,6 +154,8 @@ def main():
                   "discovery_grid": args.discovery_grid,
                   "discovery_overlap": args.discovery_overlap, "max_zoom": args.max_zoom,
                   "target_model_h": args.target_model_h,
+                  "reacq_motion": args.reacq_motion,
+                  "reacq_radius_growth": args.reacq_radius_growth,
                   "max_frames": args.max_frames, "nms_thresh": args.nms_thresh}
         person_ids = [t.track_id for t in tracks if t.cls == PERSON]
         args.out.write_text(json.dumps(

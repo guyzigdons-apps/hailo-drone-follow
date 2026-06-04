@@ -83,3 +83,30 @@ def test_on_result_callback_receives_track_id_and_runresult(monkeypatch):
         on_result=lambda tid, res: seen.append((tid, type(res).__name__)),
     )
     assert seen == [(3, "RunResult"), (4, "RunResult")]
+
+
+def test_reacq_knobs_reach_target_lock(monkeypatch):
+    captured = {}
+
+    class FakeLock:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.track_id = None
+            from dynamic_tiling.types import LockState
+            self.state = LockState()
+
+    def fake_run(frames, src_w, src_h, scheduler, lock, backend, meter, gt_traj, person_cls=1):
+        r = RunResult()
+        r.n_frames = 1
+        return r
+
+    monkeypatch.setattr(trials_mod, "TargetLock", FakeLock)
+    monkeypatch.setattr(trials_mod, "run", fake_run)
+    run_all_trials(
+        frames_factory=lambda: iter([]), src_w=1920, src_h=1080,
+        gt_tracks=[GtTrack(cls=1, track_id=1, frames={0: (0.1, 0.1, 0.2, 0.2)})],
+        backend_factory=lambda: _NullBackend(),
+        budget=300.0, fps=30.0, discovery_fps=2.0,
+        reacq_motion="velocity", reacq_radius_growth=0.002)
+    assert captured["reacq_motion"] == "velocity"
+    assert captured["reacq_radius_growth"] == 0.002

@@ -29,6 +29,7 @@ def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
                    backend_factory, budget, fps, discovery_fps,
                    max_zoom=2.0, target_model_h=40.0,
                    discovery_grid=None, grid_overlap=0.0, iou_thr=0.5,
+                   reacq_motion="frozen", reacq_radius_growth=0.0,
                    on_result=None) -> AggregateScore:
     """on_result: optional callback(track_id, RunResult) fired after each trial
     (e.g. to emit a replayable frames.json before the result is discarded)."""
@@ -43,7 +44,8 @@ def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
         scheduler = TileScheduler(src_w, src_h, discovery_period=discovery_period,
                                   max_zoom=max_zoom, target_model_h=target_model_h,
                                   grid_overlap=grid_overlap, **_disc)
-        lock = TargetLock(frame_rate=int(fps))  # frame_rate forwarded via **tracker_kwargs to create_tracker
+        lock = TargetLock(frame_rate=int(fps), reacq_motion=reacq_motion,
+                          reacq_radius_growth=reacq_radius_growth)  # frame_rate forwarded via **tracker_kwargs to create_tracker
         backend = backend_factory()
         meter = BudgetMeter(budget_inf_per_s=budget, fps=fps)
         try:

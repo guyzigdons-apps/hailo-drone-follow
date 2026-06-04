@@ -90,8 +90,9 @@ def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
                            "activated": bool(t.is_activated)}
                           for t in getattr(lock, "last_tracks", [])
                           if t.filtered_tlwh]}
-        if state.status != "TRACKING" and state.bbox_norm[2] > 0:
-            dbg["anchor"] = list(state.bbox_norm)
+        anchor = getattr(lock, "reacq_anchor", None)
+        if state.status != "TRACKING" and anchor is not None:
+            dbg["anchor"] = list(anchor)
         res.frame_lock[frame_idx] = dbg
 
         if state.status == "TRACKING":
