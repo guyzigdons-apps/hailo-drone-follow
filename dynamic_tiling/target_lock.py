@@ -60,6 +60,8 @@ class TargetLock:
         # Internal: current ByteTracker track id (may diverge on re-acquisition).
         self._bt_track_id: int | None = None
         self.state = LockState()
+        # Debug: the tracker output of the most recent step() (for replay dumps).
+        self.last_tracks: list = []
 
     def _set_track(self, bt_track_id: int) -> None:
         """Lock onto a ByteTracker track.  Stable track_id is set only once."""
@@ -82,6 +84,7 @@ class TargetLock:
     def step(self, person_dets: Sequence[Det], *, lock_if_unlocked: bool = False,
              gt_bbox_norm: tuple | None = None) -> LockState:
         tracks = self._tracker.update(dets_to_array(person_dets))
+        self.last_tracks = tracks
 
         if self._bt_track_id is None:
             if gt_bbox_norm is not None:

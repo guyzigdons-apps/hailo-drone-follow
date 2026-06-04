@@ -28,7 +28,10 @@ class AggregateScore:
 def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
                    backend_factory, budget, fps, discovery_fps,
                    max_zoom=2.0, target_model_h=40.0,
-                   discovery_grid=None, iou_thr=0.5) -> AggregateScore:
+                   discovery_grid=None, grid_overlap=0.0, iou_thr=0.5,
+                   on_result=None) -> AggregateScore:
+    """on_result: optional callback(track_id, RunResult) fired after each trial
+    (e.g. to emit a replayable frames.json before the result is discarded)."""
     discovery_period = max(1, int(round(fps / discovery_fps)))
     per_trial = []
     tiles_acc = 0.0
@@ -38,7 +41,8 @@ def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
         distractors = [t.frames for t in gt_tracks if t is not target]
         _disc = {"discovery_grid": discovery_grid} if discovery_grid else {}
         scheduler = TileScheduler(src_w, src_h, discovery_period=discovery_period,
-                                  max_zoom=max_zoom, target_model_h=target_model_h, **_disc)
+                                  max_zoom=max_zoom, target_model_h=target_model_h,
+                                  grid_overlap=grid_overlap, **_disc)
         lock = TargetLock(frame_rate=int(fps))  # frame_rate forwarded via **tracker_kwargs to create_tracker
         backend = backend_factory()
         meter = BudgetMeter(budget_inf_per_s=budget, fps=fps)
@@ -47,6 +51,8 @@ def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
                       meter, target_traj, person_cls=PERSON)
         finally:
             backend.close()
+        if on_result is not None:
+            on_result(target.track_id, res)
         # only score frames we actually played
         gt_for_score = {f: b for f, b in target_traj.items() if f < res.n_frames}
         per_trial.append(score_trial(gt_for_score, res.pred_traj,

@@ -109,3 +109,21 @@ def test_recovery_grid_stays_inside_frame_at_right_edge():
         assert 0 <= cy <= 3000
     # The recovery region's right edge must not exceed src_w.
     assert max(c.x + c.w for c in crops) <= 4000
+
+
+def test_grid_overlap_makes_adjacent_tiles_share_area():
+    s0 = TileScheduler(3840, 2160)
+    s = TileScheduler(3840, 2160, grid_overlap=0.25)
+    t0 = s0._grid(4, 3, 0, 0, 3840, 2160, "d")
+    t = s._grid(4, 3, 0, 0, 3840, 2160, "d")
+    assert len(t) == len(t0) == 12
+    # horizontal neighbours overlap by ~25% of a tile width
+    a, b = t[0], t[1]
+    shared = (a.x + a.w) - b.x
+    assert shared > 0.2 * a.w
+    # zero-overlap grid: edge-to-edge cells (no horizontal sharing beyond aspect growth)
+    a0, b0 = t0[0], t0[1]
+    assert (a0.x + a0.w) - b0.x <= 0.05 * a0.w + 1
+    # coverage preserved: last tile still reaches the right/bottom edge
+    assert t[3].x + t[3].w >= 3839
+    assert t[-1].y + t[-1].h >= 2159

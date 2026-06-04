@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import cv2
@@ -54,6 +55,16 @@ def format_aggregate(agg: AggregateScore, *, budget: float, fps: float) -> str:
     )
 
 
+def results_doc(agg: AggregateScore, *, person_track_ids, params) -> dict:
+    """Machine-readable results: run params + aggregate + per-trial (one per
+    person GT track, in run order — run_all_trials iterates person tracks in
+    gt_tracks order, so person_track_ids must be that same order)."""
+    aggregate = {k: v for k, v in asdict(agg).items() if k != "per_trial"}
+    per_trial = [{"track_id": tid, **asdict(t)}
+                 for tid, t in zip(person_track_ids, agg.per_trial, strict=True)]
+    return {"params": params, "aggregate": aggregate, "per_trial": per_trial}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", required=True, type=Path)
@@ -66,9 +77,20 @@ def main():
     ap.add_argument("--discovery-fps", type=float, default=2.0)
     ap.add_argument("--discovery-grid", default=None)
     ap.add_argument("--max-zoom", type=float, default=2.0)
+    ap.add_argument("--discovery-overlap", type=float, default=0.25,
+                    help="fraction of a grid cell shared with each neighbour "
+                         "(matches the static-ablation 0.25 convention; 0 = edge-to-edge)")
     ap.add_argument("--target-model-h", type=float, default=40.0)
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--nms-thresh", type=float, default=0.25)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="write params + aggregate + per-trial results as JSON")
+    ap.add_argument("--dump-frames", type=Path, default=None,
+                    help="dir: write a replayable trial_<id>.frames.json per trial "
+                         "(dets + tiles w/ categories + LOCK box) for the overlay viewer")
+    ap.add_argument("--cache", type=Path, default=None,
+                    help="SQLite tile-cache path; repeated (frame, crop) inferences are "
+                         "served from it (a fully-warm cache needs no chip)")
     args = ap.parse_args()
 
     discovery_grid = None
@@ -84,8 +106,26 @@ def main():
     tracks = _load_tracks(args.gt_tracks)
 
     def backend_factory():
+        if args.cache:
+            from .inference import CachedHefBackend
+            return CachedHefBackend(
+                args.hef, nms_score_threshold=args.nms_thresh, class_offset=1,
+                cache_path=args.cache,
+                meta={"video": args.video.name, "hef": args.hef,
+                      "nms_thresh": args.nms_thresh, "class_offset": 1,
+                      "det_coords": "crop_local"})
         from .inference import HefBackend
         return HefBackend(args.hef, nms_score_threshold=args.nms_thresh, class_offset=1)
+
+    on_result = None
+    if args.dump_frames:
+        from .replay import emit_frames_json
+        args.dump_frames.mkdir(parents=True, exist_ok=True)
+
+        def on_result(track_id, res):
+            out = args.dump_frames / f"trial_{track_id}.frames.json"
+            emit_frames_json(res, label=f"trial-{track_id}-b{int(args.budget)}", out_path=out)
+            print(f"frames -> {out}")
 
     agg = run_all_trials(
         frames_factory=_frames_factory(args.video, args.max_frames),
@@ -93,9 +133,24 @@ def main():
         backend_factory=backend_factory,
         budget=args.budget, fps=args.fps, discovery_fps=args.discovery_fps,
         max_zoom=args.max_zoom, target_model_h=args.target_model_h,
-        discovery_grid=discovery_grid)
+        discovery_grid=discovery_grid, grid_overlap=args.discovery_overlap,
+        on_result=on_result)
 
     print(format_aggregate(agg, budget=args.budget, fps=args.fps))
+
+    if args.out:
+        from hailo_tiling.classes import PERSON
+        params = {"video": str(args.video), "gt_tracks": str(args.gt_tracks),
+                  "hef": args.hef, "budget": args.budget, "fps": args.fps,
+                  "discovery_fps": args.discovery_fps,
+                  "discovery_grid": args.discovery_grid,
+                  "discovery_overlap": args.discovery_overlap, "max_zoom": args.max_zoom,
+                  "target_model_h": args.target_model_h,
+                  "max_frames": args.max_frames, "nms_thresh": args.nms_thresh}
+        person_ids = [t.track_id for t in tracks if t.cls == PERSON]
+        args.out.write_text(json.dumps(
+            results_doc(agg, person_track_ids=person_ids, params=params), indent=2))
+        print(f"results -> {args.out}")
 
 
 if __name__ == "__main__":

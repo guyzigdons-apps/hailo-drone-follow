@@ -166,3 +166,52 @@ def test_run_multi_records_per_target_rois():
         f"expected >=2 frames with 'dynamic' tiles, got {len(dynamic_frames)}: "
         f"{result.frame_tiles}"
     )
+
+
+def test_emit_frames_json_keeps_tiles_and_appends_lock_box(tmp_path):
+    import json
+    from dynamic_tiling.replay import RunResult, emit_frames_json
+
+    res = RunResult()
+    res.frame_dets = {0: [], 1: []}
+    res.frame_tiles = {0: [(0.0, 0.0, 0.5, 0.5, "discovery")],
+                       1: [(0.2, 0.2, 0.3, 0.3, "recovery")]}
+    res.pred_traj = {1: (0.25, 0.25, 0.1, 0.2)}  # locked only on frame 1
+    res.n_frames = 2
+    out = tmp_path / "t.frames.json"
+    emit_frames_json(res, label="trial", out_path=out)
+    doc = json.loads(out.read_text())
+    f0, f1 = doc["frames"]
+    assert f0["tiles"] == [{"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5, "category": "discovery"}]
+    assert f1["tiles"][0]["category"] == "recovery"
+    assert f0["detections"] == []  # no lock on frame 0 -> no LOCK box
+    assert f1["detections"][-1] == {"label": "LOCK", "confidence": 1.0,
+                                    "bbox": [0.25, 0.25, 0.1, 0.2]}
+
+
+def test_emit_frames_json_renders_tracker_tags_and_search_anchor(tmp_path):
+    import json
+    from dynamic_tiling.replay import RunResult, emit_frames_json
+
+    res = RunResult()
+    res.frame_dets = {0: [], 1: []}
+    res.frame_lock = {
+        0: {"status": "TRACKING", "bt_id": 7,
+            "tracks": [{"id": 7, "bbox": [0.1, 0.1, 0.05, 0.1], "activated": True}]},
+        1: {"status": "SEARCHING", "bt_id": 7, "anchor": [0.1, 0.1, 0.05, 0.1],
+            "tracks": [{"id": 9, "bbox": [0.4, 0.4, 0.05, 0.1], "activated": True},
+                       {"id": 11, "bbox": [0.6, 0.6, 0.05, 0.1], "activated": False}]},
+    }
+    res.n_frames = 2
+    out = tmp_path / "t.frames.json"
+    emit_frames_json(res, label="trial", out_path=out)
+    doc = json.loads(out.read_text())
+    f0, f1 = doc["frames"]
+    labels0 = [d["label"] for d in f0["detections"]]
+    labels1 = [d["label"] for d in f1["detections"]]
+    assert "trk7*" in labels0                      # lock's own track marked with *
+    assert "trk9" in labels1 and "trk11" in labels1
+    assert "ANCHOR[SEARCHING]" in labels1          # stale reacq anchor visible during loss
+    assert "ANCHOR[TRACKING]" not in labels0       # no anchor box while tracking
+    trk11 = next(d for d in f1["detections"] if d["label"] == "trk11")
+    assert trk11["confidence"] < 0.5               # non-activated tracks render faint

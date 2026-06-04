@@ -16,6 +16,9 @@ class RunResult:
     pred_traj: dict = field(default_factory=dict)   # frame_idx -> (x,y,w,h) | absent
     frame_dets: dict = field(default_factory=dict)  # frame_idx -> list[Det]
     frame_tiles: dict = field(default_factory=dict)  # frame_idx -> list[(x_n,y_n,w_n,h_n,category)]
+    # frame_idx -> {"status", "bt_id", "tracks": [{"id","bbox","activated"}],
+    #               "anchor": last-known bbox (only while SEARCHING/LOST)}
+    frame_lock: dict = field(default_factory=dict)
     total_tiles: int = 0
     n_frames: int = 0
 
@@ -79,6 +82,18 @@ def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
                                c.w / src_w, c.h / src_h, cat))
         res.frame_tiles[frame_idx] = tagged
 
+        # Tracker debug for the replay dump: ByteTracker tracks, the lock's
+        # current internal id, and the stale re-acquisition anchor during loss.
+        dbg = {"status": state.status,
+               "bt_id": getattr(lock, "_bt_track_id", None),
+               "tracks": [{"id": t.track_id, "bbox": list(t.filtered_tlwh),
+                           "activated": bool(t.is_activated)}
+                          for t in getattr(lock, "last_tracks", [])
+                          if t.filtered_tlwh]}
+        if state.status != "TRACKING" and state.bbox_norm[2] > 0:
+            dbg["anchor"] = list(state.bbox_norm)
+        res.frame_lock[frame_idx] = dbg
+
         if state.status == "TRACKING":
             res.pred_traj[frame_idx] = tuple(state.bbox_norm)
     res.n_frames = frame_idx + 1
@@ -86,17 +101,35 @@ def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
 
 
 def emit_frames_json(res: RunResult, label: str, out_path: Path,
-                     class_labels=LABELS) -> None:
-    """Write a frames.json the existing overlay_viewer can load."""
+                     class_labels=LABELS, pred_label: str = "LOCK") -> None:
+    """Write a frames.json the existing overlay_viewer can load.
+
+    Tiles keep their visualization category (discovery/roi/recovery); on frames
+    where the lock held a target, its bbox is appended as a `pred_label` det so
+    the locked box is distinguishable from raw detections."""
     frames = []
     for f, dets in sorted(res.frame_dets.items()):
         tiles_out = []
         for (tx, ty, tw, th, tcat) in res.frame_tiles.get(f, []):
             tiles_out.append({"x": tx, "y": ty, "w": tw, "h": th, "category": tcat})
-        frames.append({"frame": f, "detections": [
+        dets_out = [
             {"label": class_labels[d.cls] if 0 <= d.cls < len(class_labels) else str(d.cls),
-             "confidence": d.score, "bbox": [d.x, d.y, d.w, d.h]} for d in dets],
-            "tiles": tiles_out})
+             "confidence": d.score, "bbox": [d.x, d.y, d.w, d.h]} for d in dets]
+        pred = res.pred_traj.get(f)
+        if pred is not None:
+            dets_out.append({"label": pred_label, "confidence": 1.0, "bbox": list(pred)})
+        lk = res.frame_lock.get(f)
+        if lk:
+            for t in lk.get("tracks", []):
+                star = "*" if t["id"] == lk.get("bt_id") else ""
+                dets_out.append({"label": f"trk{t['id']}{star}",
+                                 "confidence": 0.99 if t["activated"] else 0.30,
+                                 "bbox": list(t["bbox"])})
+            anchor = lk.get("anchor")
+            if anchor is not None:
+                dets_out.append({"label": f"ANCHOR[{lk['status']}]",
+                                 "confidence": 1.0, "bbox": list(anchor)})
+        frames.append({"frame": f, "detections": dets_out, "tiles": tiles_out})
     out_path.write_text(json.dumps({"label": label, "frames": frames}))
 
 

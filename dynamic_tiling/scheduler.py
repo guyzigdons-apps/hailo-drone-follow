@@ -8,7 +8,8 @@ class TileScheduler:
                  discovery_period: int = 15, discovery_grid: tuple = (3, 2),
                  recovery_grid: tuple = (3, 3), max_zoom: float = 2.0,
                  target_model_h: float = 40.0, roi_margin_frac: float = 0.25,
-                 recovery_span: float = 0.4):
+                 recovery_span: float = 0.4, grid_overlap: float = 0.0):
+        self.grid_overlap = grid_overlap
         self.src_w = src_w
         self.src_h = src_h
         self.discovery_period = discovery_period
@@ -24,15 +25,23 @@ class TileScheduler:
         """gx*gy grid covering the [x0,y0,w,h] src-px region. Each tile is 4:3
         (model aspect); the tile width is grown to the larger of the cell width
         and the aspect-scaled cell height so cells are fully covered (tiles may
-        overlap) rather than leaving vertical/horizontal gaps."""
+        overlap) rather than leaving vertical/horizontal gaps.
+
+        `grid_overlap` is the fraction of a cell shared with each neighbour
+        (static-ablation convention): cells grow to cell = span/(g - (g-1)*o)
+        and the stride shrinks to cell*(1-o), so boundary objects appear whole
+        in at least one tile while coverage of [x0,y0,w,h] is preserved."""
         out = []
-        cw = w / gx
-        ch = h / gy
+        o = self.grid_overlap
+        cw = w / (gx - (gx - 1) * o)
+        ch = h / (gy - (gy - 1) * o)
+        sx = cw * (1 - o)
+        sy = ch * (1 - o)
         crop_w = max(cw, ch * MODEL_ASPECT)
         for j in range(gy):
             for i in range(gx):
-                cx = x0 + (i + 0.5) * cw
-                cy = y0 + (j + 0.5) * ch
+                cx = x0 + cw / 2 + i * sx
+                cy = y0 + ch / 2 + j * sy
                 r = CropRect.from_center_width(cx, cy, int(round(crop_w)), mode=mode)
                 out.append(r.clamp(self.src_w, self.src_h))
         return out

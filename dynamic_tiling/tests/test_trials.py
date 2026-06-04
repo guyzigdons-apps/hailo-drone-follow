@@ -58,3 +58,28 @@ def test_vehicle_tracks_not_trialed_but_persons_are(monkeypatch):
         budget=300.0, fps=30.0, discovery_fps=2.0,
     )
     assert agg.n_trials == 1          # only the person track is trialed
+
+
+def test_on_result_callback_receives_track_id_and_runresult(monkeypatch):
+    tracks = [
+        GtTrack(cls=1, track_id=3, frames={i: (0.1, 0.1, 0.2, 0.2) for i in range(10)}),
+        GtTrack(cls=1, track_id=4, frames={i: (0.6, 0.6, 0.1, 0.1) for i in range(10)}),
+    ]
+
+    def fake_run(frames, src_w, src_h, scheduler, lock, backend, meter, gt_traj, person_cls=1):
+        r = RunResult()
+        r.pred_traj = dict(gt_traj)
+        r.n_frames = 10
+        r.total_tiles = 10
+        return r
+
+    monkeypatch.setattr(trials_mod, "run", fake_run)
+    seen = []
+    run_all_trials(
+        frames_factory=lambda: iter([]),
+        src_w=1920, src_h=1080, gt_tracks=tracks,
+        backend_factory=lambda: _NullBackend(),
+        budget=300.0, fps=30.0, discovery_fps=2.0,
+        on_result=lambda tid, res: seen.append((tid, type(res).__name__)),
+    )
+    assert seen == [(3, "RunResult"), (4, "RunResult")]

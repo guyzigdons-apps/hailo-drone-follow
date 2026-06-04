@@ -15,6 +15,7 @@ move to hailo_tiling.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 from hailo_tiling.backends.hef import HefBackend as _BatchedHefBackend
@@ -48,6 +49,67 @@ class HefBackend:
 
     def close(self) -> None:
         self._inner.close()
+
+
+class _LazyBatched:
+    """Constructs the wrapped batched backend on FIRST infer call only.
+
+    With a fully-warmed cache, `CachingBackend` never forwards a miss, so the
+    chip backend (and the Hailo device) is never opened at all."""
+
+    def __init__(self, make_backend):
+        self._make = make_backend
+        self._inner = None
+
+    def infer(self, frame, crops, frame_idx):
+        if self._inner is None:
+            self._inner = self._make()
+        return self._inner.infer(frame, crops, frame_idx)
+
+    def close(self) -> None:
+        if self._inner is not None:
+            self._inner.close()
+
+
+class CachedHefBackend:
+    """Single-crop HEF backend with an SQLite tile cache (Plan-4 cache layer).
+
+    Composition: `CachingBackend(SqliteCacheStore)` over a lazily-constructed
+    batched HEF backend. Repeated `(frame_idx, crop)` pairs are served from the
+    cache; a fully-cached run needs no chip. `meta` (e.g. hef/nms/class_offset/
+    video identity) is stamped into the cache on creation and verified on
+    reopen — a mismatch raises rather than silently mixing conventions.
+    Note: dets are cached CROP-LOCAL (this backend's convention) — do not share
+    a DB with GstCropperBackend-warmed source-coord caches.
+    """
+
+    def __init__(self, *args, cache_path, meta=None, make_backend=None, ppv=1, **kwargs):
+        from hailo_tiling.backends.caching import CachingBackend
+        from hailo_tiling.cache.store import SqliteCacheStore
+
+        Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+        self._store = SqliteCacheStore.open(cache_path)
+        for k, v in (meta or {}).items():
+            cur = self._store.meta_get(k)
+            if cur is None:
+                self._store.meta_put(k, str(v))
+            elif cur != str(v):
+                self._store.close()
+                raise ValueError(
+                    f"cache meta mismatch for {k!r}: cache has {cur!r}, run has {v!r} "
+                    f"({cache_path})")
+        if make_backend is None:
+            def make_backend():
+                return _BatchedHefBackend(*args, **kwargs)
+        self._inner = CachingBackend(wrapped=_LazyBatched(make_backend),
+                                     store=self._store, ppv=ppv)
+
+    def infer(self, frame, crop: CropRect, frame_idx: int) -> list:
+        return self._inner.infer(frame, [crop], frame_idx)[0]
+
+    def close(self) -> None:
+        self._inner.close()
+        self._store.close()
 
 
 class ReplayBackend:
