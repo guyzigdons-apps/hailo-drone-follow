@@ -49,3 +49,66 @@ def test_motion_gated_policy_filters_by_radius_and_decays():
                         frames_lost=31, anchor=(0.30, 0.5, 0.04, 0.10)) == []
     assert p.candidates(frame_idx=0, person_dets=[near], tracks=[],
                         frames_lost=35, anchor=(0.30, 0.5, 0.04, 0.10)) == [near]
+
+
+def _color_frame(color_bgr):
+    f = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    f[:, :] = color_bgr
+    return f
+
+
+def test_histogram_policy_keeps_color_matched_candidate():
+    """P5: among motion-gate survivors, keep the candidate whose HSV histogram
+    correlates with the reference (tracked) crop. The color-matched candidate
+    must survive; the off-color one is dropped (top-2 keep, only 2 candidates,
+    but the color match must rank first and the reference must drive it)."""
+    from dynamic_tiling.reid_policy import HistogramPolicy
+    p = HistogramPolicy(radius_growth=1.0, r0=2.0)  # huge gate: never filter on motion
+
+    red = (0, 0, 255)   # BGR red
+    blue = (255, 0, 0)   # BGR blue
+    red_frame = _color_frame(red)
+
+    # Reference: target was last sampled on a RED frame.
+    p.note_reference(red_frame, _d(0.30))
+
+    # Two candidates at the same position but evaluated on different frames:
+    # a red-matched candidate and a blue mismatched candidate.
+    red_cand = _d(0.30)
+    blue_cand = _d(0.70)
+
+    # Frame for scoring is RED everywhere; recolor the blue candidate region blue
+    # so its crop histogram differs from the red reference.
+    frame = _color_frame(red)
+    # paint the blue candidate's pixel region blue
+    bx = int(0.70 * 1920)
+    frame[:, bx - 40:bx + 40] = blue
+
+    out = p.candidates(frame_idx=0, person_dets=[red_cand, blue_cand], tracks=[],
+                       frames_lost=5, anchor=(0.30, 0.5, 0.04, 0.10), frame=frame)
+    assert red_cand in out
+    # With top-2 and only 2 candidates both could survive; assert the color match
+    # ranks strictly ahead by checking the blue one is dropped when we add a 3rd.
+    blue_cand2 = _d(0.50)
+    bx2 = int(0.50 * 1920)
+    frame[:, bx2 - 40:bx2 + 40] = blue
+    out3 = p.candidates(frame_idx=0,
+                        person_dets=[red_cand, blue_cand, blue_cand2], tracks=[],
+                        frames_lost=5, anchor=(0.30, 0.5, 0.04, 0.10), frame=frame)
+    assert red_cand in out3 and len(out3) == 2
+
+
+def test_histogram_policy_passthrough_without_reference():
+    """No reference hist captured yet -> behave like the motion gate (no color cut)."""
+    from dynamic_tiling.reid_policy import HistogramPolicy
+    p = HistogramPolicy(radius_growth=1.0, r0=2.0)
+    a, b, c = _d(0.30), _d(0.31), _d(0.32)
+    frame = _color_frame((0, 0, 255))
+    out = p.candidates(frame_idx=0, person_dets=[a, b, c], tracks=[],
+                       frames_lost=5, anchor=(0.30, 0.5, 0.04, 0.10), frame=frame)
+    assert set(out) == {a, b, c}
+
+
+def test_policies_registry_includes_histogram():
+    from dynamic_tiling.reid_policy import POLICIES, HistogramPolicy
+    assert POLICIES["histogram"] is HistogramPolicy

@@ -26,6 +26,11 @@ class TrialScore:
     loss_events: int = 0
     mean_time_to_recover: float = 0.0
     recovery_success_rate: float = 0.0
+    # ReID accounting (zero when policy=none / no reid_assist for this trial)
+    reid_embeds: int = 0           # total embed() calls (chip + cache hits)
+    reid_chip_embeds: int = 0      # embeds that hit the chip (cache misses)
+    person_dets_seen: int = 0      # person dets the policy considered across the trial
+    frac_dets_embedded: float = 0.0  # reid_embeds / person_dets_seen (0 when none)
 
 
 def _covered(gt_box, pred_box, iou_thr):

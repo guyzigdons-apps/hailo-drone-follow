@@ -7,6 +7,8 @@ from __future__ import annotations
 from hailo_tiling.classes import PERSON
 from hailo_tiling.types import Det
 
+_MARGIN = 0.10           # crop margin around the bbox, fraction of bbox size (matches reid_embedder)
+
 
 def _iou(a, b):
     ax1, ay1, ax2, ay2 = a[0], a[1], a[0] + a[2], a[1] + a[3]
@@ -24,7 +26,7 @@ class GenerousPolicy:
     def should_sample_tracked(self, frame_idx: int) -> bool:
         return True
 
-    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None):
+    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None, frame=None):
         return list(person_dets)
 
 
@@ -39,7 +41,7 @@ class ProdPolicy:
     def should_sample_tracked(self, frame_idx: int) -> bool:
         return frame_idx % self.update_interval == 0
 
-    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None):
+    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None, frame=None):
         return list(person_dets)
 
 
@@ -54,7 +56,7 @@ class AmbiguityPolicy(ProdPolicy):
         self.iou_thr = iou_thr
         self.min_score = min_score
 
-    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None):
+    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None, frame=None):
         act = [t.filtered_tlwh for t in tracks if t.is_activated and t.filtered_tlwh]
         out = []
         for d in person_dets:
@@ -83,7 +85,7 @@ class MotionGatedPolicy(ProdPolicy):
             return frames_lost % 5 == 0
         return frames_lost % 15 == 0
 
-    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None):
+    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None, frame=None):
         if anchor is None or not self._cadence_ok(frames_lost):
             return []
         acx, acy = anchor[0] + anchor[2] / 2, anchor[1] + anchor[3] / 2
@@ -92,7 +94,74 @@ class MotionGatedPolicy(ProdPolicy):
                 if ((d.x + d.w / 2 - acx) ** 2 + (d.y + d.h / 2 - acy) ** 2) ** 0.5 <= r]
 
 
-POLICIES = {p.name: p for p in (GenerousPolicy, ProdPolicy, AmbiguityPolicy, MotionGatedPolicy)}
+def _crop_for(frame, det):
+    """BGR crop for a normalized det, with the same margin reid_embedder uses."""
+    src_h, src_w = frame.shape[:2]
+    mx, my = det.w * _MARGIN, det.h * _MARGIN
+    x = max(0.0, det.x - mx)
+    y = max(0.0, det.y - my)
+    w = min(1.0 - x, det.w + 2 * mx)
+    h = min(1.0 - y, det.h + 2 * my)
+    x0, y0 = int(round(x * src_w)), int(round(y * src_h))
+    x1 = max(x0 + 2, int(round((x + w) * src_w)))
+    y1 = max(y0 + 2, int(round((y + h) * src_h)))
+    return frame[y0:y1, x0:x1]
+
+
+def _hs_hist(crop_bgr):
+    """32x32 H-S histogram of a BGR crop, normalized for HISTCMP_CORREL."""
+    import cv2
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [32, 32], [0, 180, 0, 256])
+    cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+    return hist
+
+
+class HistogramPolicy(MotionGatedPolicy):
+    """P5 — motion gate + cheap HSV-histogram color pre-filter. Among the motion-gate
+    survivors, keep only the top-2 whose H-S histogram correlates most with the last
+    tracked crop's histogram (a free, chip-less color screen before the ReID embed).
+    The reference hist is captured via note_reference() each time the target is sampled
+    into the gallery (ReidAssist calls it on the should_sample_tracked path)."""
+    name = "histogram"
+
+    def __init__(self, update_interval: int = 30, radius_growth: float = 0.002,
+                 r0: float = 0.12, keep_top: int = 2):
+        super().__init__(update_interval, radius_growth, r0)
+        self.keep_top = keep_top
+        self._ref_hist = None
+
+    def note_reference(self, frame, det) -> None:
+        """Capture the reference H-S histogram from the tracked target's crop."""
+        if frame is None:
+            return
+        crop = _crop_for(frame, det)
+        if crop.size:
+            self._ref_hist = _hs_hist(crop)
+
+    def candidates(self, *, frame_idx, person_dets, tracks, frames_lost, anchor=None, frame=None):
+        survivors = super().candidates(
+            frame_idx=frame_idx, person_dets=person_dets, tracks=tracks,
+            frames_lost=frames_lost, anchor=anchor, frame=frame)
+        if self._ref_hist is None or frame is None or len(survivors) <= self.keep_top:
+            return survivors
+        import cv2
+        scored = []
+        for d in survivors:
+            crop = _crop_for(frame, d)
+            corr = -1.0 if not crop.size else \
+                cv2.compareHist(self._ref_hist, _hs_hist(crop), cv2.HISTCMP_CORREL)
+            scored.append((corr, d))
+        scored.sort(key=lambda cd: cd[0], reverse=True)
+        keep = {id(d) for _, d in scored[:self.keep_top]}
+        return [d for d in survivors if id(d) in keep]
+
+
+# Maps policy NAME -> policy CLASS (not an instance). CLI wiring instantiates the
+# chosen class with the right knobs (update_interval / radius_growth / iou_thr / ...),
+# so callers must construct from these classes, never reuse a shared instance.
+POLICIES = {p.name: p for p in (GenerousPolicy, ProdPolicy, AmbiguityPolicy,
+                                MotionGatedPolicy, HistogramPolicy)}
 
 
 class ReidAssist:
@@ -110,8 +179,13 @@ class ReidAssist:
         if state.status == "TRACKING" and lock.track_id is not None:
             if self.policy.should_sample_tracked(frame_idx) and state.bbox_norm[2] > 0:
                 x, y, w, h = state.bbox_norm
-                self.gallery.add(self.embedder.embed(
-                    frame, Det(cls=PERSON, score=1.0, x=x, y=y, w=w, h=h), frame_idx))
+                tracked_det = Det(cls=PERSON, score=1.0, x=x, y=y, w=w, h=h)
+                # P5 captures the reference color histogram from the tracked crop;
+                # other policies don't define note_reference (no-op via getattr).
+                note = getattr(self.policy, "note_reference", None)
+                if note is not None:
+                    note(frame, tracked_det)
+                self.gallery.add(self.embedder.embed(frame, tracked_det, frame_idx))
             return
         if lock.track_id is None or len(self.gallery) == 0:
             return
@@ -119,7 +193,8 @@ class ReidAssist:
             frame_idx=frame_idx, person_dets=persons,
             tracks=getattr(lock, "last_tracks", []),
             frames_lost=state.frames_since_seen,
-            anchor=getattr(lock, "reacq_anchor", None))
+            anchor=getattr(lock, "reacq_anchor", None),
+            frame=frame)
         best_sim, best_det = self.gallery.reid_threshold, None
         for d in cands:
             sim = self.gallery.match(self.embedder.embed(frame, d, frame_idx))

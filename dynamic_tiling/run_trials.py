@@ -97,6 +97,21 @@ def main():
     ap.add_argument("--cache", type=Path, default=None,
                     help="SQLite tile-cache path; repeated (frame, crop) inferences are "
                          "served from it (a fully-warm cache needs no chip)")
+    ap.add_argument("--reid-policy",
+                    choices=("none", "generous", "prod", "ambiguity", "motion", "histogram"),
+                    default="none",
+                    help="ReID recovery policy; 'none' disables ReID entirely (P0)")
+    ap.add_argument("--reid-hef",
+                    default="/usr/local/hailo/resources/models/hailo10h/"
+                            "repvgg_a0_person_reid_512.hef",
+                    help="ReID embedding HEF (person-crop-only)")
+    ap.add_argument("--reid-cache", type=Path, default=None,
+                    help="SQLite embedding-cache path (chip-free re-runs of ReID); "
+                         "defaults to --cache when set")
+    ap.add_argument("--reid-threshold", type=float, default=0.75,
+                    help="cosine-similarity floor for accepting a ReID re-acquisition")
+    ap.add_argument("--reid-gallery-ema", type=float, default=None,
+                    help="EMA anchor alpha for the gallery (unset = FIFO only)")
     args = ap.parse_args()
 
     discovery_grid = None
@@ -123,6 +138,25 @@ def main():
         from .inference import HefBackend
         return HefBackend(args.hef, nms_score_threshold=args.nms_thresh, class_offset=1)
 
+    # ReID: a SHARED embedder (one chip/cache handle) but a FRESH gallery+policy
+    # per trial. reid_assist_factory is None when policy=none (P0 -> no ReID).
+    reid_assist_factory = None
+    reid_embedder = None
+    if args.reid_policy != "none":
+        from .reid_embedder import make_hef_embedder
+        from .reid_gallery import ReidGallery
+        from .reid_policy import POLICIES, ReidAssist
+
+        reid_cache = args.reid_cache if args.reid_cache is not None else args.cache
+        reid_embedder = make_hef_embedder(args.reid_hef, cache_path=reid_cache)
+        policy_cls = POLICIES[args.reid_policy]
+        # POLICIES maps name -> CLASS; instantiate with default knobs (each subclass
+        # carries sensible defaults: update_interval/radius_growth/iou_thr/...).
+        def reid_assist_factory():
+            gallery = ReidGallery(reid_threshold=args.reid_threshold,
+                                  ema_alpha=args.reid_gallery_ema)
+            return ReidAssist(reid_embedder, gallery, policy_cls())
+
     on_result = None
     if args.dump_frames:
         from .replay import emit_frames_json
@@ -142,7 +176,11 @@ def main():
         discovery_grid=discovery_grid, grid_overlap=args.discovery_overlap,
         reacq_motion=args.reacq_motion,
         reacq_radius_growth=args.reacq_radius_growth,
+        reid_assist_factory=reid_assist_factory,
         on_result=on_result)
+
+    if reid_embedder is not None:
+        reid_embedder.close()
 
     print(format_aggregate(agg, budget=args.budget, fps=args.fps))
 
@@ -156,7 +194,12 @@ def main():
                   "target_model_h": args.target_model_h,
                   "reacq_motion": args.reacq_motion,
                   "reacq_radius_growth": args.reacq_radius_growth,
-                  "max_frames": args.max_frames, "nms_thresh": args.nms_thresh}
+                  "max_frames": args.max_frames, "nms_thresh": args.nms_thresh,
+                  "reid_policy": args.reid_policy, "reid_hef": args.reid_hef,
+                  "reid_cache": str(args.reid_cache) if args.reid_cache is not None
+                  else (str(args.cache) if args.cache is not None else None),
+                  "reid_threshold": args.reid_threshold,
+                  "reid_gallery_ema": args.reid_gallery_ema}
         person_ids = [t.track_id for t in tracks if t.cls == PERSON]
         args.out.write_text(json.dumps(
             results_doc(agg, person_track_ids=person_ids, params=params), indent=2))

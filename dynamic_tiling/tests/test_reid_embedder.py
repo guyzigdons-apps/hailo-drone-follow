@@ -50,3 +50,26 @@ def test_cached_embedder_serves_repeats_without_extractor(tmp_path):
     assert fx.calls == 1                      # second call: cache hit
     assert np.allclose(v1, v2)
     assert e.stats["embeds"] == 2 and e.stats["chip_embeds"] == 1
+
+
+class _ReleaseOnlyExtractor:
+    """Mirrors the REAL HailoReIDExtractor: it exposes release(), NOT close()."""
+    model_name = "release_only"
+
+    def __init__(self):
+        self.released = False
+
+    def extract_embedding(self, crop_bgr):
+        v = np.ones(4, dtype=np.float32)
+        return v / np.linalg.norm(v)
+
+    def release(self):
+        self.released = True
+
+
+def test_close_calls_release_when_extractor_has_no_close():
+    from dynamic_tiling.reid_embedder import ReidEmbedder
+    fx = _ReleaseOnlyExtractor()
+    e = ReidEmbedder(extractor=fx)
+    e.close()                                 # must NOT raise AttributeError
+    assert fx.released is True

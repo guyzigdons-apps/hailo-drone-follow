@@ -73,7 +73,12 @@ class ReidEmbedder:
 
     def close(self) -> None:
         if self._extractor is not None:
-            self._extractor.close()
+            # The real HailoReIDExtractor exposes release(); fakes may expose
+            # close(). Call whichever exists so we never AttributeError on teardown.
+            closer = getattr(self._extractor, "release", None) or \
+                getattr(self._extractor, "close", None)
+            if closer is not None:
+                closer()
         if self._store is not None:
             self._store.close()
 
