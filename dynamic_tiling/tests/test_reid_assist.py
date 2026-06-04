@@ -88,3 +88,25 @@ def test_reid_recovers_lock_after_distant_reappear():
     # Recovered onto the far person, not the stale left-edge anchor.
     assert lock.state.bbox_norm[0] > 0.5
     assert assist.stats["embeds"] > 0
+
+
+def test_reid_stats_are_per_assist_delta_not_cumulative():
+    """Trials share ONE embedder (run_trials builds it once, run_all_trials makes a
+    fresh ReidAssist per trial). embedder.stats is cumulative across trials, so each
+    ReidAssist must snapshot the embedder counters at construction and report the
+    DELTA. Two sequential assists each doing exactly one embed must BOTH report
+    embeds==1 -- not 1 then 2."""
+    embedder = ReidEmbedder(extractor=_FakeExtractor())
+    frame = _frame()
+    person = _person(0.10)
+
+    a1 = ReidAssist(embedder, ReidGallery(), GenerousPolicy())
+    embedder.embed(frame, person, frame_idx=0)
+    assert a1.stats["embeds"] == 1
+    assert a1.stats["chip_embeds"] == 1
+
+    a2 = ReidAssist(embedder, ReidGallery(), GenerousPolicy())
+    embedder.embed(frame, person, frame_idx=1)
+    # a2 sees only ITS OWN embed; a1's delta is frozen at construction time of a2.
+    assert a2.stats["embeds"] == 1
+    assert a2.stats["chip_embeds"] == 1

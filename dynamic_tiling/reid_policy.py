@@ -173,6 +173,10 @@ class ReidAssist:
     def __init__(self, embedder, gallery, policy):
         self.embedder, self.gallery, self.policy = embedder, gallery, policy
         self.person_dets_seen = 0
+        # Trials SHARE one embedder, whose .stats counters are cumulative across
+        # trials. Snapshot the baseline at construction so this assist reports only
+        # the DELTA it caused (otherwise per-trial reid counters leak prior trials).
+        self._stats0 = dict(embedder.stats)
 
     def after_step(self, frame, frame_idx, persons, lock, state):
         self.person_dets_seen += len(persons)
@@ -205,6 +209,9 @@ class ReidAssist:
 
     @property
     def stats(self):
-        s = dict(self.embedder.stats)
+        # DELTA vs the baseline snapshot taken at construction (the shared embedder's
+        # counters are cumulative across trials); person_dets_seen is already local.
+        cur = self.embedder.stats
+        s = {k: cur.get(k, 0) - self._stats0.get(k, 0) for k in cur}
         s["person_dets_seen"] = self.person_dets_seen
         return s

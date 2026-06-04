@@ -55,6 +55,50 @@ def format_aggregate(agg: AggregateScore, *, budget: float, fps: float) -> str:
     )
 
 
+def build_backend_factory(*, hef, nms_thresh, cache, video_name):
+    """Zero-arg factory returning a fresh detection backend per trial. Uses the
+    SQLite-cached backend when `cache` is set (chip-free warm re-runs), else the
+    live HefBackend. Shared by the CLI and the ablation driver so the two never
+    diverge."""
+    def backend_factory():
+        if cache:
+            from .inference import CachedHefBackend
+            return CachedHefBackend(
+                hef, nms_score_threshold=nms_thresh, class_offset=1,
+                cache_path=cache,
+                meta={"video": video_name, "hef": hef,
+                      "nms_thresh": nms_thresh, "class_offset": 1,
+                      "det_coords": "crop_local"})
+        from .inference import HefBackend
+        return HefBackend(hef, nms_score_threshold=nms_thresh, class_offset=1)
+    return backend_factory
+
+
+def build_reid_assist_factory(*, reid_policy, reid_hef, reid_cache,
+                              reid_threshold, reid_gallery_ema):
+    """Build (reid_assist_factory, reid_embedder) for the given policy.
+
+    Returns (None, None) when reid_policy == "none" (P0 -> no ReID). Otherwise a
+    SHARED embedder (one chip/cache handle, cumulative stats) plus a zero-arg
+    factory yielding a FRESH ReidAssist (new gallery + new policy instance) per
+    trial — the gallery MUST reset between trials. Caller owns embedder.close().
+    Shared by the CLI and the ablation driver."""
+    if reid_policy == "none":
+        return None, None
+    from .reid_embedder import make_hef_embedder
+    from .reid_gallery import ReidGallery
+    from .reid_policy import POLICIES, ReidAssist
+
+    reid_embedder = make_hef_embedder(reid_hef, cache_path=reid_cache)
+    policy_cls = POLICIES[reid_policy]
+
+    def reid_assist_factory():
+        gallery = ReidGallery(reid_threshold=reid_threshold, ema_alpha=reid_gallery_ema)
+        return ReidAssist(reid_embedder, gallery, policy_cls())
+
+    return reid_assist_factory, reid_embedder
+
+
 def results_doc(agg: AggregateScore, *, person_track_ids, params) -> dict:
     """Machine-readable results: run params + aggregate + per-trial (one per
     person GT track, in run order — run_all_trials iterates person tracks in
@@ -126,36 +170,16 @@ def main():
 
     tracks = _load_tracks(args.gt_tracks)
 
-    def backend_factory():
-        if args.cache:
-            from .inference import CachedHefBackend
-            return CachedHefBackend(
-                args.hef, nms_score_threshold=args.nms_thresh, class_offset=1,
-                cache_path=args.cache,
-                meta={"video": args.video.name, "hef": args.hef,
-                      "nms_thresh": args.nms_thresh, "class_offset": 1,
-                      "det_coords": "crop_local"})
-        from .inference import HefBackend
-        return HefBackend(args.hef, nms_score_threshold=args.nms_thresh, class_offset=1)
+    backend_factory = build_backend_factory(
+        hef=args.hef, nms_thresh=args.nms_thresh, cache=args.cache,
+        video_name=args.video.name)
 
     # ReID: a SHARED embedder (one chip/cache handle) but a FRESH gallery+policy
     # per trial. reid_assist_factory is None when policy=none (P0 -> no ReID).
-    reid_assist_factory = None
-    reid_embedder = None
-    if args.reid_policy != "none":
-        from .reid_embedder import make_hef_embedder
-        from .reid_gallery import ReidGallery
-        from .reid_policy import POLICIES, ReidAssist
-
-        reid_cache = args.reid_cache if args.reid_cache is not None else args.cache
-        reid_embedder = make_hef_embedder(args.reid_hef, cache_path=reid_cache)
-        policy_cls = POLICIES[args.reid_policy]
-        # POLICIES maps name -> CLASS; instantiate with default knobs (each subclass
-        # carries sensible defaults: update_interval/radius_growth/iou_thr/...).
-        def reid_assist_factory():
-            gallery = ReidGallery(reid_threshold=args.reid_threshold,
-                                  ema_alpha=args.reid_gallery_ema)
-            return ReidAssist(reid_embedder, gallery, policy_cls())
+    reid_cache = args.reid_cache if args.reid_cache is not None else args.cache
+    reid_assist_factory, reid_embedder = build_reid_assist_factory(
+        reid_policy=args.reid_policy, reid_hef=args.reid_hef, reid_cache=reid_cache,
+        reid_threshold=args.reid_threshold, reid_gallery_ema=args.reid_gallery_ema)
 
     on_result = None
     if args.dump_frames:
