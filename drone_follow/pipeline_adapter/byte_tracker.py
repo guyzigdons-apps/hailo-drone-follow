@@ -302,7 +302,7 @@ def sub_stracks(tlista, tlistb):
     return list(stracks.values())
 
 def remove_duplicate_stracks(stracksa, stracksb):
-    pdist = iou_batch([t.tlbr for t in stracksa], [t.tlbr for t in stracksb])
+    pdist = 1.0 - iou_batch([t.tlbr for t in stracksa], [t.tlbr for t in stracksb])
     pairs = np.where(pdist < 0.15)
     dupa, dupb = set(), set()
     for a, b in zip(pairs[0], pairs[1]):
