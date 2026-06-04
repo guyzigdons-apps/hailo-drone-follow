@@ -239,6 +239,22 @@ def test_vacuum_runs(tmp_path):
         store.close()
 
 
+def test_embedding_roundtrip(tmp_path):
+    import numpy as np
+    from hailo_tiling.cache.store import SqliteCacheStore
+    from hailo_tiling.types import CropRect
+    s = SqliteCacheStore.open(tmp_path / "c.sqlite3")
+    crop = CropRect(x=10, y=20, w=64, h=128)
+    vec = np.arange(8, dtype=np.float32) / 10.0
+    assert s.get_embedding(5, crop, model="repvgg") is None
+    s.put_embedding(5, crop, model="repvgg", vec=vec)
+    got = s.get_embedding(5, crop, model="repvgg")
+    assert got is not None and got.dtype == np.float32
+    assert np.allclose(got, vec)
+    assert s.get_embedding(5, crop, model="osnet") is None   # model-keyed
+    s.close()
+
+
 def test_quantise_is_applied_at_put_time_when_enabled(tmp_path):
     """The store is canonicalisation-agnostic — put/get round-trip on exact key."""
     store = SqliteCacheStore.open(tmp_path / "q.sqlite3")

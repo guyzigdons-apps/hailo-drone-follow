@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import numpy as np
+
 from ..types import Det
 
 _SCHEMA_VERSION = 1
@@ -154,6 +156,24 @@ class SqliteCacheStore:
             ).fetchone()
             out.append(_json_to_dets(row[0]) if row else None)
         return out
+
+    def put_embedding(self, frame_idx: int, crop_rect, *, model: str, vec) -> None:
+        self._con.execute(
+            "INSERT OR IGNORE INTO embeddings "
+            "(frame_idx, crop_x, crop_y, crop_w, crop_h, model, vec, ts_epoch) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(frame_idx), int(crop_rect.x), int(crop_rect.y),
+             int(crop_rect.w), int(crop_rect.h), model,
+             np.asarray(vec, dtype=np.float32).tobytes(), time.time()))
+        self._con.commit()
+
+    def get_embedding(self, frame_idx: int, crop_rect, *, model: str):
+        row = self._con.execute(
+            "SELECT vec FROM embeddings WHERE frame_idx=? AND crop_x=? AND crop_y=? "
+            "AND crop_w=? AND crop_h=? AND model=?",
+            (int(frame_idx), int(crop_rect.x), int(crop_rect.y),
+             int(crop_rect.w), int(crop_rect.h), model)).fetchone()
+        return None if row is None else np.frombuffer(row[0], dtype=np.float32).copy()
 
     def stats(self) -> dict:
         n = self._con.execute("SELECT COUNT(*) FROM detections").fetchone()[0]

@@ -56,3 +56,19 @@ CREATE TABLE IF NOT EXISTS frame_results (
     ts_epoch     REAL    NOT NULL,
     PRIMARY KEY (frame_idx, ppv)
 ) WITHOUT ROWID;
+
+-- ReID embedding cache (Block R). One row per (frame_idx, crop_rect, model);
+-- `vec` is a raw float32 little-endian blob (np.ndarray.tobytes()). Purely
+-- additive — CREATE TABLE IF NOT EXISTS upgrades existing tile-cache DBs in
+-- place on the next open() (no migration, no schema-version bump).
+CREATE TABLE IF NOT EXISTS embeddings (
+    frame_idx INTEGER NOT NULL,
+    crop_x    INTEGER NOT NULL,
+    crop_y    INTEGER NOT NULL,
+    crop_w    INTEGER NOT NULL,
+    crop_h    INTEGER NOT NULL,
+    model     TEXT    NOT NULL,
+    vec       BLOB    NOT NULL,
+    ts_epoch  REAL    NOT NULL,
+    PRIMARY KEY (frame_idx, crop_x, crop_y, crop_w, crop_h, model)
+) WITHOUT ROWID;
