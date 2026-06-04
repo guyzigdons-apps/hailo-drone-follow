@@ -45,8 +45,23 @@ status to `done` and bump the next plan to `in flight`.
 - **Two class conventions:** `HefBackend` emits 0-indexed (person=0, raw NMS decode);
   GStreamer `hailofilter` emits 1-indexed (person=1, label-file convention). Comparisons bridge
   by label today; unify (add a +1 offset option to `HefBackend`/decode).
-- **Discovery grid has no overlap** (`scheduler._grid` lays tiles edge-to-edge); static ablation
-  grids use 0.25. Add a discovery overlap fraction so boundary objects don't fragment.
+- **Discovery grid has no overlap — RESOLVED (2026-06-04).** `TileScheduler(grid_overlap=...)`
+  (cell = span/(g−(g−1)·o), stride = cell·(1−o)); `run_trials --discovery-overlap` defaults 0.25.
+  Effect on the 0025-fov50 verified-GT baseline: walker coverage 0.054 → **0.989**, aggregate
+  coverage 0.465 → **0.932**, recovery success 0.5 → **1.0**, tiles/frame 6.23 → **3.96** (fewer
+  recovery bursts). See `dynamic_tiling/runs/baseline_0025/BASELINE.md`.
+- **Re-acquisition gate is anchored to the loss location (Phase A fix-list).** Root-caused on the
+  0025-fov50 walker (tagged replay dump): after the f71 loss, ByteTracker had an ACTIVATED track on
+  the walker for 135 frames (IoU 0.82 w/ GT), but `TargetLock.step()` only re-locks when a new
+  activated track overlaps the FROZEN last-known bbox above `_REACQ_IOU` — a walking target leaves
+  the anchor, IoU→0, never re-locks. Stationary targets recover; moving ones can't after long loss.
+  Candidate fixes to sweep in Phase A:
+  1. **Velocity-extrapolated anchor** — `state.last_velocity` is already retained during loss (the
+     scheduler uses it for ROI placement); move the reacq anchor by it each lost frame. Cheapest.
+  2. **Time-growing search radius** — accept tracks within an uncertainty region that widens with
+     frames-since-loss instead of strict IoU with a fixed anchor.
+  3. **Appearance (ReID) match** — the production pipeline's answer; deliberately out of scope for
+     the offline harness, but note it as the model boundary in the paper.
 - **Discovery cadence not perfectly regular** when targets are lost (recovery grid pre-empts the
   discovery slot); make discovery fire on cadence regardless of lock state.
 - **ROI follow degrades to the recovery grid** on small aerial targets (ROI loses them) — tune
