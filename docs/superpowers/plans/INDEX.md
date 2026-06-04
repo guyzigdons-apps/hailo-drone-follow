@@ -19,6 +19,13 @@ Tracks the decomposed plans derived from the master spec:
 | 9   | Paper-with-code artifacts                             | 15          | not started |
 | (10)| DJI optical-zoom maximum-range bonus shoot            | 17          | bonus / ops |
 | 11  | `2026-06-02-experiment-foundation-phase0.md` (class standardization + BoT-SORT GT tracks + tracking/recovery metrics + all-objects trials) | n/a (experiment) | done (code; on-chip GT-gen + trials smoke pending) |
+| 12  | `2026-06-04-block1-reacq-motion-fixes.md` (velocity anchor + growing distance gate) | weekend spec B1 | in flight (weekend run) |
+| 13  | `2026-06-04-blockR-reid-recovery-ablations.md` (person-crop ReID + P0–P5 inference ablations) | weekend spec BR | queued (after 12) |
+| 14  | `2026-06-04-block2-phaseA-sweep.md` (coordinate-descent tiling sweep + budget frontier) | weekend spec B2 | queued (after 13) |
+| 15  | `2026-06-04-block3-mot-metrics.md` (in-repo MOT metrics + 0026 scorecard) | weekend spec B3 | queued (CPU tasks may run parallel) |
+
+Weekend spec: `docs/superpowers/specs/2026-06-04-weekend-recovery-reid-sweep-mot-design.md` ·
+manager state: `docs/superpowers/weekend-manager-state.md`
 
 Update the **Status** column as plans land. When a plan finishes, set its
 status to `done` and bump the next plan to `in flight`.
