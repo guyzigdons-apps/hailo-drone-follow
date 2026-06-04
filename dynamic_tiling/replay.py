@@ -32,7 +32,7 @@ class RunResult:
 
 def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
         lock: TargetLock, backend, meter, gt_traj: dict,
-        person_cls: int = PERSON) -> RunResult:
+        person_cls: int = PERSON, reid_assist=None) -> RunResult:
     res = RunResult()
     frame_idx = -1
     for frame_idx, frame in enumerate(frames):
@@ -97,6 +97,15 @@ def run(frames, src_w: int, src_h: int, scheduler: TileScheduler,
         if state.status != "TRACKING" and anchor is not None:
             dbg["anchor"] = list(anchor)
         res.frame_lock[frame_idx] = dbg
+
+        # ReID assist runs AFTER the tracker-debug dump (so dumps reflect
+        # pre-ReID state). It may re-point the lock onto a re-identified track,
+        # turning a SEARCHING/LOST frame back into TRACKING.
+        if reid_assist is not None:
+            reid_assist.after_step(frame, frame_idx, persons, lock, state)
+            if lock.state.status == "TRACKING" and state.status != "TRACKING":
+                state = lock.state              # ReID recovered this frame
+                res.frame_lock[frame_idx]["reid_recovered"] = True
 
         if state.status == "TRACKING":
             res.pred_traj[frame_idx] = tuple(state.bbox_norm)

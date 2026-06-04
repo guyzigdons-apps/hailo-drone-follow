@@ -90,6 +90,26 @@ class TargetLock:
         if best is not None and best_iou > _REACQ_IOU:
             self._set_track(best.track_id)
 
+    def adopt_overlapping(self, det) -> bool:
+        """Re-point the lock at the activated track best overlapping `det`
+        (ReID-confirmed recovery). Returns True if adopted."""
+        best_iou, best = 0.1, None
+        for t in self.last_tracks:
+            if t.is_activated and t.filtered_tlwh:
+                tl = t.filtered_tlwh
+                iou = _iou_tlwh((det.x, det.y, det.w, det.h), tl)
+                if iou > best_iou:
+                    best_iou, best = iou, t
+        if best is None:
+            return False
+        self._bt_track_id = best.track_id
+        s = self.state
+        s.bbox_norm = tuple(best.filtered_tlwh)
+        s.status = "TRACKING"
+        s.frames_since_seen = 0
+        self._anchor = tuple(best.filtered_tlwh)
+        return True
+
     def step(self, person_dets: Sequence[Det], *, lock_if_unlocked: bool = False,
              gt_bbox_norm: tuple | None = None) -> LockState:
         tracks = self._tracker.update(dets_to_array(person_dets))
