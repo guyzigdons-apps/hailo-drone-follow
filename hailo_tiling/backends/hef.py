@@ -14,6 +14,30 @@ import numpy as np
 from ..types import CropRect, Det, MODEL_H, MODEL_W
 from .backend import InferenceBackend
 
+# Duplicated from hailo_apps.python.core.common.defines.SHARED_VDEVICE_GROUP_ID
+# (value "SHARED"), the same group id reid_analysis/reid_embedding_extractor.py
+# uses. hailo_tiling must not import from reid_analysis / hailo_apps, so the
+# string is duplicated here; keep both in sync. Joining this shared VDevice
+# group lets the HailoRT scheduler multiplex the detection HEF and the ReID HEF
+# onto one physical device instead of each grabbing an exclusive VDevice.
+SHARED_VDEVICE_GROUP_ID = "SHARED"
+
+
+def make_shared_vdevice_params():
+    """Build VDevice params that join the shared, scheduler-multiplexed group.
+
+    Sets ROUND_ROBIN scheduling and the shared ``group_id`` so this backend's
+    VDevice coexists with the ReID extractor's VDevice on one physical device.
+    Imports hailo_platform inside the function to match this module's deferred
+    HailoRT-import style (so headless/chip-free tests can import the module).
+    """
+    from hailo_platform import HailoSchedulingAlgorithm, VDevice  # noqa: WPS433
+
+    params = VDevice.create_params()
+    params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+    params.group_id = SHARED_VDEVICE_GROUP_ID
+    return params
+
 
 class HefBackend(InferenceBackend):
     """Real on-chip backend wrapping tiling_benchmark HefHandle.
@@ -43,7 +67,11 @@ class HefBackend(InferenceBackend):
         # Same lazy-import path as the legacy dynamic_tiling/inference.py
         # (via _vendor_paths in the tiling-benchmark layout).
         from probe_phantom_hef import HefHandle, decode_nms_output  # noqa: WPS433
-        self._handle = HefHandle.open(hef_path, nms_score_threshold=nms_score_threshold)
+        self._handle = HefHandle.open(
+            hef_path,
+            nms_score_threshold=nms_score_threshold,
+            vdevice_params=make_shared_vdevice_params(),
+        )
         self._decode = decode_nms_output
 
     def _infer_one(self, frame: np.ndarray, crop: CropRect) -> list:

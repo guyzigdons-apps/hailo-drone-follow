@@ -64,10 +64,16 @@ class HefHandle:
     output_shape: tuple
 
     @classmethod
-    def open(cls, hef_path: str, nms_score_threshold: float = 0.05) -> "HefHandle":
-        params = VDevice.create_params()
-        params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-        vd = VDevice(params)
+    def open(
+        cls,
+        hef_path: str,
+        nms_score_threshold: float = 0.05,
+        vdevice_params=None,
+    ) -> "HefHandle":
+        if vdevice_params is None:
+            vdevice_params = VDevice.create_params()
+            vdevice_params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+        vd = VDevice(vdevice_params)
         hef = HEF(hef_path)
         im = vd.create_infer_model(hef_path)
         im.set_batch_size(1)
