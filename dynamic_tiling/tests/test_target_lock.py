@@ -47,3 +47,34 @@ def test_no_spurious_velocity_on_first_lock():
     s = lock.step([_person(0.40, 0.40)], lock_if_unlocked=True)
     assert s.status == "TRACKING"
     assert abs(s.last_velocity[0]) < 1e-6 and abs(s.last_velocity[1]) < 1e-6
+
+
+def _walk_dets(n, x0=0.10, dx=0.01, y=0.50, w=0.04, h=0.10, score=0.9):
+    """Person walking right: one det per frame."""
+    return [Det(cls=1, score=score, x=x0 + i * dx, y=y, w=w, h=h) for i in range(n)]
+
+
+def test_velocity_anchor_tracks_motion_during_loss():
+    lock = TargetLock(frame_rate=30, reacq_motion="velocity")
+    dets = _walk_dets(10)
+    lock.step([dets[0]], gt_bbox_norm=(dets[0].x, dets[0].y, dets[0].w, dets[0].h))
+    for d in dets[1:]:
+        lock.step([d])                      # establishes velocity ~ (0.01, 0)
+    a0 = lock.reacq_anchor
+    for _ in range(10):
+        lock.step([])                       # 10 lost frames, anchor should advance
+    a1 = lock.reacq_anchor
+    assert a1[0] - a0[0] > 0.05             # moved right ~10 * 0.01 (Kalman-smoothed, allow slack)
+    assert abs(a1[1] - a0[1]) < 0.02        # no vertical drift
+
+
+def test_frozen_mode_keeps_legacy_anchor():
+    lock = TargetLock(frame_rate=30)        # default reacq_motion="frozen"
+    dets = _walk_dets(10)
+    lock.step([dets[0]], gt_bbox_norm=(dets[0].x, dets[0].y, dets[0].w, dets[0].h))
+    for d in dets[1:]:
+        lock.step([d])
+    a0 = lock.reacq_anchor
+    for _ in range(10):
+        lock.step([])
+    assert lock.reacq_anchor == a0          # frozen

@@ -51,7 +51,8 @@ class TargetLock:
     persistent re-id is the real pipeline's job.
     """
 
-    def __init__(self, track_buffer: int = 90, **tracker_kwargs):
+    def __init__(self, track_buffer: int = 90, reacq_motion: str = "frozen",
+                 reacq_radius_growth: float = 0.0, **tracker_kwargs):
         self._tracker = create_tracker("byte", track_buffer=track_buffer,
                                        **tracker_kwargs)
         self.track_buffer = track_buffer
@@ -62,6 +63,14 @@ class TargetLock:
         self.state = LockState()
         # Debug: the tracker output of the most recent step() (for replay dumps).
         self.last_tracks: list = []
+        self.reacq_motion = reacq_motion
+        self.reacq_radius_growth = reacq_radius_growth
+        self._anchor: tuple | None = None   # (x, y, w, h) normalized, motion-updated
+
+    @property
+    def reacq_anchor(self) -> tuple | None:
+        return self._anchor if self._anchor is not None else \
+            (tuple(self.state.bbox_norm) if self.state.bbox_norm[2] > 0 else None)
 
     def _set_track(self, bt_track_id: int) -> None:
         """Lock onto a ByteTracker track.  Stable track_id is set only once."""
@@ -101,14 +110,22 @@ class TargetLock:
 
         # IoU-based re-acquisition: if we're searching (lock set, but target
         # not found in current tracks) and a new activated track overlaps our
-        # last known bbox above threshold, silently re-point _bt_track_id at it.
-        # The public track_id (stable identity) is NOT changed.
+        # motion-updated anchor above threshold, silently re-point _bt_track_id
+        # at it.  The public track_id (stable identity) is NOT changed.
         s = self.state
-        if cur is None and self._bt_track_id is not None and s.bbox_norm[2] > 0:
+
+        # Advance the re-acquisition anchor once per lost frame (velocity mode),
+        # BEFORE the reacq gate evaluates against it.  Frozen mode leaves it put.
+        if cur is None and self._anchor is not None and self.reacq_motion == "velocity":
+            vx, vy = s.last_velocity
+            ax, ay, aw, ah = self._anchor
+            self._anchor = (ax + vx, ay + vy, aw, ah)
+
+        if cur is None and self._bt_track_id is not None and self._anchor is not None:
             best_iou, best_track = _REACQ_IOU, None
             for t in tracks:
                 if t.is_activated and t.filtered_tlwh and t.track_id != self._bt_track_id:
-                    iou = _iou_tlwh(s.bbox_norm, t.filtered_tlwh)
+                    iou = _iou_tlwh(self._anchor, t.filtered_tlwh)
                     if iou > best_iou:
                         best_iou, best_track = iou, t
             if best_track is not None:
@@ -124,6 +141,7 @@ class TargetLock:
             cy_new = s.bbox_norm[1] + s.bbox_norm[3] / 2
             if cx_old is not None:
                 s.last_velocity = (cx_new - cx_old, cy_new - cy_old)
+            self._anchor = tuple(cur.filtered_tlwh)
             s.status = "TRACKING"
             s.frames_since_seen = 0
         else:
