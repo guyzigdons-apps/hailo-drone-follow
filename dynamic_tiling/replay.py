@@ -19,6 +19,9 @@ class RunResult:
     # frame_idx -> {"status", "bt_id", "tracks": [{"id","bbox","activated"}],
     #               "anchor": last-known bbox (only while SEARCHING/LOST)}
     frame_lock: dict = field(default_factory=dict)
+    # frame_idx -> {(cls, track_id): (x,y,w,h)} for every confirmed target
+    # (multi-target runs only). Source for the MOT scorecard predictions.
+    multi_traj: dict = field(default_factory=dict)
     total_tiles: int = 0
     n_frames: int = 0
 
@@ -200,6 +203,17 @@ def run_multi(frames, src_w: int, src_h: int,
         )
         if sel is not None:
             res.pred_traj[frame_idx] = tuple(sel.bbox_norm)
+
+        # Record every current (non-stale) target's bbox for the MOT scorecard.
+        # Keyed by (cls, track_id); vehicles are kept here — the dump-time class
+        # filter in run_dynamic is the policy point.
+        frame_targets = {
+            key: tuple(t.bbox_norm)
+            for key, t in lock.targets.items()
+            if t.bbox_norm[2] > 0 and t.status != "LOST"
+        }
+        if frame_targets:
+            res.multi_traj[frame_idx] = frame_targets
 
     res.n_frames = frame_idx + 1
     return res

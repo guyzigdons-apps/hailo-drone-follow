@@ -28,6 +28,8 @@ def _frames_union(*track_dicts):
 def score_mot(gt: dict, pred: dict, *, iou_thr: float = 0.5) -> dict:
     frames = _frames_union(gt, pred)
     n_gt = sum(len(t) for t in gt.values())
+    if n_gt == 0:
+        raise ValueError("score_mot: empty GT")
     fp = fn = idsw = 0
     matches_prev: dict = {}            # gt_id -> pred_id matched on previous frame
     pair_counts: dict = {}             # (gt_id, pred_id) -> matched frames
@@ -58,7 +60,6 @@ def score_mot(gt: dict, pred: dict, *, iou_thr: float = 0.5) -> dict:
     # Frag: gaps inside each GT track's matched-frame set
     frag = 0
     for g, traj in gt.items():
-        fs = sorted(set(traj) & gt_matched_frames[g])
         track_fs = sorted(traj)
         in_run = False
         seen_first = False
@@ -69,7 +70,6 @@ def score_mot(gt: dict, pred: dict, *, iou_thr: float = 0.5) -> dict:
             if m:
                 seen_first = True
             in_run = m
-        _ = fs
 
     # MT/ML on matched-coverage ratio
     mt = ml = 0

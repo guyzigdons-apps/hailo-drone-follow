@@ -1,3 +1,6 @@
+import pytest
+
+
 def _traj(tid, frames, x0=0.1, dx=0.0, y=0.5, w=0.05, h=0.1):
     return {f: (x0 + dx * i, y, w, h) for i, f in enumerate(frames)}
 
@@ -46,3 +49,9 @@ def test_empty_pred_is_all_misses():
     gt = {1: _traj(1, range(5))}
     m = score_mot(gt, {}, iou_thr=0.5)
     assert m["FN"] == 5 and m["MOTA"] == 0.0 and m["IDF1"] == 0.0 and m["ML"] == 1
+
+
+def test_empty_gt_raises():
+    from dynamic_tiling.mot_metrics import score_mot
+    with pytest.raises(ValueError, match="score_mot: empty GT"):
+        score_mot({}, {10: _traj(10, range(5))}, iou_thr=0.5)

@@ -66,6 +66,12 @@ def main():
     ap.add_argument("--discovery-grid", default=None,
                     help="Discovery grid density as WxH (e.g. 8x6 for dense "
                     "whole-frame detection on cadence). Default: scheduler's 3x2.")
+    ap.add_argument("--dump-mot", type=Path, default=None,
+                    help="After a --multi-target run, write per-track predictions "
+                    "(MOT scorecard format) to this JSON path.")
+    ap.add_argument("--dump-mot-classes", default="1",
+                    help="Comma-separated class ids to keep in --dump-mot "
+                    "(default: 1 = person-only).")
     args = ap.parse_args()
     discovery_grid = None
     if args.discovery_grid:
@@ -123,6 +129,23 @@ def main():
     sc = score_run(gt_for_score, res.pred_traj, iou_thr=0.5)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     emit_frames_json(res, label=f"dynamic-b{int(args.budget)}", out_path=args.out)
+
+    if args.dump_mot is not None:
+        if not args.multi_target:
+            raise SystemExit("--dump-mot requires --multi-target")
+        dump_classes = {int(c) for c in args.dump_mot_classes.split(",")}
+        by_track: dict = {}
+        for f, d in res.multi_traj.items():
+            for (cls, tid), bb in d.items():
+                if cls not in dump_classes:
+                    continue
+                by_track.setdefault(tid, {})[f] = bb
+        args.dump_mot.parent.mkdir(parents=True, exist_ok=True)
+        args.dump_mot.write_text(json.dumps({
+            "tracks": {str(t): {str(f): list(b) for f, b in traj.items()}
+                       for t, traj in by_track.items()}}))
+        print(f"mot dump         : {args.dump_mot}  "
+              f"({len(by_track)} tracks, classes {sorted(dump_classes)})")
 
     print(f"\nframes processed : {res.n_frames}")
     if res.avg_tiles_per_frame:

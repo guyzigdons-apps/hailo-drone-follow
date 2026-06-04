@@ -168,6 +168,57 @@ def test_run_multi_records_per_target_rois():
     )
 
 
+def test_run_multi_records_multi_traj_per_track():
+    src_w, src_h = 4000, 3000
+    n_frames = 6
+    gt_traj = {f: (0.40 + 0.01 * f, 0.40, 0.08, 0.20) for f in range(n_frames)}
+    person2 = {f: (0.70 + 0.005 * f, 0.50, 0.08, 0.20) for f in range(n_frames)}
+
+    class _TwoPersonBackend:
+        def infer(self, frame, crop: CropRect, frame_idx):
+            results = []
+            for traj in [gt_traj, person2]:
+                gx, gy, gw, gh = traj[frame_idx]
+                gcx = (gx + gw / 2) * src_w
+                gcy = (gy + gh / 2) * src_h
+                if not (crop.x <= gcx <= crop.x + crop.w and
+                        crop.y <= gcy <= crop.y + crop.h):
+                    continue
+                lx = (gcx - crop.x) / crop.w
+                ly = (gcy - crop.y) / crop.h
+                lw = gw * src_w / crop.w
+                lh = gh * src_h / crop.h
+                results.append(
+                    type("D", (), dict(cls=PERSON, x=lx - lw / 2, y=ly - lh / 2,
+                                       w=lw, h=lh, score=0.9))()
+                )
+            return results
+
+    frames = [np.zeros((src_h, src_w, 3), np.uint8) for _ in range(n_frames)]
+    lock = MultiTargetLock(target_classes=set(TRACKED_CLASSES))
+    sched = MultiTargetTileScheduler(src_w, src_h, discovery_period=2)
+    res = run_multi(
+        frames=frames, src_w=src_w, src_h=src_h,
+        scheduler=sched,
+        lock=lock,
+        backend=_TwoPersonBackend(),
+        meter=BudgetMeter(budget_inf_per_s=300, fps=30),
+        gt_traj=gt_traj,
+        gt_cls=PERSON,
+    )
+    # New field: {frame_idx: {(cls, track_id): (x, y, w, h)}} for confirmed targets.
+    assert hasattr(res, "multi_traj")
+    assert res.multi_traj, "multi_traj should be populated once tracks confirm"
+    some_frame = max(res.multi_traj)
+    # Keys are (cls, track_id) tuples.
+    assert all(isinstance(k, tuple) and len(k) == 2 for k in res.multi_traj[some_frame])
+    # Each recorded bbox is a 4-tuple with positive size.
+    for bb in res.multi_traj[some_frame].values():
+        assert len(bb) == 4 and bb[2] > 0 and bb[3] > 0
+    # Two persons should both be recorded on at least one frame.
+    assert any(len(d) >= 2 for d in res.multi_traj.values())
+
+
 def test_emit_frames_json_keeps_tiles_and_appends_lock_box(tmp_path):
     import json
     from dynamic_tiling.replay import RunResult, emit_frames_json
