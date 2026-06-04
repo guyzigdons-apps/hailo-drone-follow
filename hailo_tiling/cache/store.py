@@ -58,17 +58,17 @@ class SqliteCacheStore:
         con.execute("PRAGMA synchronous = NORMAL")
         if existed:
             uv = con.execute("PRAGMA user_version").fetchone()[0]
-            if uv == 0:
-                cls._apply_schema(con)
-            elif uv != _SCHEMA_VERSION:
+            if uv not in (0, _SCHEMA_VERSION):
                 con.close()
                 raise ValueError(
                     f"{path}: cache schema_version mismatch "
                     f"(file={uv}, expected={_SCHEMA_VERSION}). "
                     "Delete the file or use a matching hailo_tiling version."
                 )
-        else:
-            cls._apply_schema(con)
+        # Always (re-)apply the schema: it is pure CREATE TABLE IF NOT EXISTS, so
+        # this is idempotent and lets pre-existing DBs pick up additively-new
+        # tables (e.g. `embeddings`) on reopen.
+        cls._apply_schema(con)
         return cls(path, con)
 
     @staticmethod

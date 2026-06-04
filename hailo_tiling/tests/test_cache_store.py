@@ -266,3 +266,21 @@ def test_quantise_is_applied_at_put_time_when_enabled(tmp_path):
         assert store.get(0, c2, ppv=1) is None
     finally:
         store.close()
+
+
+def test_open_upgrades_existing_db_with_missing_additive_table(tmp_path):
+    """A DB created before the embeddings table existed must gain it on reopen
+    (schema is CREATE TABLE IF NOT EXISTS — reapplying is idempotent)."""
+    import numpy as np
+    from hailo_tiling.cache.store import SqliteCacheStore
+    from hailo_tiling.types import CropRect
+    p = tmp_path / "old.sqlite3"
+    s = SqliteCacheStore.open(p)
+    s._con.execute("DROP TABLE embeddings")   # simulate a pre-embeddings-era DB
+    s.close()
+    s2 = SqliteCacheStore.open(p)             # reopen: must re-apply schema
+    crop = CropRect(x=1, y=2, w=3, h=4)
+    assert s2.get_embedding(0, crop, model="m") is None   # works, no OperationalError
+    s2.put_embedding(0, crop, model="m", vec=np.ones(2, dtype=np.float32))
+    assert s2.get_embedding(0, crop, model="m") is not None
+    s2.close()
