@@ -116,7 +116,8 @@ class TargetLock:
 
         # Advance the re-acquisition anchor once per lost frame (velocity mode),
         # BEFORE the reacq gate evaluates against it.  Frozen mode leaves it put.
-        if cur is None and self._anchor is not None and self.reacq_motion == "velocity":
+        if cur is None and self._bt_track_id is not None and self._anchor is not None \
+                and self.reacq_motion == "velocity":
             vx, vy = s.last_velocity
             ax, ay, aw, ah = self._anchor
             self._anchor = (ax + vx, ay + vy, aw, ah)
@@ -130,6 +131,27 @@ class TargetLock:
                         best_iou, best_track = iou, t
             if best_track is not None:
                 self._bt_track_id = best_track.track_id  # internal update only
+                cur = best_track
+
+        # Time-growing centre-distance fallback: runs only when the IoU pass
+        # above found nothing AND the radius-growth knob is enabled.  The search
+        # radius widens with frames_since_seen so a target that moved far during
+        # a long loss (IoU=0) can still be re-adopted by centre proximity.
+        if cur is None and self._bt_track_id is not None and self._anchor is not None \
+                and self.reacq_radius_growth > 0:
+            ax, ay, aw, ah = self._anchor
+            acx, acy = ax + aw / 2, ay + ah / 2
+            r0 = max(aw, ah)
+            r = r0 + self.reacq_radius_growth * s.frames_since_seen
+            best_d, best_track = r, None
+            for t in tracks:
+                if t.is_activated and t.filtered_tlwh and t.track_id != self._bt_track_id:
+                    tx, ty, tw, th = t.filtered_tlwh
+                    d = ((tx + tw / 2 - acx) ** 2 + (ty + th / 2 - acy) ** 2) ** 0.5
+                    if d < best_d:
+                        best_d, best_track = d, t
+            if best_track is not None:
+                self._bt_track_id = best_track.track_id
                 cur = best_track
 
         if cur is not None:

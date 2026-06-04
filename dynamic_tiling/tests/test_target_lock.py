@@ -68,6 +68,55 @@ def test_velocity_anchor_tracks_motion_during_loss():
     assert abs(a1[1] - a0[1]) < 0.02        # no vertical drift
 
 
+def test_radius_growth_relocks_distant_target():
+    lock = TargetLock(frame_rate=30, reacq_radius_growth=0.005)
+    dets = _walk_dets(10)
+    lock.step([dets[0]], gt_bbox_norm=(dets[0].x, dets[0].y, dets[0].w, dets[0].h))
+    for d in dets[1:]:
+        lock.step([d])
+    # Loss must exceed track_buffer (90) so the lingering lost track is purged
+    # from ByteTracker's buffer; otherwise the reappearing distant det can never
+    # spawn a surviving NEW track for the distance gate to adopt (see report).
+    for _ in range(100):
+        lock.step([])                       # long loss; radius grows 100*0.005=0.5
+    # target reappears 0.15 away from the frozen anchor — IoU=0, distance inside radius
+    far = Det(cls=1, score=0.9, x=dets[-1].x + 0.15, y=0.50, w=0.04, h=0.10)
+    st = None
+    for _ in range(5):                      # let ByteTracker activate the new track
+        st = lock.step([far])
+    assert st.status == "TRACKING"
+
+
+def test_radius_zero_keeps_strict_behavior():
+    lock = TargetLock(frame_rate=30)        # growth 0.0
+    dets = _walk_dets(10)
+    lock.step([dets[0]], gt_bbox_norm=(dets[0].x, dets[0].y, dets[0].w, dets[0].h))
+    for d in dets[1:]:
+        lock.step([d])
+    for _ in range(100):
+        lock.step([])
+    far = Det(cls=1, score=0.9, x=dets[-1].x + 0.15, y=0.50, w=0.04, h=0.10)
+    st = None
+    for _ in range(5):
+        st = lock.step([far])
+    assert st.status != "TRACKING"          # legacy: never re-locks
+
+
+def test_no_swap_when_distractor_is_outside_radius():
+    lock = TargetLock(frame_rate=30, reacq_radius_growth=0.002)
+    d0 = Det(cls=1, score=0.9, x=0.10, y=0.50, w=0.04, h=0.10)
+    lock.step([d0], gt_bbox_norm=(0.10, 0.50, 0.04, 0.10))
+    for _ in range(9):
+        lock.step([d0])
+    for _ in range(5):                      # short loss: radius ~ r0 + 5*0.002
+        lock.step([])
+    distractor = Det(cls=1, score=0.9, x=0.80, y=0.20, w=0.04, h=0.10)  # far away
+    st = None
+    for _ in range(5):
+        st = lock.step([distractor])
+    assert st.status != "TRACKING"          # distant person must NOT be adopted
+
+
 def test_frozen_mode_keeps_legacy_anchor():
     lock = TargetLock(frame_rate=30)        # default reacq_motion="frozen"
     dets = _walk_dets(10)
