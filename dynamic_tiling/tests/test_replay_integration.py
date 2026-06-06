@@ -407,6 +407,7 @@ def test_run_dynamic_backend_uses_class_offset_one(monkeypatch, tmp_path):
 
     class _FakeCap:
         def __init__(self, *a): self.n = 0
+        def isOpened(self): return True
         def get(self, prop): return {3: 640, 4: 480, 5: 30.0, 7: 2}.get(int(prop), 0)
         def read(self):
             self.n += 1
