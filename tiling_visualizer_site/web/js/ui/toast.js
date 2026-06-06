@@ -4,6 +4,9 @@ export function showToast(msg, { kind = 'info', sticky = false } = {}) {
   const root = document.getElementById('toast-root');
   if (!root) return () => {};
 
+  // Cap simultaneous toasts to avoid flooding the UI.
+  while (root.children.length >= 4) root.removeChild(root.firstChild);
+
   const el = document.createElement('div');
   el.className = 'toast' + (kind === 'error' ? ' toast--error' : '');
 

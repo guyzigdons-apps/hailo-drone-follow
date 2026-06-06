@@ -13,6 +13,8 @@ export { store };
 const PREFS_KEY = 'tiling-viz-prefs';
 const RUN_PALETTE_SLOTS = 8;
 
+let currentFetchToken = 0;
+
 // ── localStorage prefs (DS §6.9) ─────────────────────────────
 function loadPrefs() {
   try {
@@ -45,6 +47,7 @@ function throttleTrailing(fn, ms) {
 
 // ── Selection flow (DS §1.4, §6.1) ───────────────────────────
 async function selectVariant(videoId, fov, { enabledRuns, frame } = {}) {
+  const token = ++currentFetchToken;
   const manifest = store.get().manifest;
   const video = manifest && manifest.videos.find((v) => v.id === videoId);
   if (!video) return;
@@ -86,7 +89,7 @@ async function selectVariant(videoId, fov, { enabledRuns, frame } = {}) {
   });
 
   // Bail if the user switched variants while we were fetching.
-  if (store.get().videoId !== video.id || store.get().fov !== variant.fov) return;
+  if (token !== currentFetchToken) return;
 
   store.set({ runDocs: docs });
 
@@ -195,8 +198,7 @@ function initPrefsWriter() {
 
 // ── Boot ─────────────────────────────────────────────────────
 async function boot() {
-  const prefs = loadPrefs();
-  if (prefs) store.set(prefs);
+  const prefs = loadPrefs() || {};
 
   initModeSwitching();
   initHashWriter();
@@ -224,12 +226,16 @@ async function boot() {
 
   // ── Restore from hash, or stay in the empty state (DS §6.2a) ──
   const hash = decodeHash(location.hash);
+  // Merge hash.conf into prefs before the single store.set so confThreshold
+  // is only written once and the prefs writer sees the right value.
+  if (hash && Number.isFinite(hash.conf)) prefs.confThreshold = hash.conf;
+  if (Object.keys(prefs).length) store.set(prefs);
+
   if (hash && hash.videoId) {
     const video = manifest.videos.find((v) => v.id === hash.videoId);
     if (video) {
       const fov =
         (video.variants.find((vv) => vv.fov === hash.fov) || video.variants[0] || {}).fov || null;
-      if (Number.isFinite(hash.conf)) store.set({ confThreshold: hash.conf });
       await selectVariant(video.id, fov, { enabledRuns: hash.runs, frame: hash.frame });
     }
   }

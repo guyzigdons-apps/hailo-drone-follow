@@ -2,6 +2,8 @@
 // mode toggle, manifest status. Selection logic itself lives in main.js —
 // this module only renders controls and calls back via onSelect.
 
+let topbarUnsub = null;
+
 // Manifest status indicator (DS §4.1.5). state ∈ {loading, ready, failed}.
 export function setStatus(state, text) {
   const root = document.getElementById('manifest-status');
@@ -23,6 +25,9 @@ export function setStatus(state, text) {
 }
 
 export function initTopbar(store, { onSelect } = {}) {
+  if (topbarUnsub) topbarUnsub();
+  topbarUnsub = null;
+
   const select = document.getElementById('video-select');
   const fovEl = document.getElementById('fov-segmented');
   const modeEl = document.getElementById('mode-toggle');
@@ -46,12 +51,12 @@ export function initTopbar(store, { onSelect } = {}) {
     }
     select.disabled = videos.length === 0;
 
-    select.addEventListener('change', () => {
+    select.onchange = () => {
       const vid = videos.find((v) => v.id === select.value);
       if (!vid) return;
       const fov = (vid.variants[0] && vid.variants[0].fov) || null;
       onSelect && onSelect(vid.id, fov);
-    });
+    };
   }
 
   // ── Render FOV segmented buttons for the current video ─────
@@ -79,11 +84,11 @@ export function initTopbar(store, { onSelect } = {}) {
 
   // ── Mode toggle ────────────────────────────────────────────
   if (modeEl) {
-    modeEl.addEventListener('click', (e) => {
+    modeEl.onclick = (e) => {
       const btn = e.target.closest('.segmented__btn');
       if (!btn || !btn.dataset.mode) return;
       store.set({ mode: btn.dataset.mode });
-    });
+    };
   }
 
   // ── Keep controls in sync with store (hash restore, etc.) ──
@@ -103,7 +108,7 @@ export function initTopbar(store, { onSelect } = {}) {
     }
   }
 
-  store.subscribe((state, changed) => {
+  topbarUnsub = store.subscribe((state, changed) => {
     if (changed.has('videoId')) renderFov(state);
     if (changed.has('videoId') || changed.has('fov') || changed.has('mode')) {
       sync(state);
