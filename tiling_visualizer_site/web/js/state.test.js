@@ -23,7 +23,14 @@ test('store: set with no actual change does not notify', () => {
 test('hash round-trip', () => {
   const sel = { videoId: '0025', fov: 'fov50', runs: ['r1', 'r2'], frame: 312, conf: 0.3 };
   const decoded = decodeHash(encodeHash(sel));
-  assert.deepEqual(decoded, sel);
+  // mode defaults to 'viewer' when absent from the hash
+  assert.deepEqual(decoded, { ...sel, mode: 'viewer' });
+});
+
+test('hash round-trip carries metrics mode', () => {
+  const sel = { videoId: '0025', fov: 'fov50', runs: [], frame: 0, conf: 0.25, mode: 'metrics' };
+  const decoded = decodeHash(encodeHash(sel));
+  assert.equal(decoded.mode, 'metrics');
 });
 
 test('decodeHash of garbage returns null', () => {

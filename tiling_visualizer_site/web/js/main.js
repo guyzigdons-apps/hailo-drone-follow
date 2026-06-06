@@ -162,6 +162,7 @@ function initHashWriter() {
         runs: s.enabledRuns,
         frame: s.frame,
         conf: s.confThreshold,
+        mode: s.mode,
       })
     );
   }, 250);
@@ -171,7 +172,8 @@ function initHashWriter() {
       changed.has('fov') ||
       changed.has('enabledRuns') ||
       changed.has('frame') ||
-      changed.has('confThreshold')
+      changed.has('confThreshold') ||
+      changed.has('mode')
     ) {
       write(state);
     }
@@ -255,6 +257,7 @@ async function boot() {
       const fov =
         (video.variants.find((vv) => vv.fov === hash.fov) || video.variants[0] || {}).fov || null;
       await selectVariant(video.id, fov, { enabledRuns: hash.runs, frame: hash.frame });
+      if (hash.mode === 'metrics') store.set({ mode: 'metrics' });
     }
   }
   // else: empty state — do NOT auto-select a video.

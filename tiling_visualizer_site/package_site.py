@@ -114,8 +114,11 @@ def copy_site(here: Path, out: Path) -> None:
     """
     (out / "data" / "videos").mkdir(parents=True, exist_ok=True)
     (out / "data" / "runs").mkdir(parents=True, exist_ok=True)
-    shutil.copytree(here / "web", out, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns("data"))
+    web_root = here / "web"
+    # Anchor the fixture exclusion to web/ top level only — a future nested
+    # dir that happens to be called "data" should still ship.
+    shutil.copytree(web_root, out, dirs_exist_ok=True,
+                    ignore=lambda src, names: ["data"] if Path(src) == web_root else [])
     for t in out.rglob("*.test.js"):       # tests don't ship
         t.unlink()
 

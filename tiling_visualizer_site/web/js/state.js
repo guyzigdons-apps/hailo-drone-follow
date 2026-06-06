@@ -41,14 +41,15 @@ export function defaultState() {
   };
 }
 
-// URL hash codec: #v=0025&fov=fov50&runs=r1,r2&f=312&conf=0.30
-export function encodeHash({ videoId, fov, runs, frame, conf }) {
+// URL hash codec: #v=0025&fov=fov50&runs=r1,r2&f=312&conf=0.30&m=metrics
+export function encodeHash({ videoId, fov, runs, frame, conf, mode }) {
   const p = new URLSearchParams();
   if (videoId) p.set('v', videoId);
   if (fov) p.set('fov', fov);
   if (runs && runs.length) p.set('runs', runs.join(','));
   if (Number.isFinite(frame)) p.set('f', String(frame));
   if (Number.isFinite(conf)) p.set('conf', conf.toFixed(2));
+  if (mode && mode !== 'viewer') p.set('m', mode);
   return '#' + p.toString();
 }
 
@@ -64,6 +65,7 @@ export function decodeHash(hash) {
       runs: p.get('runs') ? p.get('runs').split(',') : [],
       frame: p.has('f') ? parseInt(p.get('f'), 10) : 0,
       conf: p.has('conf') ? parseFloat(p.get('conf')) : 0.25,
+      mode: p.get('m') === 'metrics' ? 'metrics' : 'viewer',
     };
   } catch { return null; }
 }
