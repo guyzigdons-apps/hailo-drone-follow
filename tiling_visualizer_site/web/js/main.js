@@ -11,6 +11,9 @@ import { initTransport } from './ui/transport.js';
 import { initHud } from './ui/hud.js';
 import { initOverlay } from './ui/overlay.js';
 import { initFiltersPanel } from './ui/filters-panel.js';
+import { initRunsPanel } from './ui/runs-panel.js';
+import { initInspector } from './ui/inspector.js';
+import { initKeyboard } from './ui/keyboard.js';
 
 const store = createStore(defaultState());
 export { store };
@@ -213,8 +216,10 @@ async function boot() {
   initHud(store);
   initOverlay(store);
   initFiltersPanel(store);
-  // later tasks: initRunsPanel, initFilters, initInspector, initLegend,
-  // initMetrics, initKeyboard … attach here.
+  initRunsPanel(store);
+  initInspector(store);
+  initKeyboard(store, stage);
+  // later tasks: initMetrics … attach here.
 
   setStatus('loading', 'loading…');
 

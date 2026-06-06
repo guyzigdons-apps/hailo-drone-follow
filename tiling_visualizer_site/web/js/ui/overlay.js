@@ -8,12 +8,12 @@
 //
 // Repaint policy (DS §7.7): full clear+repaint ONLY when one of the keys below
 // changes. NEVER on cursorNorm / mousemove.
-import { isPhantom, containmentMerge } from '../core/filters.js';
+import { filterDetectionsPure } from '../core/pipeline.js';
 
 // Run overlay palette — slots 1..8 (DS §3.5). Hardcoded hexes mirror the
 // --run-1..8 custom properties in css/tokens.css (canvas can't read CSS vars
 // cheaply, so keep these in sync if tokens.css changes).
-const RUN_PALETTE = [
+export const RUN_PALETTE = [
   '#00E5FF', // 1 electric cyan
   '#FF3DDB', // 2 magenta
   '#FFA000', // 3 amber
@@ -72,40 +72,17 @@ export function initOverlay(store) {
     return `${runId}|${frame}|${conf}|${hidePhantoms ? 1 : 0}|${merge ? 1 : 0}`;
   }
 
-  // Run the filter pipeline for one run at the current frame, with caching.
-  // Pipeline order (per the task contract): (1) confidence ≥ conf;
-  // (2) hide phantoms; (3) containment merge. Counts: phantoms = boxes dropped
-  // by step 2; merged = boxes absorbed by step 3.
+  // Cache wrapper around the shared pure pipeline (core/pipeline.js). The
+  // inspector imports filterDetectionsPure directly; keeping the pipeline pure
+  // guarantees overlay + inspector see the SAME filtered list, so
+  // hoveredDet.index stays valid across both.
   function filterDetections(runId, doc, state) {
     const { frame, confThreshold, hidePhantoms, containmentMerge: merge } = state;
     const key = cacheKey(runId, frame, confThreshold, hidePhantoms, merge);
     const hit = filteredCache.get(key);
     if (hit) return hit;
 
-    const raw = doc.byFrame.get(frame)?.detections ?? [];
-    // (1) confidence
-    let kept = raw.filter((d) => Number(d.confidence) >= confThreshold);
-
-    // (2) phantoms
-    let phantoms = 0;
-    if (hidePhantoms) {
-      const after = [];
-      for (const d of kept) {
-        if (isPhantom(d, doc.staticTileRects)) phantoms += 1;
-        else after.push(d);
-      }
-      kept = after;
-    }
-
-    // (3) containment merge
-    let merged = 0;
-    if (merge) {
-      const before = kept.length;
-      kept = containmentMerge(kept, 0.5, 0);
-      merged = before - kept.length;
-    }
-
-    const result = { dets: kept, phantoms, merged };
+    const result = filterDetectionsPure(doc, frame, confThreshold, hidePhantoms, merge);
     if (filteredCache.size >= FILTER_CACHE_MAX) filteredCache.clear();
     filteredCache.set(key, result);
     return result;
