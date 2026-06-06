@@ -51,6 +51,7 @@ const REDRAW_KEYS = [
   'containmentMerge',
   'contentBox',
   'hoveredDet',
+  'hoverRun',
   'runDocs',
   'zoom',
 ];
@@ -172,7 +173,7 @@ export function initOverlay(store) {
   }
 
   function drawDetections(state, px, py, zoom) {
-    const { enabledRuns, runColors, runDocs, hoveredDet } = state;
+    const { enabledRuns, runColors, runDocs, hoveredDet, hoverRun } = state;
     if (!enabledRuns || !enabledRuns.length) return;
     const cbHspan = py(1) - py(0);
     const cbWspan = px(1) - px(0);
@@ -182,6 +183,8 @@ export function initOverlay(store) {
       if (!doc) continue;
       const slot = runColors[runId] || 1;
       const color = RUN_PALETTE[(slot - 1) % RUN_PALETTE.length];
+      // Run-row hover emphasis (DS §6.3): dim the OTHER runs' boxes to 60%.
+      ctx.globalAlpha = hoverRun && hoverRun !== runId ? 0.6 : 1;
 
       const { dets } = filterDetections(runId, doc, state);
       for (let i = 0; i < dets.length; i++) {
@@ -217,6 +220,7 @@ export function initOverlay(store) {
         if (w >= 14) drawChip(d, x, y, color, zoom, py(0));
       }
     }
+    ctx.globalAlpha = 1;
   }
 
   function drawChip(d, x, y, color, zoom, contentTop) {
