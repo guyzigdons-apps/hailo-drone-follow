@@ -1,0 +1,86 @@
+{
+  "title": "Hailo Dynamic Tiling Benchmark",
+  "videos": [
+    {
+      "id": "0025", "title": "DJI 0025 — baseline walkers",
+      "variants": [
+        {
+          "fov": "fov50",
+          "source": "/home/giladn/Videos/Drone/Training/DJI_20260528155151_0025_D_prepared__fov50.mp4",
+          "runs": [
+            {"id": "0025_fov50_dyn_t3", "label": "dynamic trial 3", "type": "DYN",
+             "path": "dynamic_tiling/runs/baseline_0025/frames_fov50/trial_3.frames.json"},
+            {"id": "0025_fov50_dyn_t4", "label": "dynamic trial 4", "type": "DYN",
+             "path": "dynamic_tiling/runs/baseline_0025/frames_fov50/trial_4.frames.json"},
+            {"id": "0025_fov50_dyn_ov25_t3", "label": "dynamic ov25 trial 3", "type": "DYN",
+             "path": "dynamic_tiling/runs/baseline_0025/frames_fov50_ov25/trial_3.frames.json"},
+            {"id": "0025_fov50_dyn_ov25_t4", "label": "dynamic ov25 trial 4", "type": "DYN",
+             "path": "dynamic_tiling/runs/baseline_0025/frames_fov50_ov25/trial_4.frames.json"},
+            {"id": "0025_fov50_dense", "label": "dense 12x9 ov25 (GT ref)", "type": "DENSE",
+             "path": "dynamic_tiling/runs/dense_0025/fov50/pxt_GT-12x9-25-multi.frames.json"}
+          ],
+          "trials": [
+            {"id": "0025_fov50_trials", "label": "dynamic ov0",
+             "path": "dynamic_tiling/runs/baseline_0025/trials_fov50.json"},
+            {"id": "0025_fov50_trials_ov25", "label": "dynamic ov25",
+             "path": "dynamic_tiling/runs/baseline_0025/trials_fov50_ov25.json"}
+          ]
+        },
+        {
+          "fov": "fov60",
+          "source": "/home/giladn/Videos/Drone/Training/DJI_20260528155151_0025_D_prepared__fov60.mp4",
+          "runs": [
+            {"id": "0025_fov60_dyn_ov25_t3", "label": "dynamic ov25 trial 3", "type": "DYN",
+             "path": "dynamic_tiling/runs/baseline_0025/frames_fov60_ov25/trial_3.frames.json"},
+            {"id": "0025_fov60_dyn_ov25_t4", "label": "dynamic ov25 trial 4", "type": "DYN",
+             "path": "dynamic_tiling/runs/baseline_0025/frames_fov60_ov25/trial_4.frames.json"},
+            {"id": "0025_fov60_dense", "label": "dense 12x9 ov25 (GT ref)", "type": "DENSE",
+             "path": "dynamic_tiling/runs/dense_0025/fov60/pxt_GT-12x9-25-multi.frames.json"}
+          ],
+          "trials": [
+            {"id": "0025_fov60_trials", "label": "dynamic ov0",
+             "path": "dynamic_tiling/runs/baseline_0025/trials_fov60.json"},
+            {"id": "0025_fov60_trials_ov25", "label": "dynamic ov25",
+             "path": "dynamic_tiling/runs/baseline_0025/trials_fov60_ov25.json"}
+          ]
+        },
+        {
+          "fov": "fov70",
+          "source": "/home/giladn/Videos/Drone/Training/DJI_20260528155151_0025_D_prepared__fov70.mp4",
+          "runs": [
+            {"id": "0025_fov70_dyn_ov25_t3", "label": "dynamic ov25 trial 3", "type": "DYN",
+             "path": "dynamic_tiling/runs/baseline_0025/frames_fov70_ov25/trial_3.frames.json"},
+            {"id": "0025_fov70_dyn_ov25_t4", "label": "dynamic ov25 trial 4", "type": "DYN",
+             "path": "dynamic_tiling/runs/baseline_0025/frames_fov70_ov25/trial_4.frames.json"},
+            {"id": "0025_fov70_dense", "label": "dense 12x9 ov25 (GT ref)", "type": "DENSE",
+             "path": "dynamic_tiling/runs/dense_0025/fov70/pxt_GT-12x9-25-multi.frames.json"}
+          ],
+          "trials": [
+            {"id": "0025_fov70_trials", "label": "dynamic ov0",
+             "path": "dynamic_tiling/runs/baseline_0025/trials_fov70.json"},
+            {"id": "0025_fov70_trials_ov25", "label": "dynamic ov25",
+             "path": "dynamic_tiling/runs/baseline_0025/trials_fov70_ov25.json"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "0026", "title": "DJI 0026 — multi-target",
+      "variants": [
+        {
+          "fov": "fov50",
+          "source": "/home/giladn/Videos/Drone/Training/DJI_20260528155239_0026_D_prepared__fov50.mp4",
+          "runs": [
+            {"id": "0026_fov50_dyn_full", "label": "dynamic full multi", "type": "DYN",
+             "path": "dynamic_tiling/runs/dynamic_full_multi_0026_fov50.frames.json"},
+            {"id": "0026_fov50_dyn_dense8x6", "label": "dynamic dense8x6 disc2fps", "type": "DYN",
+             "path": "dynamic_tiling/runs/dynamic_dense8x6_disc2fps_0026_fov50.frames.json"},
+            {"id": "0026_fov50_gt", "label": "GT tracks", "type": "GT",
+             "path": "dynamic_tiling/runs/gt_tracks_0026_fov50.frames.json"}
+          ],
+          "trials": []
+        }
+      ]
+    }
+  ]
+}
