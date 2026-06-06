@@ -312,6 +312,9 @@ export function initRunsPanel(store) {
     'tileSourceRun', 'runDocs', 'frameCounts',
   ];
   store.subscribe((_state, changed) => {
+    if (changed.has('videoId') || changed.has('fov') || changed.has('manifest')) {
+      preSoloEnabled = null;
+    }
     for (const k of KEYS) if (changed.has(k)) { render(); return; }
   });
   render();

@@ -76,6 +76,8 @@ async function selectVariant(videoId, fov, { enabledRuns, frame } = {}) {
     runColors: {},
     tileSourceRun: null,
     frameCounts: {},
+    hoveredDet: null,
+    hoverRun: null,
   });
 
   const runs = variant.runs || [];

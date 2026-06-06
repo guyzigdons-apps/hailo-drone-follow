@@ -159,8 +159,15 @@ export function initInspector(store) {
   ];
   const LEGEND_KEYS = ['enabledRuns', 'runColors', 'runDocs', 'manifest', 'videoId', 'fov'];
 
+  let rafPending = false;
+  function scheduleRender() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => { rafPending = false; renderInspector(); });
+  }
+
   store.subscribe((_state, changed) => {
-    if (INSP_KEYS.some((k) => changed.has(k))) renderInspector();
+    if (INSP_KEYS.some((k) => changed.has(k))) scheduleRender();
     if (LEGEND_KEYS.some((k) => changed.has(k))) renderLegend();
   });
   renderInspector();

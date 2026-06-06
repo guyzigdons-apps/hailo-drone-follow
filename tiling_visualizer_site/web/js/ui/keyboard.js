@@ -164,6 +164,8 @@ function openGoto(store, seek) {
 }
 
 // ── Shortcuts overlay (DS §6.10) ────────────────────────────────────────────
+let shortcutsClose = null;
+
 const BINDINGS = [
   ['Space', 'Play / pause'],
   ['[  ]', 'Step frame −1 / +1'],
@@ -180,8 +182,8 @@ const BINDINGS = [
 ];
 
 function openShortcuts() {
-  if (document.querySelector('.kbd-overlay')) {
-    document.querySelector('.kbd-overlay').remove();
+  if (shortcutsClose) {
+    shortcutsClose();
     return;
   }
   const ov = document.createElement('div');
@@ -208,11 +210,13 @@ function openShortcuts() {
   const close = () => {
     document.removeEventListener('keydown', onKey, true);
     ov.remove();
+    shortcutsClose = null;
   };
   const onKey = (e) => {
     if (e.key === 'Escape' || e.key === '?') { e.stopPropagation(); close(); }
   };
-  ov.addEventListener('mousedown', () => close());
+  ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });
   document.addEventListener('keydown', onKey, true);
+  shortcutsClose = close;
   document.body.appendChild(ov);
 }

@@ -37,6 +37,7 @@ export function defaultState() {
   contentBox: null,               // {x,y,w,h} published by stage.js
   frameCounts: {},                // runId -> {shown, phantoms, merged} from overlay.js
   hoveredDet: null,               // {runId, index} | null
+  hoverRun: null,                 // runId | null
   };
 }
 
