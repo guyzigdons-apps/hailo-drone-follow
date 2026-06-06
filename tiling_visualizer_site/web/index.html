@@ -40,7 +40,7 @@
   <section class="stage-column">
     <div id="stage" class="stage">
       <div id="stage-transform" class="stage__transform">
-        <video id="video" muted playsinline preload="auto"></video>
+        <video id="video" muted playsinline preload="auto" crossorigin="anonymous"></video>
         <canvas id="overlay-canvas"></canvas>
       </div>
       <div id="hud" class="hud">
@@ -60,7 +60,7 @@
   </aside>
 </main>
 
-<main id="metrics-mode" class="metrics hidden"></main>
+<section id="metrics-mode" class="metrics hidden" role="region" aria-label="Metrics"></section>
 
 <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
