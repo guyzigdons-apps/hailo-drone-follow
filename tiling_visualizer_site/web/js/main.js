@@ -211,7 +211,8 @@ async function boot() {
   const stage = initStage(store);
   initTransport(store, stage);
   initHud(store);
-  initOverlay(store); initFiltersPanel(store);
+  initOverlay(store);
+  initFiltersPanel(store);
   // later tasks: initRunsPanel, initFilters, initInspector, initLegend,
   // initMetrics, initKeyboard … attach here.
 

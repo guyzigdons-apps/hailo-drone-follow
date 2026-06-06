@@ -37,6 +37,9 @@ const TILE_COLORS = {
 // dynamic + dynamic-merged are solid (DS §3.4 table).
 const DASHED_CATEGORIES = new Set(['multi-scale', 'single-scale']);
 
+// Mirrors --font-mono in tokens.css (canvas can't read CSS vars cheaply).
+const MONO_FONT = '"JetBrains Mono","SF Mono","Cascadia Code",Consolas,"Roboto Mono",monospace';
+
 // Keys that, when changed, require a full repaint.
 const REDRAW_KEYS = [
   'frame',
@@ -171,9 +174,10 @@ export function initOverlay(store) {
 
       ctx.lineWidth = strokeW;
       ctx.strokeStyle = color;
-      ctx.setLineDash(DASHED_CATEGORIES.has(category) ? [6 / zoom, 4 / zoom] : []);
+      const dash = DASHED_CATEGORIES.has(category);
+      if (dash) ctx.setLineDash([6 / zoom, 4 / zoom]);
       ctx.strokeRect(x, y, w, h);
-      ctx.setLineDash([]);
+      if (dash) ctx.setLineDash([]);
 
       // Category tag at the tile top-left — skip when the tile is too narrow.
       if (w >= 60) {
@@ -193,8 +197,7 @@ export function initOverlay(store) {
   function drawDetections(state, px, py, zoom) {
     const { enabledRuns, runColors, runDocs, hoveredDet } = state;
     if (!enabledRuns || !enabledRuns.length) return;
-    const cbH = py(1) - py(0);
-    const cbHspan = cbH;
+    const cbHspan = py(1) - py(0);
     const cbWspan = px(1) - px(0);
 
     for (const runId of enabledRuns) {
@@ -234,12 +237,12 @@ export function initOverlay(store) {
         ctx.strokeRect(x, y, w, h);
 
         // Label chip — skip on tiny boxes to keep the canvas readable.
-        if (w >= 14) drawChip(d, x, y, color, zoom);
+        if (w >= 14) drawChip(d, x, y, color, zoom, py(0));
       }
     }
   }
 
-  function drawChip(d, x, y, color, zoom) {
+  function drawChip(d, x, y, color, zoom, contentTop) {
     const fontPx = 11 / zoom;
     const padX = 4 / zoom;
     const padY = 2 / zoom;
@@ -256,10 +259,10 @@ export function initOverlay(store) {
     const tw = ctx.measureText(text).width;
     const chipW = tw + padX * 2;
 
-    // Above the box top-left; if that clips above the content top, draw it
-    // inside the top edge instead.
+    // Above the box top-left; if that clips above the content top (NOT the
+    // canvas top — there may be a letterbox bar), draw it inside instead.
     let chipY = y - chipH;
-    if (chipY < 0) chipY = y;
+    if (chipY < (contentTop ?? 0)) chipY = y;
 
     ctx.fillStyle = color;
     ctx.fillRect(x, chipY, chipW, chipH);
@@ -268,7 +271,7 @@ export function initOverlay(store) {
   }
 
   function monoFont() {
-    return '"JetBrains Mono","SF Mono",Consolas,"Roboto Mono",monospace';
+    return MONO_FONT;
   }
 
   // Recompute per-run counts and publish to the store only when the signature
@@ -298,6 +301,9 @@ export function initOverlay(store) {
 
   // ── Subscription: repaint only on relevant changes (never cursorNorm) ──
   store.subscribe((_state, changed) => {
+    // A new runDocs Map means a variant switch — cached filter results for
+    // the old docs must not survive (run ids/frames could collide).
+    if (changed.has('runDocs')) filteredCache.clear();
     for (const k of REDRAW_KEYS) {
       if (changed.has(k)) {
         draw();
