@@ -147,7 +147,16 @@ def main(argv=None) -> int:
                 print(f"[skip] {dst.name}")
             elif needs_transcode(src, dst):
                 print(f"[transcode] {src.name} -> {dst.name}")
-                subprocess.run(transcode_cmd(src, dst), check=True, capture_output=True)
+                try:
+                    subprocess.run(transcode_cmd(src, dst), check=True,
+                                   capture_output=True, text=True)
+                except subprocess.CalledProcessError as exc:
+                    # remove the partial file so the mtime skip-cache isn't
+                    # poisoned, and surface ffmpeg's actual error text
+                    dst.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"ffmpeg failed for {src.name}:\n"
+                        f"{(exc.stderr or '').strip()[-2000:]}") from exc
             else:
                 print(f"[fresh] {dst.name}")
 

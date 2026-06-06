@@ -1,4 +1,5 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,7 +57,7 @@ class TestManifest(unittest.TestCase):
         }
 
     def test_build_manifest_entry(self):
-        import tempfile
+
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             cfg = self.make_cfg(tmp)
@@ -73,14 +74,14 @@ class TestManifest(unittest.TestCase):
             self.assertEqual(v["trials"][0]["trials_json"], "data/runs/t1.json")
 
     def test_validate_config_ok(self):
-        import tempfile
+
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             cfg = self.make_cfg(tmp)
             ps.validate_config(cfg, repo_root=tmp)  # should not raise
 
     def test_missing_run_file_raises(self):
-        import tempfile
+
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             cfg = self.make_cfg(tmp)
@@ -90,7 +91,7 @@ class TestManifest(unittest.TestCase):
             self.assertIn("missing.json", str(ctx.exception))
 
     def test_missing_source_video_raises(self):
-        import tempfile
+
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             cfg = self.make_cfg(tmp)
