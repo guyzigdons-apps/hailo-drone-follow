@@ -1,0 +1,172 @@
+/* DS §2.1 / §2.7 — grid layout, stage, rails, transport */
+
+/* ── Body ─────────────────────────────────────────────────── */
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font: 13px / 1.4 var(--font-ui);
+  margin: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 48px auto;
+  height: 100vh;
+}
+
+/* ── Top bar (DS §2.1.1) ──────────────────────────────────── */
+.topbar {
+  grid-row: 1;
+  grid-column: 1 / -1;
+}
+
+/* ── Workspace — 3-column grid (DS §2.1) ─────────────────── */
+/* Reference at 1280–1599 px: left 280px | fluid ≥640px | right 300px */
+.workspace {
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: 280px minmax(640px, 1fr) 300px;
+  height: calc(100vh - 48px);
+  overflow: hidden;
+}
+
+/* ── Rails (DS §2.1.2 / §2.1.4) ──────────────────────────── */
+.rail {
+  background: var(--surface-1);
+  overflow-y: auto;
+  padding: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.rail--left {
+  border-right: 1px solid var(--border-subtle);
+}
+
+.rail--right {
+  border-left: 1px solid var(--border-subtle);
+}
+
+/* Right rail collapse: JS adds .is-collapsed, CSS hides it */
+.rail--right.is-collapsed {
+  display: none;
+}
+
+/* ── Stage column (DS §2.1.3) ─────────────────────────────── */
+.stage-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 640px;
+  overflow: hidden;
+}
+
+/* ── Stage (DS §2.2.1) ────────────────────────────────────── */
+.stage {
+  flex: 1;
+  position: relative;
+  background: var(--bg-canvas-stage);
+  overflow: hidden;
+}
+
+/* ── Stage transform wrapper (DS §2.2.3) ──────────────────── */
+/* Wraps both <video> and <canvas> so zoom/pan moves them together.
+   HUD is outside this wrapper and stays fixed in stage corners.    */
+.stage__transform {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+}
+
+/* ── Video (DS §2.2.1) ────────────────────────────────────── */
+#video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* ── Overlay canvas (DS §2.2.1–2.2.2) ────────────────────── */
+#overlay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* ── HUD (DS §2.4) ────────────────────────────────────────── */
+/* Container covers the full stage; pills are positioned within it.
+   Pointer events disabled so the canvas/video receive all input.   */
+.hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.hud__pill {
+  position: absolute;
+  pointer-events: none;
+}
+
+/* Corner anchors — 12px from each edge (DS §2.4) */
+.hud__tl { top: 12px;    left: 12px;   }
+.hud__tr { top: 12px;    right: 12px;  }
+.hud__bl { bottom: 12px; left: 12px;   }
+.hud__br { bottom: 12px; right: 12px;  }
+
+/* ── Stage empty state (DS §6.2a) ────────────────────────── */
+.stage__empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+/* ── Transport bar (DS §2.3) ──────────────────────────────── */
+.transport {
+  flex-shrink: 0;
+  height: 72px;
+  background: var(--surface-1);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 var(--sp-4);
+  gap: var(--sp-1);
+}
+
+/* ── Metrics mode (DS §5.1) ────────────────────────────────── */
+.metrics {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  overflow-y: auto;
+  padding: var(--sp-5);
+}
+
+/* ── Utility ───────────────────────────────────────────────── */
+.hidden {
+  display: none !important;
+}
+
+/* ── Responsive (DS §2.7) ─────────────────────────────────── */
+/* ≥1600px: wider rails */
+@media (min-width: 1600px) {
+  .workspace {
+    grid-template-columns: 300px minmax(640px, 1fr) 320px;
+  }
+}
+
+/* ≤1279px: right rail auto-collapsed by JS via .is-collapsed,
+   but we also provide a narrow-screen fallback via CSS only    */
+@media (max-width: 1279px) {
+  .workspace {
+    grid-template-columns: 280px minmax(640px, 1fr);
+  }
+
+  .rail--right {
+    display: none;
+  }
+}

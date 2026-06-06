@@ -1,0 +1,61 @@
+/* DS §3.1–3.8 design tokens — single source of truth, never edit values here directly */
+:root {
+  /* DS 3.1 surfaces */
+  --bg-base: #0A1020;
+  --bg-canvas-stage: #000000;
+  --surface-1: #0F1A2E;
+  --surface-2: #15233D;
+  --surface-3: #1C2E4A;
+  --surface-inset: #0B1422;
+  --border-subtle: #22324F;
+  --border-strong: #2E445F;
+
+  /* DS 3.2 text */
+  --text-primary: #E6EEF8;
+  --text-secondary: #9FB2CC;
+  --text-tertiary: #647793;
+  --text-on-accent: #04121F;
+
+  /* DS 3.3 accent + semantic */
+  --accent: #19E3D6;
+  --accent-hover: #3DEDE2;
+  --accent-muted: #0E5E5A;
+  --info: #3AA0FF;
+  --success: #37D67A;
+  --warning: #FFB020;
+  --danger: #FF5C5C;
+
+  /* DS 3.4 tile categories */
+  --tile-multi: #22D3EE;
+  --tile-single: #FACC15;
+  --tile-dynamic: #34D399;
+  --tile-dynamic-merged: #E879F9;
+
+  /* DS 3.5 run overlay palette (8 slots) */
+  --run-1: #00E5FF;
+  --run-2: #FF3DDB;
+  --run-3: #FFA000;
+  --run-4: #6EE63A;
+  --run-5: #A78BFA;
+  --run-6: #FF6B5C;
+  --run-7: #5AA9FF;
+  --run-8: #FF9EC4;
+
+  /* DS 3.6 type */
+  --font-ui: Inter, "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, "Roboto Mono", monospace;
+
+  /* DS 3.7 spacing */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* DS 3.8 radius + shadow */
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.45);
+}

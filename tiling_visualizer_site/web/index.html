@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hailo · Tiling Benchmark Visualizer</title>
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/layout.css">
+<link rel="stylesheet" href="css/components.css">
+</head>
+<body>
+
+<header id="topbar" class="topbar">
+  <div class="topbar__brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-title">HAILO</span>
+    <span class="brand-sub">Tiling Benchmark Visualizer</span>
+  </div>
+  <div class="topbar__selectors">
+    <select id="video-select" class="select" disabled aria-label="Video"></select>
+    <div id="fov-segmented" class="segmented" role="tablist" aria-label="FOV variant"></div>
+  </div>
+  <div id="mode-toggle" class="segmented segmented--accent" role="tablist" aria-label="Mode">
+    <button class="segmented__btn is-active" data-mode="viewer" role="tab">Viewer</button>
+    <button class="segmented__btn" data-mode="metrics" role="tab">Metrics</button>
+  </div>
+  <div id="manifest-status" class="topbar__status">
+    <span class="status-dot"></span>
+    <span class="status-text">loading…</span>
+  </div>
+</header>
+
+<main id="viewer-mode" class="workspace">
+  <aside id="left-rail" class="rail rail--left">
+    <section id="runs-panel" class="panel"></section>
+    <section id="tile-source-panel" class="panel"></section>
+    <section id="filters-panel" class="panel"></section>
+  </aside>
+
+  <section class="stage-column">
+    <div id="stage" class="stage">
+      <div id="stage-transform" class="stage__transform">
+        <video id="video" muted playsinline preload="auto"></video>
+        <canvas id="overlay-canvas"></canvas>
+      </div>
+      <div id="hud" class="hud">
+        <div class="hud__pill hud__tl" id="hud-frame"></div>
+        <div class="hud__pill hud__tr" id="hud-zoom"></div>
+        <div class="hud__pill hud__bl" id="hud-cursor"></div>
+        <div class="hud__pill hud__br" id="hud-counts"></div>
+      </div>
+      <div id="stage-empty" class="stage__empty">Select a video to begin</div>
+    </div>
+    <div id="transport" class="transport"></div>
+  </section>
+
+  <aside id="right-rail" class="rail rail--right">
+    <section id="inspector" class="panel panel--grow"></section>
+    <section id="legend" class="panel panel--pinned"></section>
+  </aside>
+</main>
+
+<main id="metrics-mode" class="metrics hidden"></main>
+
+<div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

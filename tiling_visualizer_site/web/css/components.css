@@ -1,0 +1,462 @@
+/* DS §3.9 / §4 — base control + component styles */
+
+/* ── Focus ring (DS §3.8.3) ────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Body helpers ───────────────────────────────────────────── */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ══ Top bar (DS §4.1) ════════════════════════════════════════ */
+.topbar {
+  height: 48px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-4);
+  flex-shrink: 0;
+}
+
+/* Brand block (DS §4.1.1) */
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+/* 8×24px rounded-rect accent mark — pure CSS, no image */
+.brand-mark {
+  display: inline-block;
+  width: 8px;
+  height: 24px;
+  background: var(--accent);
+  border-radius: var(--r-sm);
+}
+
+.brand-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-primary);
+}
+
+.brand-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Selectors cluster */
+.topbar__selectors {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 1;
+}
+
+/* Status indicator (DS §4.1.5) */
+.topbar__status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  flex-shrink: 0;
+}
+
+.status-dot.is-ready  { background: var(--success); }
+.status-dot.is-failed { background: var(--danger);  }
+
+/* ══ Buttons (DS §3.9.1) ══════════════════════════════════════ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 var(--sp-3);
+  gap: var(--sp-1);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  font: 13px / 1 var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 100ms, border-color 100ms;
+}
+
+.btn:hover {
+  background: var(--surface-3);
+}
+
+.btn:active {
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Primary button — accent fill (DS §3.9.1 "Play button") */
+.btn--primary {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.btn--primary:hover {
+  background: var(--accent-hover);
+}
+
+/* ══ Icon buttons (DS §3.9.2) ═════════════════════════════════ */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: background 100ms, color 100ms;
+}
+
+.icon-btn:hover {
+  background: var(--surface-3);
+  color: var(--text-primary);
+}
+
+.icon-btn.is-active,
+.icon-btn[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+/* Large play button (40×40, DS §2.3.2) */
+.icon-btn--play {
+  width: 40px;
+  height: 40px;
+}
+
+/* ══ Toggle switch (DS §3.9.3) — 36×20 pill ══════════════════ */
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggle__track {
+  position: absolute;
+  inset: 0;
+  background: var(--surface-inset);
+  border-radius: 9999px;
+  transition: background 120ms ease;
+  cursor: pointer;
+}
+
+.toggle__track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.toggle input:checked + .toggle__track {
+  background: var(--accent);
+}
+
+.toggle input:checked + .toggle__track::after {
+  transform: translateX(16px);
+  background: #ffffff;
+}
+
+.toggle input:focus-visible + .toggle__track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ══ Slider — confidence + scrubber (DS §3.9.4) ══════════════ */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--surface-inset);
+  border-radius: 2px;
+  cursor: pointer;
+  accent-color: var(--accent);
+  outline: none;
+}
+
+/* Webkit track fill uses a background gradient trick */
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-inset);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  box-shadow: 0 0 0 2px var(--bg-base);
+  margin-top: -5px;
+  transition: width 100ms, height 100ms, margin-top 100ms;
+}
+
+input[type="range"]:active::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-inset);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  box-shadow: 0 0 0 2px var(--bg-base);
+  border: none;
+}
+
+input[type="range"]:active::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── Slider wrapper with value readout ─────────────────────── */
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.slider__label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.slider__value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+/* ══ Dropdown / select (DS §3.9.5) ═══════════════════════════ */
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%239FB2CC' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 10px center;
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  height: 32px;
+  padding: 0 28px 0 var(--sp-3);
+  font: 13px var(--font-ui);
+  cursor: pointer;
+  min-width: 140px;
+  transition: border-color 100ms, background 100ms;
+}
+
+.select:hover {
+  background-color: var(--surface-3);
+}
+
+.select:focus-visible {
+  border-color: var(--border-strong);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.select:disabled {
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* ══ Segmented control (DS §4.1.3 / §4.1.4) ═════════════════ */
+.segmented {
+  display: inline-flex;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  padding: 2px;
+  gap: 2px;
+}
+
+.segmented__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 var(--sp-3);
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  border-radius: calc(var(--r-md) - 2px);
+  font: 12px / 1 var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 100ms, color 100ms;
+}
+
+.segmented__btn:hover:not(.is-active) {
+  background: var(--surface-3);
+  color: var(--text-primary);
+}
+
+/* Default active: underline style for FOV selector (DS §4.1.3) */
+.segmented__btn.is-active {
+  color: var(--text-primary);
+  background: var(--surface-3);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Accent-filled variant for mode toggle (DS §4.1.4) */
+.segmented--accent .segmented__btn.is-active {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+/* ══ Panel / card (DS §3.9 / §4) ═════════════════════════════ */
+.panel {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.panel--grow {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.panel--pinned {
+  flex-shrink: 0;
+}
+
+.panel__header {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--sp-1);
+}
+
+/* ══ HUD pills (DS §2.4) ═════════════════════════════════════ */
+.hud__pill {
+  background: rgba(15, 26, 46, 0.7);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  border-radius: var(--r-sm);
+  padding: 4px 8px;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+/* ══ Toast / status (DS §4.9) ════════════════════════════════ */
+.toast-root {
+  position: fixed;
+  bottom: var(--sp-5);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  pointer-events: none;
+  z-index: 1000;
+}
+
+.toast {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 12px;
+  color: var(--text-primary);
+  box-shadow: var(--shadow-float);
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 480px;
+  animation: toast-in 150ms ease;
+}
+
+.toast--error {
+  border-color: var(--danger);
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* ── Reduced motion ─────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .toggle__track,
+  .toggle__track::after,
+  .icon-btn,
+  .btn,
+  .segmented__btn {
+    transition: none;
+  }
+
+  @keyframes toast-in {
+    from { opacity: 1; transform: none; }
+  }
+}
