@@ -118,6 +118,10 @@ export function initStage(store) {
     if (video.src !== new URL(variant.video, location.href).href) {
       video.src = variant.video;
       video.load();
+    } else {
+      // src unchanged -> no loadedmetadata coming; don't leave a stale
+      // pending seek for a future, unrelated load
+      pendingSeekFrame = null;
     }
     if (empty) empty.classList.add('hidden');
     startSync();

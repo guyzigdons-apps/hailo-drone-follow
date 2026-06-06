@@ -8,9 +8,11 @@
 function fmtTime(frame, fps) {
   if (!fps) return '00:00.000';
   const secs = frame / fps;
+  // floor (not round) the milliseconds so 29.97fps times never overflow to
+  // a 4-digit ".1000" field (e.g. t=32.9997s)
   const mm = Math.floor(secs / 60);
   const ss = Math.floor(secs % 60);
-  const mmm = Math.round((secs - Math.floor(secs)) * 1000);
+  const mmm = Math.floor((secs - Math.floor(secs)) * 1000);
   return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}.${String(mmm).padStart(3, '0')}`;
 }
 
