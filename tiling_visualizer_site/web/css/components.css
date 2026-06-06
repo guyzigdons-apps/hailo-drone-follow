@@ -918,3 +918,192 @@ kbd {
     from { opacity: 1; transform: none; }
   }
 }
+
+/* ══ Metrics mode (DS §5) ══════════════════════════════════════ */
+.metrics {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* Empty / loading state */
+.mx-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+/* Header strip + chip bar (DS §5.1.1) */
+.mx-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-5);
+}
+.mx-head__title {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  color: var(--text-primary);
+}
+.mx-chipbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.metrics-chip {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--text-tertiary);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.metrics-chip:hover { background: var(--surface-3); }
+.metrics-chip.is-off {
+  opacity: 0.4;
+  color: var(--text-tertiary);
+}
+
+/* Section wrapper + title bar */
+.mx-section { margin-bottom: var(--sp-6); }
+.mx-section__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--sp-2);
+}
+.mx-section__title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.mx-copy {
+  font-size: 11px;
+  height: 26px;
+  padding: 0 var(--sp-3);
+}
+
+/* Tables */
+.mx-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.mx-table th,
+.mx-table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  font-size: 12.5px;
+  line-height: 1.2;
+}
+.mx-table thead th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  font-weight: 600;
+  vertical-align: bottom;
+}
+.mx-table .mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.mx-table tbody tr:hover { background: var(--surface-2); }
+
+/* Aggregate: row head + column head */
+.mx-rowhead,
+.mx-rowhead-col {
+  color: var(--text-secondary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.mx-unit { color: var(--text-tertiary); font-size: 11px; }
+.mx-arrow { color: var(--text-tertiary); font-size: 10px; }
+.mx-colhead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.mx-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--r-sm);
+  flex: 0 0 auto;
+}
+.mx-subline {
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+/* Cells: value + microbar */
+.mx-cell { position: relative; }
+.mx-val { position: relative; z-index: 1; }
+.mx-na { color: var(--text-tertiary); }
+.mx-best {
+  border-left: 3px solid var(--success);
+  font-weight: 600;
+}
+.mx-best--neutral {
+  border-left: 3px solid var(--info);
+  font-weight: 600;
+}
+.mx-star { color: var(--success); }
+.mx-microbar {
+  position: absolute;
+  left: 0;
+  bottom: 3px;
+  height: 3px;
+  border-radius: 2px;
+  z-index: 0;
+}
+
+/* Per-trial table: sticky header, sortable, groups, footer */
+.mx-table--trial thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.mx-sortable { cursor: pointer; user-select: none; }
+.mx-sortable:hover { color: var(--text-primary); }
+.mx-sortind { color: var(--accent); }
+.mx-group-head th {
+  background: var(--surface-2);
+  border-left: 3px solid var(--text-tertiary);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.mx-foot {
+  background: var(--surface-3);
+}
+.mx-foot td { color: var(--text-secondary); }
+.mx-foot__label {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}

@@ -14,6 +14,7 @@ import { initFiltersPanel } from './ui/filters-panel.js';
 import { initRunsPanel } from './ui/runs-panel.js';
 import { initInspector } from './ui/inspector.js';
 import { initKeyboard } from './ui/keyboard.js';
+import { initMetrics } from './ui/metrics.js';
 
 const store = createStore(defaultState());
 export { store };
@@ -221,7 +222,7 @@ async function boot() {
   initRunsPanel(store);
   initInspector(store);
   initKeyboard(store, stage);
-  // later tasks: initMetrics … attach here.
+  initMetrics(store);
 
   setStatus('loading', 'loading…');
 
