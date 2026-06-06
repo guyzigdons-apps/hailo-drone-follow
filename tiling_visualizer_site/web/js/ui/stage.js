@@ -20,6 +20,14 @@ export function initStage(store) {
   const video = document.getElementById('video');
   const canvas = document.getElementById('overlay-canvas');
   const empty = document.getElementById('stage-empty');
+  const hud = document.getElementById('hud');
+
+  // Empty state vs. active video: show the placeholder + hide HUD pills, or
+  // the reverse. HUD pills only make sense once a variant is selected (F4).
+  function setEmpty(isEmpty) {
+    if (empty) empty.classList.toggle('hidden', !isEmpty);
+    if (hud) hud.classList.toggle('hidden', isEmpty);
+  }
 
   // Defensive: if the DOM isn't present (e.g. imported in a test harness),
   // return a no-op seekToFrame so callers don't crash.
@@ -94,14 +102,14 @@ export function initStage(store) {
       currentVariant = null;
       video.removeAttribute('src');
       video.load();
-      if (empty) empty.classList.remove('hidden');
+      setEmpty(true);
       return;
     }
     const v = manifest.videos.find((vv) => vv.id === videoId);
     const variant = v && (v.variants.find((x) => x.fov === fov) || v.variants[0]);
     if (!variant || !variant.video) {
       currentVariant = null;
-      if (empty) empty.classList.remove('hidden');
+      setEmpty(true);
       return;
     }
     currentVariant = { width: variant.width || 1920, height: variant.height || 1080 };
@@ -123,7 +131,7 @@ export function initStage(store) {
       // pending seek for a future, unrelated load
       pendingSeekFrame = null;
     }
-    if (empty) empty.classList.add('hidden');
+    setEmpty(false);
     startSync();
     resizeCanvas(); // recompute contentBox for the new variant aspect
   }

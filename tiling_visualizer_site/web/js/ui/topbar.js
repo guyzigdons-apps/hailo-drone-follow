@@ -30,6 +30,7 @@ export function initTopbar(store, { onSelect } = {}) {
 
   const select = document.getElementById('video-select');
   const fovEl = document.getElementById('fov-segmented');
+  const fovCaption = document.getElementById('fov-caption');
   const modeEl = document.getElementById('mode-toggle');
 
   // ── Populate the video dropdown ────────────────────────────
@@ -64,6 +65,7 @@ export function initTopbar(store, { onSelect } = {}) {
     if (!fovEl) return;
     const vid = videos.find((v) => v.id === state.videoId);
     fovEl.innerHTML = '';
+    if (fovCaption) fovCaption.classList.toggle('hidden', !vid);
     if (!vid) return;
     for (const variant of vid.variants) {
       const btn = document.createElement('button');

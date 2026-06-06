@@ -12,6 +12,21 @@ import { RUN_PALETTE } from './overlay.js';
 
 const PALETTE_SLOTS = 8;
 
+// Inline eye / eye-off icons (16px, stroke currentColor) for the run row
+// visibility toggle. Replaces the old ◉/○ glyphs (F10).
+const EYE_SVG =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12z"></path>' +
+  '<circle cx="12" cy="12" r="3"></circle></svg>';
+const EYE_OFF_SVG =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M9.9 5.2A9.6 9.6 0 0 1 12 5c7 0 10.5 7 10.5 7a17 17 0 0 1-3.2 4.1"></path>' +
+  '<path d="M6.3 6.6A16.7 16.7 0 0 0 1.5 12S5 19 12 19a9.7 9.7 0 0 0 5-1.3"></path>' +
+  '<path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"></path>' +
+  '<path d="M2 2l20 20"></path></svg>';
+
 // Solo memory (DS §6.7): the enabled set captured the moment solo engaged, so
 // a second alt-click can restore it. Module-level so keyboard `1`-`8` and the
 // eye toggle share one notion of "previous set".
@@ -210,7 +225,7 @@ export function initRunsPanel(store) {
       const eye = document.createElement('button');
       eye.type = 'button';
       eye.className = 'eye-btn';
-      eye.textContent = enabled ? '◉' : '○';
+      eye.innerHTML = enabled ? EYE_SVG : EYE_OFF_SVG;
       eye.title = enabled
         ? 'Hide run (Alt-click = solo)'
         : 'Show run (Alt-click = solo)';

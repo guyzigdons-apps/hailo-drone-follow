@@ -94,6 +94,84 @@ export function initHud(store) {
     }
   });
 
+  // ── Centered "no detections" hint (F6 / DS §6.2b) ─────────────────────
+  // When ≥1 run is enabled and ALL enabled runs show 0 detections at the
+  // current frame, surface a subtle centered hint that fades out after 2.5s.
+  // Lazily created inside #stage (outside #stage-transform).
+  let hintEl = null;
+  let hintFadeTimer = null;
+  let lastHintShown = false;
+
+  function ensureHint() {
+    if (hintEl) return hintEl;
+    if (!stage) return null;
+    hintEl = document.createElement('div');
+    hintEl.className = 'stage__hint';
+    hintEl.setAttribute('aria-hidden', 'true');
+    stage.appendChild(hintEl);
+    return hintEl;
+  }
+
+  function syncNoDetectionsHint(state) {
+    const { enabledRuns = [], frameCounts = {}, videoId, confThreshold = 0 } = state;
+    // Don't show without a video or without any enabled runs.
+    const hasVideo = !!videoId;
+    const anyEnabled = enabledRuns.length > 0;
+    const allZero =
+      anyEnabled &&
+      enabledRuns.every((id) => {
+        const c = frameCounts[id];
+        const shown = c && Number.isFinite(c.shown) ? c.shown : 0;
+        return shown === 0;
+      });
+    const shouldShow = hasVideo && anyEnabled && allZero;
+
+    if (!shouldShow) {
+      lastHintShown = false;
+      if (hintFadeTimer) {
+        clearTimeout(hintFadeTimer);
+        hintFadeTimer = null;
+      }
+      if (hintEl) hintEl.classList.add('is-faded');
+      return;
+    }
+
+    const el = ensureHint();
+    if (!el) return;
+    el.textContent = `no detections at conf ≥ ${Number(confThreshold).toFixed(2)}`;
+
+    const reappearing = !lastHintShown;
+    lastHintShown = true;
+
+    if (reduceMotion) {
+      // Keep it visible, no fade (DS §6.12).
+      el.classList.remove('is-faded');
+      return;
+    }
+
+    // Only (re)start the 2.5s fade-out when the hint first (re)appears, so
+    // continuous playback over a zero region still lets it fade away.
+    if (reappearing) {
+      el.classList.remove('is-faded');
+      if (hintFadeTimer) clearTimeout(hintFadeTimer);
+      hintFadeTimer = setTimeout(() => {
+        if (hintEl) hintEl.classList.add('is-faded');
+      }, 2500);
+    }
+  }
+
+  store.subscribe((state, changed) => {
+    if (
+      changed.has('frameCounts') ||
+      changed.has('confThreshold') ||
+      changed.has('enabledRuns') ||
+      changed.has('videoId') ||
+      changed.has('frame')
+    ) {
+      syncNoDetectionsHint(state);
+    }
+  });
+
   // ── Auto-fade (DS §2.4.5 / §6.12) ─────────────────────────────────────
   let idleTimer = null;
   function clearIdle() {
@@ -133,4 +211,5 @@ export function initHud(store) {
   syncZoom(s0);
   syncCursor(s0);
   syncCounts(s0);
+  syncNoDetectionsHint(s0);
 }

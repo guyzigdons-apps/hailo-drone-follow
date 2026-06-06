@@ -153,11 +153,93 @@
   background: var(--accent-muted);
 }
 
-/* Large play button (40×40, DS §2.3.2) */
+/* Large play button (40×40, DS §2.3.2) — primary accent treatment */
 .icon-btn--play {
   width: 40px;
   height: 40px;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-radius: var(--r-md);
 }
+.icon-btn--play:hover {
+  background: var(--accent-hover);
+  color: var(--text-on-accent);
+}
+
+/* ══ Stage empty state details (DS §6.2a) ════════════════════ */
+.stage__empty-icon {
+  color: var(--text-tertiary);
+}
+.stage__empty-title {
+  font-size: 14px;
+  color: var(--text-tertiary);
+}
+.stage__empty-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  opacity: 0.8;
+}
+
+/* ══ Stage centered "no detections" hint (DS §6.2b) ══════════ */
+.stage__hint {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  opacity: 1;
+  transition: opacity 0.6s ease;
+  z-index: 1;
+}
+.stage__hint.is-faded {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage__hint {
+    transition: none;
+  }
+  .stage__hint.is-faded {
+    opacity: 1;
+  }
+}
+
+/* ══ Topbar FOV caption (DS §4.1) ════════════════════════════ */
+.topbar__caption {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+/* ══ Rail collapse toggle (DS §2.1.2 / §2.7) ═════════════════ */
+.rail-toggle {
+  position: absolute;
+  top: var(--sp-2);
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  z-index: 5;
+  padding: 0;
+}
+.rail-toggle:hover {
+  background: var(--surface-3);
+  color: var(--text-primary);
+}
+.rail--left .rail-toggle { right: var(--sp-2); }
+.rail--right .rail-toggle { left: var(--sp-2); }
 
 /* ══ Toggle switch (DS §3.9.3) — 36×20 pill ══════════════════ */
 .toggle {
@@ -644,7 +726,7 @@ input[type="range"]:active::-moz-range-thumb {
 .run-row {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  gap: var(--sp-1);
   height: 40px;
   padding: 0 var(--sp-2);
   border-radius: var(--r-sm);
@@ -655,8 +737,8 @@ input[type="range"]:active::-moz-range-thumb {
 .run-row.is-disabled .run-label { color: var(--text-tertiary); }
 
 .run-row .swatch {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   border-radius: var(--r-sm);
   border: 1px solid var(--border-strong);
   flex-shrink: 0;
@@ -674,16 +756,20 @@ input[type="range"]:active::-moz-range-thumb {
   cursor: pointer;
   flex-shrink: 0;
   padding: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
+.eye-btn svg { display: block; }
 .eye-btn[aria-pressed="false"] { color: var(--text-tertiary); }
 .eye-btn:hover { color: var(--accent); }
 
 .run-chip {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 1px 5px;
+  letter-spacing: 0.02em;
+  padding: 1px 3px;
   border-radius: var(--r-sm);
   background: var(--surface-3);
   color: var(--text-secondary);
@@ -695,7 +781,7 @@ input[type="range"]:active::-moz-range-thumb {
 }
 
 .run-label {
-  flex: 1;
+  flex: 1 1 auto;
   font-size: 13px;
   color: var(--text-primary);
   white-space: nowrap;
@@ -706,10 +792,10 @@ input[type="range"]:active::-moz-range-thumb {
 
 .count-badge {
   font-family: var(--font-mono);
-  font-size: 11px;
-  min-width: 22px;
+  font-size: 10px;
+  min-width: 16px;
   text-align: center;
-  padding: 1px 4px;
+  padding: 1px 3px;
   border-radius: var(--r-sm);
   flex-shrink: 0;
 }
@@ -1073,7 +1159,7 @@ kbd {
 .mx-microbar {
   position: absolute;
   left: 0;
-  bottom: 3px;
+  bottom: 6px;
   height: 3px;
   border-radius: 2px;
   z-index: 0;

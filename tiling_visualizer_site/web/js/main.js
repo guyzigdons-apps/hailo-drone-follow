@@ -15,6 +15,7 @@ import { initRunsPanel } from './ui/runs-panel.js';
 import { initInspector } from './ui/inspector.js';
 import { initKeyboard } from './ui/keyboard.js';
 import { initMetrics } from './ui/metrics.js';
+import { initRails } from './ui/rails.js';
 
 const store = createStore(defaultState());
 export { store };
@@ -225,6 +226,7 @@ async function boot() {
   initInspector(store);
   initKeyboard(store, stage);
   initMetrics(store);
+  initRails();
 
   setStatus('loading', 'loading…');
 

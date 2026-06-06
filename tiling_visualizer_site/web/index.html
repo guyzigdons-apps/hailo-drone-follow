@@ -18,6 +18,7 @@
   </div>
   <div class="topbar__selectors">
     <select id="video-select" class="select" disabled aria-label="Video"></select>
+    <span id="fov-caption" class="topbar__caption hidden" aria-hidden="true">FOV</span>
     <div id="fov-segmented" class="segmented" role="tablist" aria-label="FOV variant"></div>
   </div>
   <div id="mode-toggle" class="segmented segmented--accent" role="tablist" aria-label="Mode">
@@ -32,6 +33,7 @@
 
 <main id="viewer-mode" class="workspace">
   <aside id="left-rail" class="rail rail--left">
+    <button class="rail-toggle" data-rail="left" aria-label="Collapse panel" aria-expanded="true">⟨</button>
     <section id="runs-panel" class="panel"></section>
     <section id="tile-source-panel" class="panel"></section>
     <section id="filters-panel" class="panel"></section>
@@ -49,12 +51,22 @@
         <div class="hud__pill hud__bl" id="hud-cursor"></div>
         <div class="hud__pill hud__br" id="hud-counts"></div>
       </div>
-      <div id="stage-empty" class="stage__empty">Select a video to begin</div>
+      <div id="stage-empty" class="stage__empty">
+        <svg class="stage__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true">
+          <rect x="2.5" y="5" width="19" height="14" rx="2"></rect>
+          <path d="M10 9.5l5 2.5-5 2.5z"></path>
+        </svg>
+        <div class="stage__empty-title">Select a video to begin</div>
+        <div class="stage__empty-hint">Press ? for keyboard shortcuts</div>
+      </div>
     </div>
     <div id="transport" class="transport"></div>
   </section>
 
   <aside id="right-rail" class="rail rail--right">
+    <button class="rail-toggle" data-rail="right" aria-label="Collapse panel" aria-expanded="true">⟩</button>
     <section id="inspector" class="panel panel--grow"></section>
     <section id="legend" class="panel panel--pinned"></section>
   </aside>
