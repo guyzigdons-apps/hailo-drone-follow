@@ -9,6 +9,8 @@ import { initTopbar, setStatus } from './ui/topbar.js';
 import { initStage } from './ui/stage.js';
 import { initTransport } from './ui/transport.js';
 import { initHud } from './ui/hud.js';
+import { initOverlay } from './ui/overlay.js';
+import { initFiltersPanel } from './ui/filters-panel.js';
 
 const store = createStore(defaultState());
 export { store };
@@ -209,6 +211,7 @@ async function boot() {
   const stage = initStage(store);
   initTransport(store, stage);
   initHud(store);
+  initOverlay(store); initFiltersPanel(store);
   // later tasks: initRunsPanel, initFilters, initInspector, initLegend,
   // initMetrics, initKeyboard … attach here.
 

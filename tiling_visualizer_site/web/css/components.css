@@ -399,6 +399,35 @@ input[type="range"]:active::-moz-range-thumb {
   margin-bottom: var(--sp-1);
 }
 
+/* ══ Filter rows (DS §4.6) — label + (i) info + switch ═══════ */
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 28px;
+}
+
+.filter-row__label {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.filter-row__info {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  cursor: help;
+  user-select: none;
+}
+
+.filter-row__info:hover {
+  color: var(--text-secondary);
+}
+
+.filter-row__spacer {
+  flex: 1;
+}
+
 /* ══ HUD pills (DS §2.4) ═════════════════════════════════════ */
 .hud__pill {
   background: rgba(15, 26, 46, 0.7);
