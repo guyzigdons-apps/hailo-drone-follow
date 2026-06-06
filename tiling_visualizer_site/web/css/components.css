@@ -414,6 +414,128 @@ input[type="range"]:active::-moz-range-thumb {
   line-height: 1.4;
 }
 
+/* ══ Transport bar rows + controls (DS §2.3) ═════════════════ */
+/* Row 1 — scrubber (28px): frame label | track | time label */
+.transport__row--scrubber {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--sp-3);
+  height: 28px;
+}
+
+.transport__label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.transport__scrub-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+/* Scrubber position fill uses --text-secondary per DS §3.9.4 */
+.transport__scrubber {
+  width: 100%;
+  accent-color: var(--text-secondary);
+}
+
+.transport__scrubber::-webkit-slider-thumb {
+  background: var(--text-primary);
+}
+
+/* Scrubber hover preview tooltip (DS §6.4) — text only, above the cursor */
+.transport__tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* Row 2 — controls (44px) */
+.transport__row--controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 44px;
+}
+
+.transport__divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+  margin: 0 var(--sp-1);
+}
+
+.transport__spacer {
+  flex: 1;
+}
+
+.transport__speed-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.transport__speed-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.transport__speed {
+  min-width: 84px;
+  height: 28px;
+}
+
+/* Disabled state when no video selected (DS §2.3) */
+.transport.is-disabled {
+  opacity: 0.5;
+}
+
+.transport .icon-btn:disabled,
+.transport .select:disabled,
+.transport input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ══ Generic floating tooltip (DS §4.8) ══════════════════════ */
+.tooltip {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  box-shadow: var(--shadow-float);
+  color: var(--text-primary);
+  font: 12px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.tooltip[hidden] {
+  display: none;
+}
+
+/* ══ HUD per-run count lines + swatch (DS §2.4.4) ════════════ */
+.hud-count-line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.hud-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
 /* ══ Toast / status (DS §4.9) ════════════════════════════════ */
 .toast-root {
   position: fixed;

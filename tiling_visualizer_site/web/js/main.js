@@ -6,6 +6,9 @@ import { loadManifest, loadRunFrames } from './manifest.js';
 import { indexFrames } from './core/frames.js';
 import { showToast } from './ui/toast.js';
 import { initTopbar, setStatus } from './ui/topbar.js';
+import { initStage } from './ui/stage.js';
+import { initTransport } from './ui/transport.js';
+import { initHud } from './ui/hud.js';
 
 const store = createStore(defaultState());
 export { store };
@@ -203,8 +206,11 @@ async function boot() {
   initModeSwitching();
   initHashWriter();
   initPrefsWriter();
-  // later tasks: initStage, initTransport, initRunsPanel, initFilters,
-  // initInspector, initLegend, initMetrics, initKeyboard … attach here.
+  const stage = initStage(store);
+  initTransport(store, stage);
+  initHud(store);
+  // later tasks: initRunsPanel, initFilters, initInspector, initLegend,
+  // initMetrics, initKeyboard … attach here.
 
   setStatus('loading', 'loading…');
 

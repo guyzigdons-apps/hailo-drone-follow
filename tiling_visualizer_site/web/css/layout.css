@@ -102,6 +102,23 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.2s;
+}
+
+/* Auto-fade during playback after mouse idle (DS §2.4.5) */
+.hud--faded {
+  opacity: 0;
+  transition: opacity 1.5s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud {
+    transition: none;
+  }
+  .hud--faded {
+    opacity: 1;
+  }
 }
 
 .hud__pill {
