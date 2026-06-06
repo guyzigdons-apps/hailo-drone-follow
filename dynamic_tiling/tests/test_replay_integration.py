@@ -219,6 +219,125 @@ def test_run_multi_records_multi_traj_per_track():
     assert any(len(d) >= 2 for d in res.multi_traj.values())
 
 
+def test_run_dynamic_default_dump_mot_person_matches_input(tmp_path, monkeypatch):
+    """End-to-end: `run_dynamic --multi-target --dump-mot` with DEFAULT class
+    args must dump the person track and have it IoU-match the input person bbox.
+
+    Guards the person=1 convention in run_dynamic's CLI wiring
+    (`--target-classes` default + the `gt_cls` passed to run_multi). A stale
+    cls=0 convention makes GT selection never fire (recall 0) and dumps the
+    wrong / no person track.
+    """
+    import json
+    import sys
+    import numpy as np
+    from dynamic_tiling import run_dynamic
+    from dynamic_tiling.types import CropRect
+
+    src_w, src_h = 4000, 3000
+    n_frames = 8
+    # A single moving person, cls=PERSON (the network's true person id == 1).
+    person = {f: (0.40 + 0.01 * f, 0.40, 0.08, 0.20) for f in range(n_frames)}
+
+    class _FakeBackend:
+        def __init__(self, *a, **k):
+            pass
+
+        def infer(self, frame, crop: CropRect, frame_idx):
+            gx, gy, gw, gh = person[frame_idx]
+            gcx = (gx + gw / 2) * src_w
+            gcy = (gy + gh / 2) * src_h
+            if not (crop.x <= gcx <= crop.x + crop.w and
+                    crop.y <= gcy <= crop.y + crop.h):
+                return []
+            lx = (gcx - crop.x) / crop.w
+            ly = (gcy - crop.y) / crop.h
+            lw = gw * src_w / crop.w
+            lh = gh * src_h / crop.h
+            return [type("D", (), dict(cls=PERSON, x=lx - lw / 2, y=ly - lh / 2,
+                                       w=lw, h=lh, score=0.9))()]
+
+        def close(self):
+            pass
+
+    class _FakeCap:
+        def __init__(self):
+            self._i = 0
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            import cv2
+            return {cv2.CAP_PROP_FRAME_WIDTH: src_w,
+                    cv2.CAP_PROP_FRAME_HEIGHT: src_h}.get(prop, 0)
+
+        def read(self):
+            if self._i >= n_frames:
+                return False, None
+            self._i += 1
+            return True, np.zeros((src_h, src_w, 3), np.uint8)
+
+        def release(self):
+            pass
+
+    # GT doc consumed by build_target_trajectory(label="person", anchor="largest").
+    gt_doc = {"frames": [
+        {"frame": f, "detections": [
+            {"label": "person", "bbox": list(person[f]), "confidence": 1.0}]}
+        for f in range(n_frames)]}
+    gt_path = tmp_path / "gt.frames.json"
+    gt_path.write_text(json.dumps(gt_doc))
+
+    out_path = tmp_path / "out.frames.json"
+    mot_path = tmp_path / "mot.json"
+
+    monkeypatch.setattr(run_dynamic.cv2, "VideoCapture", lambda _p: _FakeCap())
+    monkeypatch.setattr(run_dynamic, "HefBackend", _FakeBackend)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run_dynamic", "--video", "fake.mp4", "--gt", str(gt_path),
+         "--out", str(out_path), "--multi-target",
+         "--dump-mot", str(mot_path)],  # DEFAULTS: target-classes, dump-mot-classes
+    )
+    run_dynamic.main()
+
+    dump = json.loads(mot_path.read_text())["tracks"]
+    assert dump, "person MOT dump must not be empty with default class args"
+
+    last = str(n_frames - 1)
+    px, py, pw, ph = person[n_frames - 1]
+
+    def _iou(a, b):
+        ax2, ay2 = a[0] + a[2], a[1] + a[3]
+        bx2, by2 = b[0] + b[2], b[1] + b[3]
+        ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        return inter / (a[2] * a[3] + b[2] * b[3] - inter)
+
+    matched = max(
+        (_iou(traj[last], (px, py, pw, ph))
+         for traj in dump.values() if last in traj),
+        default=0.0,
+    )
+    assert matched > 0.8, f"dumped person box must match input det, IoU={matched:.3f}"
+
+    # GT-seeded selection must actually fire: the person is the GT target, so a
+    # LOCK box (pred_traj entry) must appear in the emitted frames.json. With the
+    # stale gt_cls=0 wiring the lock never selects the cls=1 person -> no LOCK box.
+    out_doc = json.loads(out_path.read_text())
+    lock_frames = sum(
+        1 for fr in out_doc["frames"]
+        if any(d["label"] == "LOCK" for d in fr["detections"])
+    )
+    assert lock_frames >= n_frames - 2, (
+        f"person GT target must be selected/locked; got {lock_frames} LOCK frames")
+
+
 def test_emit_frames_json_keeps_tiles_and_appends_lock_box(tmp_path):
     import json
     from dynamic_tiling.replay import RunResult, emit_frames_json

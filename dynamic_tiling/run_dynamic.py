@@ -25,6 +25,7 @@ from .inference import HefBackend
 from .gt_track import build_target_trajectory
 from .score import score_run
 from .replay import run, run_multi, emit_frames_json
+from hailo_tiling.classes import PERSON
 
 
 def _frame_iter(cap, max_frames):
@@ -55,8 +56,11 @@ def main():
                     default=Path("dynamic_tiling/runs/dynamic_run.frames.json"))
     ap.add_argument("--multi-target", action="store_true",
                     help="Use multi-target dynamic tiling (v2) instead of single-target (v1).")
-    ap.add_argument("--target-classes", default="0,1",
-                    help="Comma-separated class ids for multi-target mode (default: 0,1).")
+    ap.add_argument("--target-classes", default="1,2",
+                    help="Comma-separated class ids for multi-target mode "
+                    "(default: 1,2 = person,vehicle per hailo_tiling.classes; "
+                    "the network emits person=1, vehicle=2, with index 0 the "
+                    "'unlabeled' slot).")
     ap.add_argument("--merge-iou-threshold", type=float, default=0.5,
                     help="Padded det IoU threshold for ROI merge (default: 0.5).")
     ap.add_argument("--merge-pad-frac", type=float, default=0.25,
@@ -106,7 +110,8 @@ def main():
                                track_buffer=int(args.fps))
         try:
             res = run_multi(_frame_iter(cap, args.max_frames), src_w, src_h,
-                            scheduler, lock, backend, meter, gt_traj, gt_cls=0)
+                            scheduler, lock, backend, meter, gt_traj,
+                            gt_cls=PERSON)
         finally:
             backend.close()
             cap.release()
