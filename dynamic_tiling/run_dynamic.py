@@ -92,7 +92,9 @@ def main():
     gt_traj = build_target_trajectory(gt_doc, label="person", anchor="largest")
 
     discovery_period = max(1, int(round(args.fps / args.discovery_fps)))
-    backend = HefBackend(args.hef, nms_score_threshold=args.nms_thresh)
+    # class_offset=1: unified person=1/vehicle=2 convention (Phase 0); without it
+    # the raw 0-indexed decode made --target-classes 1,2 track vehicles.
+    backend = HefBackend(args.hef, nms_score_threshold=args.nms_thresh, class_offset=1)
     meter = BudgetMeter(budget_inf_per_s=args.budget, fps=args.fps)
 
     if args.multi_target:

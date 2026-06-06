@@ -385,3 +385,43 @@ def test_emit_frames_json_renders_tracker_tags_and_search_anchor(tmp_path):
     assert "ANCHOR[TRACKING]" not in labels0       # no anchor box while tracking
     trk11 = next(d for d in f1["detections"] if d["label"] == "trk11")
     assert trk11["confidence"] < 0.5               # non-activated tracks render faint
+
+
+def test_run_dynamic_backend_uses_class_offset_one(monkeypatch, tmp_path):
+    """run_dynamic must build its HEF backend with class_offset=1 (person=1,
+    vehicle=2 — the Phase-0 unified convention). Regression: it was omitted,
+    so dets stayed 0-indexed and the multi-target trackers followed vehicles."""
+    import sys
+    import json as _json
+    import dynamic_tiling.run_dynamic as rd
+
+    captured = {}
+
+    class _FakeBackend:
+        def __init__(self, *a, **kw):
+            captured.update(kw)
+        def infer(self, frame, crop, frame_idx):
+            return []
+        def close(self):
+            pass
+
+    class _FakeCap:
+        def __init__(self, *a): self.n = 0
+        def get(self, prop): return {3: 640, 4: 480, 5: 30.0, 7: 2}.get(int(prop), 0)
+        def read(self):
+            self.n += 1
+            import numpy as np
+            return (self.n <= 2, np.zeros((480, 640, 3), dtype=np.uint8))
+        def release(self): pass
+
+    gt = tmp_path / "gt.frames.json"
+    gt.write_text(_json.dumps({"frames": [{"frame": 0, "detections": [
+        {"label": "person", "confidence": 1.0, "bbox": [0.4, 0.4, 0.1, 0.2]}], "tiles": []}]}))
+    monkeypatch.setattr(rd, "HefBackend", _FakeBackend)
+    import cv2
+    monkeypatch.setattr(cv2, "VideoCapture", _FakeCap)
+    monkeypatch.setattr(sys, "argv", ["run_dynamic", "--video", "v.mp4", "--gt", str(gt),
+                                      "--multi-target", "--max-frames", "2",
+                                      "--out", str(tmp_path / "o.json")])
+    rd.main()
+    assert captured.get("class_offset") == 1
