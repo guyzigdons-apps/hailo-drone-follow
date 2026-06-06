@@ -107,6 +107,21 @@ class CachedHefBackend:
     def infer(self, frame, crop: CropRect, frame_idx: int) -> list:
         return self._inner.infer(frame, [crop], frame_idx)[0]
 
+    @property
+    def stats(self) -> dict:
+        """Cache-savings accounting, delegated to the inner CachingBackend plus
+        a `saved_seconds_estimate`. The estimate is `hits * (chip_seconds /
+        misses)` when any tile actually hit the chip this run, else a 0.022 s/
+        tile fallback (a fully-warm reopen forwards zero misses but still saved
+        roughly that per served tile). Survives `close()` — the CachingBackend
+        instance (and its stats dict) outlives the store handle."""
+        s = dict(self._inner.stats)
+        hits = s["hits"]
+        misses = s["misses"]
+        per_miss = (s["chip_seconds"] / misses) if misses > 0 else 0.022
+        s["saved_seconds_estimate"] = hits * per_miss
+        return s
+
     def close(self) -> None:
         self._inner.close()
         self._store.close()

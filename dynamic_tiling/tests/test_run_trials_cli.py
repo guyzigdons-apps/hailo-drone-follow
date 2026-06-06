@@ -1,6 +1,15 @@
 from dynamic_tiling.metrics import TrialScore
 from dynamic_tiling.trials import AggregateScore
-from dynamic_tiling.run_trials import format_aggregate, results_doc
+from dynamic_tiling.run_trials import (
+    aggregate_cache_stats,
+    format_aggregate,
+    results_doc,
+)
+
+
+class _FakeCachedBackend:
+    def __init__(self, stats):
+        self.stats = stats
 
 
 def test_format_aggregate_table():
@@ -29,3 +38,29 @@ def test_results_doc_round_trips_per_trial_with_track_ids():
     assert [t["track_id"] for t in doc["per_trial"]] == [3, 4]
     assert doc["per_trial"][0]["coverage"] == 0.9
     assert doc["per_trial"][1]["loss_events"] == 2
+
+
+def test_aggregate_cache_stats_none_when_no_backends():
+    assert aggregate_cache_stats([]) is None
+
+
+def test_aggregate_cache_stats_sums_across_trials():
+    b1 = _FakeCachedBackend({"hits": 8, "misses": 2, "chip_seconds": 0.4,
+                             "lookup_seconds": 0.01, "saved_seconds_estimate": 1.6})
+    b2 = _FakeCachedBackend({"hits": 10, "misses": 0, "chip_seconds": 0.0,
+                             "lookup_seconds": 0.02, "saved_seconds_estimate": 0.22})
+    agg = aggregate_cache_stats([b1, b2])
+    assert agg["hits"] == 18
+    assert agg["misses"] == 2
+    assert agg["chip_seconds"] == 0.4
+    assert agg["lookup_seconds"] == 0.03
+    assert agg["saved_seconds_estimate"] == 1.82
+    assert agg["hit_rate"] == 18 / 20
+
+
+def test_aggregate_cache_stats_all_warm_hit_rate_one():
+    b = _FakeCachedBackend({"hits": 5, "misses": 0, "chip_seconds": 0.0,
+                            "lookup_seconds": 0.0, "saved_seconds_estimate": 0.11})
+    agg = aggregate_cache_stats([b])
+    assert agg["misses"] == 0
+    assert agg["hit_rate"] == 1.0

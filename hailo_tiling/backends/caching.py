@@ -15,6 +15,7 @@ broadcast back to every input position.
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Sequence
 
 from ..cache.hashing import canonicalize_crop
@@ -35,6 +36,18 @@ class CachingBackend(InferenceBackend):
         self._store = store
         self._ppv = int(ppv)
         self._quantise = quantise
+        # Per-instance cache-savings accounting. Counters are per-tile:
+        #   hits   — tile positions served from the store (incl. dedup-collapsed
+        #            duplicates, which consumed no chip)
+        #   misses — unique tiles forwarded to the wrapped backend
+        #   chip_seconds   — wall time inside wrapped.infer (perf_counter)
+        #   lookup_seconds — wall time in store.get_many + put_many
+        self.stats: dict[str, float] = {
+            "hits": 0,
+            "misses": 0,
+            "chip_seconds": 0.0,
+            "lookup_seconds": 0.0,
+        }
 
     def _key(self, c: CropRect) -> tuple[int, int, int, int]:
         return canonicalize_crop(c, quantise=self._quantise)
@@ -66,15 +79,27 @@ class CachingBackend(InferenceBackend):
                 unique_keys.append(k)
                 unique_crops.append(c)
 
+        _t0 = time.perf_counter()
         cached = self._store.get_many(frame_idx, unique_crops, ppv=self._ppv)
+        self.stats["lookup_seconds"] += time.perf_counter() - _t0
         miss_indices = [i for i, d in enumerate(cached) if d is None]
         miss_crops = [unique_crops[i] for i in miss_indices]
 
+        # Per-tile accounting: misses are the UNIQUE forwarded tiles; hits are
+        # every other input position (unique cache hits + dedup-collapsed
+        # duplicates, which consumed no chip).
+        n_misses = len(miss_crops)
+        self.stats["misses"] += n_misses
+        self.stats["hits"] += len(crops) - n_misses
+
         if miss_crops:
+            _c0 = time.perf_counter()
             new_results = self._wrapped.infer(frame, miss_crops, frame_idx)
+            self.stats["chip_seconds"] += time.perf_counter() - _c0
             assert len(new_results) == len(miss_crops), (
                 "wrapped backend returned wrong number of det-lists"
             )
+            _p0 = time.perf_counter()
             self._store.put_many([
                 {
                     "frame_idx": frame_idx,
@@ -84,6 +109,7 @@ class CachingBackend(InferenceBackend):
                 }
                 for i in range(len(miss_crops))
             ])
+            self.stats["lookup_seconds"] += time.perf_counter() - _p0
             for slot, dets in zip(miss_indices, new_results):
                 cached[slot] = dets
 

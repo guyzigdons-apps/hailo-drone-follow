@@ -81,3 +81,48 @@ def test_cached_backend_rejects_meta_mismatch(tmp_path):
         CachedHefBackend(cache_path=tmp_path / "c.sqlite3",
                          meta={"hef": "OTHER.hef", "nms": "0.25"},
                          make_backend=_FakeBatched)
+
+
+def test_cached_backend_stats_delegates_to_caching_backend(tmp_path):
+    _FakeBatched.constructed = 0
+    b = _cached(tmp_path)
+    crop = CropRect(x=0, y=0, w=480, h=360)
+    b.infer(None, crop, 7)          # miss
+    b.infer(None, crop, 7)          # hit
+    s = b.stats
+    assert s["misses"] == 1
+    assert s["hits"] == 1
+    assert s["chip_seconds"] >= 0.0
+    assert "saved_seconds_estimate" in s
+    b.close()
+
+
+def test_cached_backend_saved_estimate_uses_per_miss_chip_time(tmp_path):
+    _FakeBatched.constructed = 0
+    b = _cached(tmp_path)
+    crop = CropRect(x=0, y=0, w=480, h=360)
+    b.infer(None, crop, 7)          # 1 miss
+    b.infer(None, crop, 7)          # 1 hit
+    s = b.stats
+    # misses>0 -> saved ~= hits * (chip_seconds / misses)
+    expected = s["hits"] * (s["chip_seconds"] / s["misses"])
+    assert s["saved_seconds_estimate"] == expected
+    b.close()
+
+
+def test_cached_backend_saved_estimate_fallback_when_no_miss(tmp_path):
+    """A fully-warm reopen forwards zero misses; the estimate falls back to the
+    0.022 s/tile default so it is still non-zero."""
+    _FakeBatched.constructed = 0
+    crop = CropRect(x=0, y=0, w=480, h=360)
+    b = _cached(tmp_path)
+    b.infer(None, crop, 7)          # warm the cache
+    b.close()
+    b2 = _cached(tmp_path)
+    b2.infer(None, crop, 7)         # hit only, never touches chip
+    s = b2.stats
+    assert s["misses"] == 0
+    assert s["hits"] == 1
+    assert s["chip_seconds"] == 0.0
+    assert s["saved_seconds_estimate"] == 1 * 0.022
+    b2.close()

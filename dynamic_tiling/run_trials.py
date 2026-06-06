@@ -55,23 +55,57 @@ def format_aggregate(agg: AggregateScore, *, budget: float, fps: float) -> str:
     )
 
 
-def build_backend_factory(*, hef, nms_thresh, cache, video_name):
+def build_backend_factory(*, hef, nms_thresh, cache, video_name, collect=None):
     """Zero-arg factory returning a fresh detection backend per trial. Uses the
     SQLite-cached backend when `cache` is set (chip-free warm re-runs), else the
     live HefBackend. Shared by the CLI and the ablation driver so the two never
-    diverge."""
+    diverge.
+
+    One backend is built PER TRIAL. When `collect` is a list, every cached
+    backend created is appended to it so the caller can sum `.stats` across all
+    trials after the run (read stats before close, or after — the stats dict
+    survives close)."""
     def backend_factory():
         if cache:
             from .inference import CachedHefBackend
-            return CachedHefBackend(
+            be = CachedHefBackend(
                 hef, nms_score_threshold=nms_thresh, class_offset=1,
                 cache_path=cache,
                 meta={"video": video_name, "hef": hef,
                       "nms_thresh": nms_thresh, "class_offset": 1,
                       "det_coords": "crop_local"})
+            if collect is not None:
+                collect.append(be)
+            return be
         from .inference import HefBackend
         return HefBackend(hef, nms_score_threshold=nms_thresh, class_offset=1)
     return backend_factory
+
+
+def aggregate_cache_stats(backends) -> dict | None:
+    """Sum per-trial CachedHefBackend `.stats` into one aggregate dict, or None
+    when no cached backend ran. `hit_rate` is hits/(hits+misses); fields mirror
+    the per-instance counters plus `saved_seconds_estimate`."""
+    if not backends:
+        return None
+    hits = misses = 0
+    chip = lookup = saved = 0.0
+    for be in backends:
+        s = be.stats
+        hits += s["hits"]
+        misses += s["misses"]
+        chip += s["chip_seconds"]
+        lookup += s["lookup_seconds"]
+        saved += s["saved_seconds_estimate"]
+    total = hits + misses
+    return {
+        "hits": hits,
+        "misses": misses,
+        "hit_rate": (hits / total) if total else 0.0,
+        "chip_seconds": chip,
+        "lookup_seconds": lookup,
+        "saved_seconds_estimate": saved,
+    }
 
 
 def build_reid_assist_factory(*, reid_policy, reid_hef, reid_cache,
@@ -170,9 +204,10 @@ def main():
 
     tracks = _load_tracks(args.gt_tracks)
 
+    cache_backends: list = []
     backend_factory = build_backend_factory(
         hef=args.hef, nms_thresh=args.nms_thresh, cache=args.cache,
-        video_name=args.video.name)
+        video_name=args.video.name, collect=cache_backends)
 
     # ReID: a SHARED embedder (one chip/cache handle) but a FRESH gallery+policy
     # per trial. reid_assist_factory is None when policy=none (P0 -> no ReID).
@@ -208,6 +243,15 @@ def main():
 
     print(format_aggregate(agg, budget=args.budget, fps=args.fps))
 
+    cache_stats = aggregate_cache_stats(cache_backends)
+    if cache_stats is not None:
+        print(
+            f"cache: hits={cache_stats['hits']} misses={cache_stats['misses']} "
+            f"hit_rate={cache_stats['hit_rate'] * 100:.1f}% "
+            f"chip={cache_stats['chip_seconds']:.1f}s "
+            f"saved~={cache_stats['saved_seconds_estimate']:.1f}s"
+        )
+
     if args.out:
         from hailo_tiling.classes import PERSON
         params = {"video": str(args.video), "gt_tracks": str(args.gt_tracks),
@@ -225,8 +269,10 @@ def main():
                   "reid_threshold": args.reid_threshold,
                   "reid_gallery_ema": args.reid_gallery_ema}
         person_ids = [t.track_id for t in tracks if t.cls == PERSON]
-        args.out.write_text(json.dumps(
-            results_doc(agg, person_track_ids=person_ids, params=params), indent=2))
+        doc = results_doc(agg, person_track_ids=person_ids, params=params)
+        if cache_stats is not None:
+            doc["cache"] = cache_stats
+        args.out.write_text(json.dumps(doc, indent=2))
         print(f"results -> {args.out}")
 
 
