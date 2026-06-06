@@ -35,12 +35,12 @@ const AGG_ROWS = [
 const TRIAL_COLS = [
   { key: 'track_id', label: 'track', scale: 1, dp: 0 },
   { key: 'n_frames', label: 'frames', scale: 1, dp: 0 },
-  { key: 'coverage', label: 'coverage %', scale: 100, dp: 1 },
+  { key: 'coverage', label: 'coverage %', scale: 100, dp: 1, unit: '%' },
   { key: 'mean_iou', label: 'mean IoU', scale: 1, dp: 3 },
-  { key: 'drift_rate', label: 'drift %', scale: 100, dp: 1 },
+  { key: 'drift_rate', label: 'drift %', scale: 100, dp: 1, unit: '%' },
   { key: 'loss_events', label: 'loss', scale: 1, dp: 0 },
   { key: 'mean_time_to_recover', label: 't-recover', scale: 1, dp: 1 },
-  { key: 'recovery_success_rate', label: 'recovery %', scale: 100, dp: 1 },
+  { key: 'recovery_success_rate', label: 'recovery %', scale: 100, dp: 1, unit: '%' },
 ];
 
 function paletteHex(i) {
@@ -114,6 +114,8 @@ export function initMetrics(store) {
           })
       );
     }
+    // No render needed here: maybeRender() always render()s before calling us,
+    // so a fully-cached variant is already on screen.
     if (!pending.length) return;
     await Promise.allSettled(pending);
     if (token !== fetchToken) return; // variant changed mid-fetch
@@ -458,10 +460,8 @@ export function initMetrics(store) {
           const td = document.createElement('td');
           td.className = 'mx-cell mono';
           const raw = t[col.key];
-          const txt = fmt(isNum(raw) ? raw : null, col.scale, col.dp, '');
-          td.textContent = col.key === 'coverage' || col.key === 'drift_rate' || col.key === 'recovery_success_rate'
-            ? (isNum(raw) ? txt + '%' : TERTIARY)
-            : txt;
+          const txt = fmt(isNum(raw) ? raw : null, col.scale, col.dp, col.unit || '');
+          td.textContent = txt;
           if (!isNum(raw)) td.classList.add('mx-na');
           tr.appendChild(td);
         }
@@ -480,9 +480,7 @@ export function initMetrics(store) {
         } else {
           const nums = perTrial.map((t) => t[col.key]).filter(isNum);
           const mean = nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
-          const txt = fmt(mean, col.scale, col.dp, '');
-          const pct = col.key === 'coverage' || col.key === 'drift_rate' || col.key === 'recovery_success_rate';
-          td.textContent = mean == null ? TERTIARY : pct ? txt + '%' : txt;
+          td.textContent = fmt(mean, col.scale, col.dp, col.unit || '');
           if (mean == null) td.classList.add('mx-na');
         }
         fr.appendChild(td);
@@ -515,9 +513,7 @@ export function initMetrics(store) {
         rows.push(
           TRIAL_COLS.map((col) => {
             const raw = t[col.key];
-            const txt = fmt(isNum(raw) ? raw : null, col.scale, col.dp, '');
-            const pct = col.key === 'coverage' || col.key === 'drift_rate' || col.key === 'recovery_success_rate';
-            return isNum(raw) && pct ? txt + '%' : txt;
+            return fmt(isNum(raw) ? raw : null, col.scale, col.dp, col.unit || '');
           })
         );
       }
