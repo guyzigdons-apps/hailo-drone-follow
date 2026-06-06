@@ -7,7 +7,7 @@ writes data/manifest.json.
 
 Usage:
     python3 package_site.py [--config site_config.json] [--out dist]
-                            [--repo-root ../..] [--skip-transcode]
+                            [--repo-root ..] [--skip-transcode]
 """
 from __future__ import annotations
 
