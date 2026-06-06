@@ -5,11 +5,14 @@ export async function loadManifest(url = 'data/manifest.json') {
   const m = await res.json();
   if (!Array.isArray(m.videos)) throw new Error('manifest: missing videos[]');
   for (const v of m.videos) {
-    if (!v.id || !Array.isArray(v.variants)) throw new Error(`manifest: bad video entry ${v.id}`);
+    if (v.id == null || v.id === '') throw new Error('manifest: video entry missing id');
+    if (!Array.isArray(v.variants)) throw new Error(`manifest: video ${v.id}: missing variants[]`);
   }
   return m;
 }
 
+// Run/trials JSONs are immutable per packaging run, so default HTTP caching
+// is fine here (the manifest above is the only thing that must stay fresh).
 export async function loadRunFrames(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`frames fetch failed: HTTP ${res.status} ${url}`);

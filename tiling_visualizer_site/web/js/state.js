@@ -18,7 +18,10 @@ export function createStore(initial) {
   };
 }
 
-export const DEFAULT_STATE = {
+// Factory (not a shared constant): runDocs/enabledRuns/runColors are mutable
+// references — a shared module-level object would leak state between stores.
+export function defaultState() {
+  return {
   manifest: null,
   videoId: null, fov: null,
   runDocs: new Map(),             // runId -> indexFrames() result
@@ -34,7 +37,8 @@ export const DEFAULT_STATE = {
   contentBox: null,               // {x,y,w,h} published by stage.js
   frameCounts: {},                // runId -> {shown, phantoms, merged} from overlay.js
   hoveredDet: null,               // {runId, index} | null
-};
+  };
+}
 
 // URL hash codec: #v=0025&fov=fov50&runs=r1,r2&f=312&conf=0.30
 export function encodeHash({ videoId, fov, runs, frame, conf }) {
