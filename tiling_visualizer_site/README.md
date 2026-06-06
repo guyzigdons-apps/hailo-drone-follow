@@ -257,7 +257,7 @@ into reports.
 
 ## Testing
 
-### JavaScript (28 tests)
+### JavaScript (32 tests)
 
 ```bash
 node --test tiling_visualizer_site/web/js/**/*.test.js

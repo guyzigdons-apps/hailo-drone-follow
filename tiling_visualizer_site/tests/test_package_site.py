@@ -102,3 +102,25 @@ class TestManifest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCopySite(unittest.TestCase):
+    def test_dev_fixtures_and_js_tests_excluded(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            web = tmp / "here" / "web"
+            (web / "js").mkdir(parents=True)
+            (web / "data" / "videos").mkdir(parents=True)
+            (web / "index.html").write_text("<html></html>")
+            (web / "js" / "a.js").write_text("export const x = 1;")
+            (web / "js" / "a.test.js").write_text("// test")
+            (web / "data" / "videos" / "poison.mp4").write_bytes(b"x")
+            out = tmp / "dist"
+            ps.copy_site(tmp / "here", out)
+            self.assertTrue((out / "index.html").exists())
+            self.assertTrue((out / "js" / "a.js").exists())
+            self.assertFalse((out / "js" / "a.test.js").exists())
+            # dev fixture data/ must NOT leak into the deliverable
+            self.assertFalse((out / "data" / "videos" / "poison.mp4").exists())
+            # but the real data dirs are created empty, ready for packaging
+            self.assertTrue((out / "data" / "runs").is_dir())

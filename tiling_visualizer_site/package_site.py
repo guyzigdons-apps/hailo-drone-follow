@@ -105,6 +105,21 @@ def build_manifest(cfg: dict, probe_lookup) -> dict:
             "title": cfg.get("title", "Tiling Benchmark"), "videos": videos}
 
 
+def copy_site(here: Path, out: Path) -> None:
+    """Copy web/ into dist, excluding dev fixtures and JS tests.
+
+    web/data/ holds gitignored DEV FIXTURES (tiny test videos + fake
+    manifest) — copying it into dist would shadow the real packaged data
+    and make needs_transcode() skip the real videos. Exclude it.
+    """
+    (out / "data" / "videos").mkdir(parents=True, exist_ok=True)
+    (out / "data" / "runs").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(here / "web", out, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("data"))
+    for t in out.rglob("*.test.js"):       # tests don't ship
+        t.unlink()
+
+
 def main(argv=None) -> int:
     here = Path(__file__).resolve().parent
     ap = argparse.ArgumentParser(description=__doc__,
@@ -122,11 +137,7 @@ def main(argv=None) -> int:
     validate_config(cfg, repo_root)
 
     # 1. site source -> dist root
-    (out / "data" / "videos").mkdir(parents=True, exist_ok=True)
-    (out / "data" / "runs").mkdir(parents=True, exist_ok=True)
-    shutil.copytree(here / "web", out, dirs_exist_ok=True)
-    for t in out.rglob("*.test.js"):       # tests don't ship
-        t.unlink()
+    copy_site(here, out)
 
     # 2. run/trial JSONs
     for video in cfg["videos"]:
