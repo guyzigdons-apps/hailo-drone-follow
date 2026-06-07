@@ -1,7 +1,11 @@
 """Tests for hailo_tiling.geometry — helpers absorbed from tiling_benchmark.
 
-Parity-with-legacy assertions are the spec: the absorbed helpers must produce
-byte-identical results to the frozen originals in ``tiling_benchmark``.
+These helpers were copied verbatim from the frozen ``tiling_benchmark``
+originals (provenance commit 7d9a8d9). The parity-with-legacy outputs are
+pinned here directly as the spec: importing the frozen ``tiling_benchmark``
+package from ``hailo_tiling`` would violate the package dependency rules
+(see ``tests/test_architecture.py``), so the expected byte-identical results
+are baked in as literals instead.
 """
 import pytest
 
@@ -9,13 +13,25 @@ from hailo_tiling.geometry import grid_to_static_tiles, fov_to_crop_dims
 
 
 def test_grid_to_static_tiles_matches_legacy():
-    from tiling_benchmark.tiling_record import _grid_to_static_tiles as legacy
-    assert grid_to_static_tiles(3, 2, 0.25, 0.25) == legacy(3, 2, 0.25, 0.25)
+    # Verbatim output of the frozen tiling_benchmark._grid_to_static_tiles(3,2,0.25,0.25).
+    assert grid_to_static_tiles(3, 2, 0.25, 0.25) == [
+        "0.000000,0.000000,0.400000,0.571429",
+        "0.300000,0.000000,0.400000,0.571429",
+        "0.600000,0.000000,0.400000,0.571429",
+        "0.000000,0.428571,0.400000,0.571429",
+        "0.300000,0.428571,0.400000,0.571429",
+        "0.600000,0.428571,0.400000,0.571429",
+    ]
 
 
 def test_grid_to_static_tiles_matches_legacy_with_mode():
-    from tiling_benchmark.tiling_record import _grid_to_static_tiles as legacy
-    assert grid_to_static_tiles(2, 2, 0.1, 0.1, "m") == legacy(2, 2, 0.1, 0.1, "m")
+    # Verbatim output of the frozen legacy helper with the "m" mode suffix.
+    assert grid_to_static_tiles(2, 2, 0.1, 0.1, "m") == [
+        "0.000000,0.000000,0.526316,0.526316,m",
+        "0.473684,0.000000,0.526316,0.526316,m",
+        "0.000000,0.473684,0.526316,0.526316,m",
+        "0.473684,0.473684,0.526316,0.526316,m",
+    ]
 
 
 def test_grid_to_static_tiles_no_overlap_covers_unit_square():
