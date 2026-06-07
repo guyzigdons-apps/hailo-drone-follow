@@ -44,7 +44,7 @@ class HefBackend(InferenceBackend):
 
     Two construction modes:
     1. Production: ``HefBackend(hef_path="...", nms_score_threshold=0.25)``
-       lazy-imports the HailoRT-touching ``probe_phantom_hef`` module.
+       lazy-imports the HailoRT-touching ``hef_runtime`` module.
     2. Test injection: ``HefBackend(handle, decode)`` — for unit tests that
        want to assert on the batched infer loop without touching HailoRT.
 
@@ -65,9 +65,9 @@ class HefBackend(InferenceBackend):
         if hef_path is None:
             raise TypeError("HefBackend requires hef_path or (handle, decode)")
         # Lazy import of the HailoRT-touching helper (kept off the import path
-        # so the module loads chip-free); resolved from the tiling-benchmark
-        # layout's sys.path at call time.
-        from probe_phantom_hef import HefHandle, decode_nms_output  # noqa: WPS433
+        # so the module loads chip-free); imported only when a real on-chip
+        # backend is actually constructed.
+        from .hef_runtime import HefHandle, decode_nms_output  # noqa: WPS433
         self._handle = HefHandle.open(
             hef_path,
             nms_score_threshold=nms_score_threshold,

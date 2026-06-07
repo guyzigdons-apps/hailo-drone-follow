@@ -38,12 +38,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-# Make tiling_benchmark importable for probe_phantom_hef (HefHandle uses it).
+# Make the repo root importable so hailo_tiling resolves when run as a script.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_TILING = _REPO_ROOT / "tiling_benchmark"
-for _p in (str(_REPO_ROOT), str(_TILING)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from hailo_tiling.backends.caching import CachingBackend  # noqa: E402
 from hailo_tiling.backends.hef import HefBackend  # noqa: E402
@@ -58,7 +56,7 @@ from hailo_tiling.types import CropRect  # noqa: E402
 
 
 def _det_to_tuple(d) -> tuple:
-    """Canonicalise a detection (either probe_phantom_hef.Detection or
+    """Canonicalise a detection (either hef_runtime.Detection or
     hailo_tiling.types.Det) into a comparable tuple.
 
     Both types use Python floats for x/y/w/h/score and int for cls, so the

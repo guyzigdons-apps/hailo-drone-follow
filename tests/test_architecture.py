@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-INTERNAL = {"drone_follow", "hailo_tiling", "tiling_lab", "tiling_benchmark", "dynamic_tiling"}
+INTERNAL = {"drone_follow", "hailo_tiling", "tiling_lab", "tiling_benchmark", "dynamic_tiling",
+            # tiling_benchmark-resident modules historically imported bare (sys.path
+            # hack). The runtime pieces now live in hailo_tiling.backends.hef_runtime;
+            # listing the legacy module name trips the rule if a bare import sneaks back.
+            "probe_phantom_hef"}
 ALLOWED = {
     "hailo_tiling": set(),
     "drone_follow": {"hailo_tiling"},
