@@ -204,7 +204,7 @@ def test_dynamic_runner_produces_per_frame_tiles():
     # GT-consistent backend (batched ABC): for every crop covering the GT
     # centre, emit a single person whose tile-local coords map back to GT in
     # source space — so the tracker locks onto the GT-seeded target and an ROI
-    # tile appears on subsequent frames. Mirrors dynamic_tiling's own
+    # tile appears on subsequent frames. Mirrors the lab harness's own
     # _AnyCropBackend, adapted to the batched infer signature.
     gt_at = lambda fi: (0.40 + 0.01 * fi, 0.40, 0.08, 0.20)
 
@@ -292,7 +292,7 @@ def test_dynamic_discovery_grid_hits_when_warmed(tmp_path):
     store = SqliteCacheStore.open(tmp_path / "warmed_disc.sqlite3")
     try:
         # Seed the exact 3x2 discovery-grid crops the scheduler emits at frame 0.
-        from dynamic_tiling.scheduler import TileScheduler
+        from hailo_tiling.dynamic.scheduler import TileScheduler
 
         sched = TileScheduler(_W, _H, discovery_period=15, discovery_grid=(3, 2))
         crops = sched._grid(3, 2, 0, 0, _W, _H, "m")

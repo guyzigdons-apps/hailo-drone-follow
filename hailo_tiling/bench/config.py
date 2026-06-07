@@ -7,7 +7,7 @@ returns the v1 rows used for the tiling-paper ablation table.
 Static rows mirror the canonical grid set in
 ``tiling_benchmark/run_pxt_bench.py`` (1x1, 2x2, 3x2, 3x3, 4x3, 6x4, 8x6, all
 at 0.25 overlap) plus the dense ``12x9`` ground-truth reference. Dynamic rows
-exercise the existing ``dynamic_tiling.scheduler.TileScheduler`` with the two
+exercise the existing ``hailo_tiling.dynamic.scheduler.TileScheduler`` with the two
 levers (ASAHI adaptive slice sizing, altitude-gated zoom) toggled on
 individually.
 """

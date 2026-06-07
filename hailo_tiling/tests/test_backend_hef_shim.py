@@ -1,8 +1,11 @@
 """HefBackend — shim contract.
 
 The test mocks the HailoRT-touching parts of HefBackend so it runs without a
-Hailo chip, asserting the batched `infer(frame, crops, frame_idx)` shape and
-the legacy single-crop shim path used by dynamic_tiling.
+Hailo chip, asserting the batched `infer(frame, crops, frame_idx)` shape.
+
+The legacy single-crop shim tests moved to
+``tiling_lab/tests/test_legacy_inference_shim.py`` (the lab's inference wrapper
+must not be imported from hailo_tiling — tiling-lab restructure, 2026-06-07).
 """
 from __future__ import annotations
 
@@ -63,41 +66,3 @@ def test_batched_infer_returns_list_per_crop(patched_hef):
     out = be.infer(frame, crops, frame_idx=0)
     assert len(out) == 2
     assert all(len(dets) == 1 for dets in out)
-
-
-def test_legacy_dynamic_tiling_inference_hef_backend_is_single_crop_wrapper():
-    """dynamic_tiling.inference.HefBackend must expose the legacy single-crop API.
-
-    It wraps the new batched hailo_tiling.backends.hef.HefBackend internally so
-    dynamic_tiling.run_dynamic / dynamic_tiling.replay keep working through the
-    shim (they call `backend.infer(frame, crop, frame_idx)` with a single CropRect).
-    """
-    import numpy as np
-
-    from dynamic_tiling.inference import HefBackend as LegacyHefBackend
-    from hailo_tiling.backends.hef import HefBackend as BatchedHefBackend
-
-    # Different classes — wrapper, not identity.
-    assert LegacyHefBackend is not BatchedHefBackend
-
-    # Test-injection construction round-trips through the wrapper.
-    handle = _FakeHandle()
-    legacy = LegacyHefBackend(handle, _fake_decode)
-
-    crop = CropRect(x=0, y=0, w=640, h=480, mode="s")
-    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-
-    # Legacy single-crop API: returns a flat list (not list-of-lists).
-    out = legacy.infer(frame, crop, frame_idx=0)
-    assert len(out) == 1  # _fake_decode returns one _FakeDet
-
-
-def test_legacy_replay_backend_still_works():
-    """dynamic_tiling.inference.ReplayBackend keeps its single-crop API."""
-    from dynamic_tiling.inference import ReplayBackend
-    canned = {(0, (0, 0, 640, 480)): [_FakeDet()]}
-    be = ReplayBackend(canned)
-    out = be.infer(frame=np.zeros((480, 640, 3), dtype=np.uint8),
-                    crop=CropRect(x=0, y=0, w=640, h=480, mode="s"),
-                    frame_idx=0)
-    assert len(out) == 1

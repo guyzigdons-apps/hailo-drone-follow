@@ -2,7 +2,7 @@
 results section (Plan-15 paper-with-code scaffold; Night-2 Task C2).
 
 This renderer is deliberately dumb and honest: it reads the EXISTING, committed
-``dynamic_tiling/runs/ablation_0026_fov{50,60,70}/ablation_table.md`` files and
+``tiling_lab/runs/ablation_0026_fov{50,60,70}/ablation_table.md`` files and
 splices them verbatim between the ``<!-- BEGIN:ablation -->`` /
 ``<!-- END:ablation -->`` markers in ``docs/paper/technical-report.md``. It
 invents NO numbers — if a table file is missing, that FOV is reported as
@@ -21,7 +21,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REPORT = _REPO_ROOT / "docs" / "paper" / "technical-report.md"
-_RUNS = _REPO_ROOT / "dynamic_tiling" / "runs"
+_RUNS = _REPO_ROOT / "tiling_lab" / "runs"
 _FOVS = ("fov50", "fov60", "fov70")
 
 _BEGIN = "<!-- BEGIN:ablation -->"

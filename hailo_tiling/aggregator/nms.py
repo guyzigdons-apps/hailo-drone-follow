@@ -1,6 +1,6 @@
 """Per-class NMS + crop-local-to-source detection mapping.
 
-Lifted verbatim from dynamic_tiling/aggregator.py (Plan 1 byte-parity).
+Lifted verbatim from tiling_lab/harness/aggregator.py (Plan 1 byte-parity).
 """
 from __future__ import annotations
 

@@ -34,7 +34,7 @@ def test_emits_empty_when_lost_without_track_id(src_dims, lost_lock):
 
 def test_matches_legacy_recovery(src_dims, searching_lock):
     """Exact output equality with the legacy recovery branch."""
-    from dynamic_tiling.scheduler import TileScheduler as LegacyScheduler
+    from hailo_tiling.dynamic.scheduler import TileScheduler as LegacyScheduler
     from hailo_tiling.types import MODEL_ASPECT  # noqa: F401  (matches legacy import order)
 
     src_w, src_h = src_dims

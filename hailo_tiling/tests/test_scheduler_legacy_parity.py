@@ -1,13 +1,13 @@
 # hailo_tiling/tests/test_scheduler_legacy_parity.py
-"""End-to-end golden-file parity vs dynamic_tiling.TileScheduler.
+"""End-to-end golden-file parity vs hailo_tiling.dynamic.TileScheduler.
 
 For each parameterised scenario, build a composed hailo_tiling.TileScheduler
 with the same parameters and assert that `decide()` returns the byte-identical
 list[CropRect] as the legacy scheduler.
 
-Once Plan 8 (drone-follow migration) removes the dynamic_tiling shim, this
-test will be replaced by static golden files generated from this test's
-expected outputs.
+Once Plan 8 (drone-follow migration) retires the promoted-scheduler parity
+seam, this test will be replaced by static golden files generated from this
+test's expected outputs.
 """
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ SCENARIOS = [
 def test_composed_scheduler_matches_legacy(
     desc, src_w, src_h, sched_kwargs, lock, frame_idx, meter_args,
 ):
-    from dynamic_tiling.scheduler import TileScheduler as LegacyScheduler
+    from hailo_tiling.dynamic.scheduler import TileScheduler as LegacyScheduler
 
     legacy = LegacyScheduler(src_w, src_h, **sched_kwargs)
     legacy_out = legacy.decide(lock, frame_idx, BudgetMeter(**meter_args))

@@ -1,9 +1,9 @@
-"""HefBackend — direct HailoRT inference, lifted from dynamic_tiling/inference.py.
+"""HefBackend — direct HailoRT inference, lifted from tiling_lab/harness/inference.py.
 
 Widens the per-crop API to a batched `(frame, crops, frame_idx) -> list[list[Det]]`
 shape required by the hailo_tiling InferenceBackend ABC (see backends/backend.py).
 On-chip, the implementation loops over crops internally so the HailoRT call
-sequence is unchanged from the legacy dynamic_tiling.inference.HefBackend.
+sequence is unchanged from the legacy tiling_lab.harness.inference.HefBackend.
 """
 from __future__ import annotations
 
@@ -64,8 +64,9 @@ class HefBackend(InferenceBackend):
         nms_score_threshold = kwargs.get("nms_score_threshold", 0.25)
         if hef_path is None:
             raise TypeError("HefBackend requires hef_path or (handle, decode)")
-        # Same lazy-import path as the legacy dynamic_tiling/inference.py
-        # (via _vendor_paths in the tiling-benchmark layout).
+        # Lazy import of the HailoRT-touching helper (kept off the import path
+        # so the module loads chip-free); resolved from the tiling-benchmark
+        # layout's sys.path at call time.
         from probe_phantom_hef import HefHandle, decode_nms_output  # noqa: WPS433
         self._handle = HefHandle.open(
             hef_path,

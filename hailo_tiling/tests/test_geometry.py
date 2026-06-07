@@ -29,7 +29,11 @@ def test_grid_to_static_tiles_no_overlap_covers_unit_square():
     assert all(w == 0.5 and h == 0.5 for _, _, w, h in parsed)
 
 
-def test_fov_to_crop_dims_matches_legacy():
-    from tiling_benchmark.prepare_video import fov_to_crop_dims as legacy
-    for fov in (70, 60, 50):
-        assert fov_to_crop_dims(fov) == legacy(fov)
+def test_fov_to_crop_dims_known_spec_values():
+    # Spec §8.2 table values (the former legacy parity target — prepare_video
+    # now re-exports this very function as the single source of truth, so the
+    # cross-module identity check became tautological after the tiling-lab
+    # restructure; pin the published values directly instead).
+    assert fov_to_crop_dims(70) == (6016, 3384)
+    assert fov_to_crop_dims(60) == (4963, 2792)
+    assert fov_to_crop_dims(50) == (4007, 2254)

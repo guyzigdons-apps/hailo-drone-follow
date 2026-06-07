@@ -1,13 +1,12 @@
 # hailo_tiling/tests/test_budget.py
-"""BudgetMeter unit tests + parity with dynamic_tiling.budget."""
+"""BudgetMeter unit tests.
+
+The former dynamic-tiling ``budget`` re-export shim was removed by the
+tiling-lab restructure (2026-06-07); its identity-parity test went with it.
+"""
 from __future__ import annotations
 
 from hailo_tiling.budget import BudgetMeter
-
-
-def test_shim_identity():
-    from dynamic_tiling.budget import BudgetMeter as DtBudgetMeter
-    assert BudgetMeter is DtBudgetMeter
 
 
 def test_available_at_start_returns_per_frame_share():

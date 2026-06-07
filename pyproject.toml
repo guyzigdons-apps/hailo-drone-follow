@@ -25,11 +25,11 @@ mavsdk = ["mavsdk>=2.0"]
 test = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
-include = ["drone_follow*", "reid_analysis*", "hailo_tiling*"]
-exclude = ["configs", "configs.*", "hailo_tiling.tests*"]
+include = ["drone_follow*", "reid_analysis*", "hailo_tiling*", "tiling_lab*"]
+exclude = ["configs", "configs.*", "hailo_tiling.tests*", "tiling_lab.tests*"]
 
 [tool.pytest.ini_options]
-testpaths = ["hailo_tiling/tests", "dynamic_tiling/tests", "tests"]
+testpaths = ["hailo_tiling/tests", "tiling_lab/tests", "tests"]
 
 [project.scripts]
 drone-follow = "drone_follow.drone_follow_app:main"

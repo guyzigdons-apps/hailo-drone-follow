@@ -7,7 +7,7 @@ from ..types import CropRect, LockState
 class BudgetTrimModifier:
     """Truncate the tile list to fit `meter.available(frame_idx)`.
 
-    Mirrors the budget-enforcement tail in `dynamic_tiling.TileScheduler.decide`:
+    Mirrors the budget-enforcement tail in `hailo_tiling.dynamic.TileScheduler.decide`:
     a negative `available()` is treated as 'unlimited'; otherwise the list is
     truncated to the floor of the available per-frame share. Tiles are kept
     from the head — emitter order is the priority order, so the upstream

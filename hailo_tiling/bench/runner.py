@@ -236,7 +236,7 @@ def run_dynamic_config(
 ) -> ConfigResult:
     """Stateful dynamic-config runner (Night-2 B2).
 
-    Drives ``dynamic_tiling.scheduler.TileScheduler`` fed by a per-frame
+    Drives ``hailo_tiling.dynamic.scheduler.TileScheduler`` fed by a per-frame
     ``TargetLock`` (the production ByteTracker) over ``frames``, producing the
     real per-frame ROI/discovery/recovery tiles — NOT the no-lock placeholder
     of :func:`run_config`. Each frame:
@@ -263,8 +263,14 @@ def run_dynamic_config(
     if cfg.kind != "dynamic":
         raise ValueError("run_dynamic_config is for dynamic configs only")
 
-    from dynamic_tiling.scheduler import TileScheduler
-    from dynamic_tiling.target_lock import TargetLock
+    from hailo_tiling.dynamic.scheduler import TileScheduler
+    # TargetLock wraps the production ByteTracker (drone_follow) for the offline
+    # benchmark; it lives in the research workspace. This benchmark-only runner
+    # path therefore reaches into tiling_lab.harness — a lab dependency, lazily
+    # imported so the installed library never pulls it in at module load. See
+    # the tiling-lab restructure design (2026-06-07); the architecture-rule test
+    # exempts this benchmark seam (or relocates run_dynamic_config to the lab).
+    from tiling_lab.harness.target_lock import TargetLock
 
     from ..budget import BudgetMeter
 
@@ -308,7 +314,7 @@ def run_dynamic_config(
         final = agg.aggregate(fi, hit_crops, hit_dets, src_w, src_h)
 
         # Step the lock with this frame's person detections; GT-seed while the
-        # lock has not yet acquired a track (mirrors dynamic_tiling.replay.run).
+        # lock has not yet acquired a track (mirrors tiling_lab.harness.replay.run).
         persons = [d for d in final if d.cls == person_cls]
         gt_box = gt_traj.get(fi)
         if lock.track_id is None and gt_box is not None:
@@ -339,7 +345,7 @@ def _dynamic_crops(cfg: BenchConfig, src_w: int, src_h: int, frame_idx: int) -> 
     on the config for the table but do not alter the emitted crops in this
     chip-free v1 (they reshape ROI tiles, which need the live path).
     """
-    from dynamic_tiling.scheduler import TileScheduler
+    from hailo_tiling.dynamic.scheduler import TileScheduler
 
     sched = TileScheduler(src_w, src_h, **cfg.scheduler_kwargs)
     # No lock: scheduler emits the discovery grid on cadence, else nothing.

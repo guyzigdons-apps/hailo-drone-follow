@@ -1,26 +1,9 @@
-"""Verify hailo_tiling.types and dynamic_tiling.types are the same objects."""
+"""Unit tests for hailo_tiling.types (the canonical home for the shared types).
+
+The former dynamic-tiling ``types`` re-export shim was removed by the
+tiling-lab restructure (2026-06-07); its identity-parity test went with it.
+"""
 from __future__ import annotations
-
-
-def test_dynamic_tiling_types_reexport_hailo_tiling():
-    """The shim must re-export the same classes by identity."""
-    from hailo_tiling.types import CropRect as HtCropRect
-    from hailo_tiling.types import Det as HtDet
-    from hailo_tiling.types import LockState as HtLockState
-    from hailo_tiling.types import TargetState as HtTargetState
-    from hailo_tiling.types import ScheduledTile as HtScheduledTile
-
-    from dynamic_tiling.types import CropRect as DtCropRect
-    from dynamic_tiling.types import Det as DtDet
-    from dynamic_tiling.types import LockState as DtLockState
-    from dynamic_tiling.types import TargetState as DtTargetState
-    from dynamic_tiling.types import ScheduledTile as DtScheduledTile
-
-    assert HtCropRect is DtCropRect
-    assert HtDet is DtDet
-    assert HtLockState is DtLockState
-    assert HtTargetState is DtTargetState
-    assert HtScheduledTile is DtScheduledTile
 
 
 def test_model_constants():

@@ -9,7 +9,7 @@ def _grid_region(src_w: int, src_h: int, gx: int, gy: int,
                  x0: float, y0: float, w: float, h: float, mode: str) -> list[CropRect]:
     """Build a gx×gy grid over the [x0, y0, w, h] src-pixel region.
 
-    Equivalent to `dynamic_tiling.TileScheduler._grid(gx, gy, x0, y0, w, h, mode)`.
+    Equivalent to `hailo_tiling.dynamic.TileScheduler._grid(gx, gy, x0, y0, w, h, mode)`.
     Must produce byte-identical output.
     """
     out: list[CropRect] = []

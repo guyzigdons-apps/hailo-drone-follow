@@ -2,7 +2,7 @@
 """Draw per-frame detection boxes from a `*.frames.json` onto the source video.
 
 The ablation runner writes one `<config>.frames.json` per config under
-`dynamic_tiling/runs/<run>/`, each carrying
+`tiling_lab/runs/<run>/`, each carrying
 `frames: [{frame_idx, n_tiles, dets: [{cls, score, x, y, w, h}]}]` with
 **normalized source coordinates** (top-left x/y + w/h, fractions of frame).
 

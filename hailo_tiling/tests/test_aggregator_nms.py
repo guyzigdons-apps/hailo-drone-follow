@@ -1,4 +1,10 @@
-"""NMS + map_to_source — lift parity from dynamic_tiling.aggregator."""
+"""NMS + map_to_source unit tests.
+
+These helpers were lifted verbatim from the legacy aggregator (now
+``tiling_lab.harness.aggregator``); the cross-package identity-parity check was
+dropped when the lab moved out of ``hailo_tiling``'s allowed import set
+(tiling-lab restructure, 2026-06-07).
+"""
 from __future__ import annotations
 
 from hailo_tiling.aggregator import map_to_source, nms
@@ -37,16 +43,3 @@ def test_nms_keeps_different_classes():
     a = Det(cls=0, score=0.9, x=0.10, y=0.10, w=0.10, h=0.20)
     b = Det(cls=1, score=0.7, x=0.10, y=0.10, w=0.10, h=0.20)
     assert len(nms([a, b], iou_thr=0.5)) == 2
-
-
-def test_parity_with_dynamic_tiling_aggregator_nms():
-    """Verbatim parity check: identical inputs -> identical outputs."""
-    from dynamic_tiling.aggregator import nms as legacy_nms
-
-    dets = [
-        Det(cls=0, score=0.9, x=0.10, y=0.10, w=0.10, h=0.20),
-        Det(cls=0, score=0.7, x=0.105, y=0.105, w=0.10, h=0.20),
-        Det(cls=0, score=0.8, x=0.60, y=0.60, w=0.10, h=0.20),
-        Det(cls=1, score=0.9, x=0.10, y=0.10, w=0.10, h=0.20),
-    ]
-    assert nms(dets, iou_thr=0.5) == legacy_nms(dets, iou_thr=0.5)

@@ -31,7 +31,7 @@ def test_emits_empty_off_cadence(src_dims):
 
 def test_matches_legacy_grid(src_dims):
     """Exact output equality with the legacy `_grid` implementation."""
-    from dynamic_tiling.scheduler import TileScheduler as LegacyScheduler
+    from hailo_tiling.dynamic.scheduler import TileScheduler as LegacyScheduler
     src_w, src_h = src_dims
     legacy = LegacyScheduler(src_w, src_h, discovery_grid=(3, 2))
     expected = legacy._grid(3, 2, 0, 0, src_w, src_h, "m")

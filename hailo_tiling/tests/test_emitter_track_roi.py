@@ -30,7 +30,7 @@ def test_emits_empty_when_not_tracking(src_dims, searching_lock, lost_lock):
 
 def test_matches_legacy_roi(src_dims, tracking_lock):
     """Exact output equality with the legacy `_roi` implementation."""
-    from dynamic_tiling.scheduler import TileScheduler as LegacyScheduler
+    from hailo_tiling.dynamic.scheduler import TileScheduler as LegacyScheduler
     src_w, src_h = src_dims
     legacy = LegacyScheduler(src_w, src_h, max_zoom=2.0, target_model_h=40.0,
                              roi_margin_frac=0.25)

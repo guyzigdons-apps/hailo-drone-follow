@@ -13,7 +13,7 @@ class TrackROIEmitter:
     clamped to [MODEL_W/max_zoom, MODEL_W] (don't upscale; don't zoom past
     max_zoom) but always grown to contain the *whole* target plus margin.
 
-    This is the inlined equivalent of `dynamic_tiling.TileScheduler._roi(lock)`
+    This is the inlined equivalent of `hailo_tiling.dynamic.TileScheduler._roi(lock)`
     and must produce byte-identical output.
     """
 

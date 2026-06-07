@@ -18,7 +18,7 @@ Usage:
     GST_PLUGIN_PATH=gst-hailo-cache/build/src HAILO_CHIP=1 \
       python scripts/warm_dynamic_cache.py \
         --video /path/0026__fov50.mp4 \
-        --ref dynamic_tiling/runs/ablation_0026_fov50/12x9.frames.json \
+        --ref tiling_lab/runs/ablation_0026_fov50/12x9.frames.json \
         --out-cache .tile_cache/0026__fov50__dynamic.sqlite3 \
         --source-width 3840 --source-height 2160 \
         --target-class 1 [--max-frames N] [--configs dynamic,dynamic+asahi]
@@ -47,9 +47,9 @@ _DEFAULT_POST = "/usr/local/hailo/resources/so/libyolo_hailortpp_postprocess.so"
 def gt_traj_from_reference(ref_path: Path, target_cls: int) -> dict:
     """Stitch a single-target trajectory for ``target_cls`` from a committed
     bench ``<ref>.frames.json`` (schema: frame_idx / dets / cls), via
-    dynamic_tiling.gt_track.build_target_trajectory (schema: frame / detections
+    tiling_lab.gt.gt_track.build_target_trajectory (schema: frame / detections
     / label)."""
-    from dynamic_tiling.gt_track import build_target_trajectory
+    from tiling_lab.gt.gt_track import build_target_trajectory
 
     doc = json.loads(ref_path.read_text())
     label = _class_label(target_cls)

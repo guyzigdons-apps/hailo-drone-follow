@@ -12,7 +12,7 @@ def _grid_full(src_w: int, src_h: int, gx: int, gy: int, mode: str) -> list[Crop
     cell width and the aspect-scaled cell height so cells are fully covered
     (tiles may overlap) rather than leaving vertical/horizontal gaps.
 
-    This is the inlined equivalent of `dynamic_tiling.TileScheduler._grid(
+    This is the inlined equivalent of `hailo_tiling.dynamic.TileScheduler._grid(
     gx, gy, 0, 0, src_w, src_h, mode)` and must produce byte-identical output.
     """
     out: list[CropRect] = []
