@@ -96,6 +96,38 @@ def test_despike_converges_on_gradual_dip():
                for i, f in enumerate(fis))
 
 
+def test_despike_bottom_anchor_grows_upward_for_head_cut():
+    # steady person h=0.07 (top-left ymin=0.7 -> bottom edge y+h=0.77), two
+    # head-truncated frames (top of head cut): height collapses while the
+    # bottom edge (feet) stays put. anchor="bottom" must grow the box UPWARD.
+    frames = {i: (0.5, 0.7, 0.02, 0.07) for i in range(41)}
+    frames[20] = (0.5, 0.74, 0.02, 0.03)   # head cut: bottom (0.77) held, ymin raised
+    frames[21] = (0.5, 0.745, 0.02, 0.025)
+    out = despike_track_heights([_t(3, 1, frames)], track_ids=[3],
+                                min_ratio=0.7, window=31, anchor="bottom")
+    got = out[0].frames
+    # height restored to local median (0.07)
+    assert abs(got[20][3] - 0.07) < 1e-9
+    assert abs(got[21][3] - 0.07) < 1e-9
+    # bottom edge (y + h) preserved at 0.77, ymin decreased
+    assert abs((got[20][1] + got[20][3]) - 0.77) < 1e-9
+    assert abs((got[21][1] + got[21][3]) - 0.77) < 1e-9
+    assert got[20][1] < 0.74   # ymin moved up
+    # x, width preserved; healthy frame untouched
+    assert got[20][0] == 0.5 and got[20][2] == 0.02
+    assert got[10] == (0.5, 0.7, 0.02, 0.07)
+
+
+def test_despike_default_anchor_is_top_unchanged():
+    # regression: default (anchor omitted) must keep the top-anchored behavior
+    frames = {i: (0.5, 0.7, 0.02, 0.07) for i in range(41)}
+    frames[20] = (0.5, 0.7, 0.02, 0.03)
+    out = despike_track_heights([_t(3, 1, frames)], track_ids=[3],
+                                min_ratio=0.7, window=31)
+    got = out[0].frames
+    assert got[20] == (0.5, 0.7, 0.02, 0.07)  # ymin held, grows down
+
+
 def test_despike_only_touches_selected_tracks_and_respects_ratio():
     short = {i: (0.5, 0.7, 0.02, 0.07) for i in range(41)}
     short[20] = (0.5, 0.7, 0.02, 0.062)   # 0.886*median -> above 0.7 ratio, keep

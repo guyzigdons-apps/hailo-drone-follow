@@ -24,16 +24,22 @@ def interp_track_gaps(tracks, *, track_ids, max_gap):
             for t in tracks]
 
 
-def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31, max_iter=20):
+def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31,
+                          max_iter=20, anchor="top"):
     """Restore detector-truncated bbox heights on each track in track_ids.
 
-    When a detection boxes only the top of an object (legs cut off), its height
-    collapses while the top edge (ymin) stays put. For each frame whose height
-    is below ``min_ratio`` * the local windowed-median height, the height is
-    reset to that local median while x, ymin and width are preserved -- so the
-    box grows back DOWNWARD to the feet. ``window`` (odd) sets the centered
-    median window so genuine scale change (object walking nearer/farther) is
-    tracked rather than flattened.
+    When a detection boxes only part of an object its height collapses while one
+    edge stays put. For each frame whose height is below ``min_ratio`` * the
+    local windowed-median height, the height is reset to that local median while
+    x and width are preserved and one vertical edge is held:
+
+    - ``anchor="top"`` (default) holds the top edge (ymin) -- the legs were cut,
+      so the box grows back DOWNWARD to the feet.
+    - ``anchor="bottom"`` holds the bottom edge (ymin + h) -- the head was cut,
+      so the box grows back UPWARD over the head.
+
+    ``window`` (odd) sets the centered median window so genuine scale change
+    (object walking nearer/farther) is tracked rather than flattened.
 
     Applied iteratively to convergence: restoring one frame raises the local
     median, which can expose the shoulders of a gradual dip, so the pass repeats
@@ -57,7 +63,8 @@ def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31, max_it
                 local_med = statistics.median(heights[max(0, i - half):i + half + 1])
                 x, y, w, h = frames[f]
                 if h < min_ratio * local_med:
-                    frames[f] = (x, y, w, local_med)
+                    ny = y + h - local_med if anchor == "bottom" else y
+                    frames[f] = (x, ny, w, local_med)
                     changed = True
             if not changed:
                 break
