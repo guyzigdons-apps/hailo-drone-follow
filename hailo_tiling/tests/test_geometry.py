@@ -21,8 +21,12 @@ def test_grid_to_static_tiles_matches_legacy_with_mode():
 def test_grid_to_static_tiles_no_overlap_covers_unit_square():
     tiles = grid_to_static_tiles(2, 2, 0.0, 0.0)
     assert len(tiles) == 4
-    xs = sorted({float(t.split(",")[0]) for t in tiles})
+    parsed = [tuple(float(v) for v in t.split(",")) for t in tiles]
+    xs = sorted({x for x, _, _, _ in parsed})
+    ys = sorted({y for _, y, _, _ in parsed})
     assert xs == [0.0, 0.5]
+    assert ys == [0.0, 0.5]
+    assert all(w == 0.5 and h == 0.5 for _, _, w, h in parsed)
 
 
 def test_fov_to_crop_dims_matches_legacy():

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from ..types import CropRect, LockState, TargetState, ScheduledTile, MODEL_W, MODEL_H, MODEL_ASPECT
 
+__all__ = ["TileScheduler", "MultiTargetTileScheduler"]
+
 
 class TileScheduler:
     def __init__(self, src_w: int, src_h: int, *,

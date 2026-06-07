@@ -83,7 +83,8 @@ def fov_to_crop_dims(fov_deg: int) -> tuple[int, int]:
     Derived from `crop_ratio = tan(fov_deg/2) / tan(70°/2)` per spec §8.2.
     `crop_h` is the smallest even integer >= `SRC_6K_H * crop_ratio` (h264/h265
     encoders require even dims), and `crop_w` is derived from `crop_h` so the
-    source 16:9 aspect ratio is preserved exactly (`int(crop_h * 16/9)`).
+    true source aspect ratio is preserved exactly
+    (`int(crop_h * SRC_6K_W / SRC_6K_H)`, i.e. 6016/3384 — not nominal 16:9).
 
     The published spec §8.2 table values fall out of this construction:
         FOV-70: (6016, 3384)
