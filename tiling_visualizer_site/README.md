@@ -44,7 +44,8 @@ cd tiling_visualizer_site
 python3 package_site.py
 
 # Serve and open in browser
-python3 -m http.server 8123 --directory dist
+python3 serve.py            # no-cache dev server on :8123 (preferred)
+# or: python3 -m http.server 8123 --directory dist
 # → http://localhost:8123
 ```
 

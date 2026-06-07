@@ -279,9 +279,17 @@ export function initRunsPanel(store) {
       const hasTiles = docHasTiles(doc);
       radio.disabled = !hasTiles;
       radio.checked = isTileSource;
-      if (!hasTiles) radio.title = 'no tiles';
-      radio.addEventListener('change', () => {
-        if (radio.checked) store.set({ tileSourceRun: run.id });
+      if (!hasTiles) radio.title = hasTiles ? '' : 'no tiles';
+      else radio.title = isTileSource ? 'Click to hide tiles' : 'Show this run\u2019s tiles';
+      // 'click' (not 'change') so clicking the ALREADY-active radio toggles
+      // tiles off — radios don't fire 'change' when re-clicked.
+      radio.addEventListener('click', () => {
+        if (isTileSource) {
+          radio.checked = false;
+          store.set({ tileSourceRun: null });
+        } else {
+          store.set({ tileSourceRun: run.id });
+        }
       });
       row.appendChild(radio);
 
