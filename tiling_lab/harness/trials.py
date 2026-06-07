@@ -24,6 +24,16 @@ class AggregateScore:
     avg_tiles_per_frame: float
     per_trial: list[TrialScore]
     mean_frac_dets_embedded: float = 0.0
+    # --- length-aware aggregates (added; legacy fields above unchanged) ---
+    # frame-weighted coverage: sum(covered_frames) / sum(gt_frames) across trials.
+    # Unlike mean_coverage (an unweighted per-track mean), this gives a 334-frame
+    # track 334x the weight of a 16-frame fragment.
+    coverage_fw: float = 0.0
+    # event-weighted recovery: total recovered losses / total loss events. None
+    # when there were zero loss events anywhere (no recovery to score).
+    recovery_success_ew: float | None = None
+    # total GT-present frames scored across all trials.
+    n_gt_frames_total: int = 0
 
 
 def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
@@ -80,6 +90,13 @@ def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
     n = len(per_trial)
     def mean(attr):
         return sum(getattr(s, attr) for s in per_trial) / n if n else 0.0
+    # length-aware aggregates: weight each trial by its GT-present frame count
+    # (coverage) / its loss-event count (recovery), so long tracks dominate and
+    # zero-loss tracks contribute nothing to recovery.
+    gt_frames_total = sum(s.n_frames for s in per_trial)
+    covered_frames_total = sum(s.coverage * s.n_frames for s in per_trial)
+    loss_events_total = sum(s.loss_events for s in per_trial)
+    recovered_total = sum(s.recovery_success_rate * s.loss_events for s in per_trial)
     return AggregateScore(
         n_trials=n,
         mean_coverage=mean("coverage"),
@@ -90,5 +107,9 @@ def run_all_trials(*, frames_factory, src_w, src_h, gt_tracks,
         mean_recovery_success=mean("recovery_success_rate"),
         avg_tiles_per_frame=(tiles_acc / n) if n else 0.0,
         mean_frac_dets_embedded=mean("frac_dets_embedded"),
+        coverage_fw=(covered_frames_total / gt_frames_total) if gt_frames_total else 0.0,
+        recovery_success_ew=(recovered_total / loss_events_total)
+                            if loss_events_total else None,
+        n_gt_frames_total=gt_frames_total,
         per_trial=per_trial,
     )

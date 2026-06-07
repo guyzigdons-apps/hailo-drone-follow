@@ -47,11 +47,15 @@ def format_aggregate(agg: AggregateScore, *, budget: float, fps: float) -> str:
         f"trials           : {agg.n_trials}\n"
         f"tiles/frame      : {agg.avg_tiles_per_frame:.3f}  (budget {budget} @ {fps}fps)\n"
         f"coverage         : {agg.mean_coverage:.3f}\n"
+        f"coverage (fw)    : {agg.coverage_fw:.3f}  (frame-weighted)\n"
         f"mean IoU         : {agg.mean_iou:.3f}\n"
         f"drift rate       : {agg.mean_drift_rate:.3f}\n"
         f"loss events      : {agg.mean_loss_events:.2f}\n"
         f"time-to-recover  : {agg.mean_time_to_recover:.2f}\n"
         f"recovery success : {agg.mean_recovery_success:.3f}\n"
+        f"recovery (ew)    : "
+        + (f"{agg.recovery_success_ew:.3f}" if agg.recovery_success_ew is not None else "n/a")
+        + "  (event-weighted)\n"
     )
 
 

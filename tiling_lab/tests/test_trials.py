@@ -168,6 +168,117 @@ def test_fresh_reid_assist_per_trial_reaches_run(monkeypatch):
     assert abs(agg.mean_frac_dets_embedded - 0.5) < 1e-9
 
 
+def test_frame_weighted_coverage_vs_unweighted(monkeypatch):
+    """Two very-different-length tracks: a 300-frame track fully covered and a
+    15-frame track fully uncovered. Frame-weighted coverage ~ 300/315 while the
+    legacy unweighted (per-track mean) coverage ~ 0.5."""
+    tracks = [
+        GtTrack(cls=1, track_id=1, frames={i: (0.1, 0.1, 0.2, 0.2) for i in range(300)}),
+        GtTrack(cls=1, track_id=2, frames={i: (0.6, 0.6, 0.1, 0.1) for i in range(15)}),
+    ]
+
+    def fake_run(frames, src_w, src_h, scheduler, lock, backend, meter, gt_traj,
+                 person_cls=1, reid_assist=None):
+        r = RunResult()
+        # long track (300 frames): perfectly followed; short track (15): never found
+        if len(gt_traj) == 300:
+            r.pred_traj = dict(gt_traj)
+        else:
+            r.pred_traj = {}      # totally uncovered
+        r.n_frames = len(gt_traj)
+        r.total_tiles = r.n_frames
+        return r
+
+    monkeypatch.setattr(trials_mod, "run", fake_run)
+    agg = run_all_trials(
+        frames_factory=lambda: iter([]),
+        src_w=1920, src_h=1080, gt_tracks=tracks,
+        backend_factory=lambda: _NullBackend(),
+        budget=300.0, fps=30.0, discovery_fps=2.0,
+    )
+    # legacy unweighted: (1.0 + 0.0) / 2 = 0.5
+    assert abs(agg.mean_coverage - 0.5) < 1e-9
+    # frame-weighted: 300 covered / 315 gt frames
+    assert abs(agg.coverage_fw - (300 / 315)) < 1e-9
+    assert agg.n_gt_frames_total == 315
+
+
+def test_event_weighted_recovery_vs_unweighted(monkeypatch):
+    """One track recovers 3 of 3 losses (rate 1.0), another recovers 0 of 1
+    (rate 0.0). Legacy unweighted recovery = 0.5; event-weighted = 3/4."""
+    # long track: covered, lost, covered, lost, covered, lost, covered (3 recovered losses)
+    long_frames = {}
+    long_pred = {}
+    box = (0.1, 0.1, 0.2, 0.2)
+    f = 0
+    # build a covered/lost/covered/... pattern: 3 isolated single-frame losses
+    pattern = [True, False, True, False, True, False, True, True]
+    for hit in pattern:
+        long_frames[f] = box
+        if hit:
+            long_pred[f] = box
+        f += 1
+    # short track: lost at the final frame and never recovers -> 1 loss, 0 recovered
+    short_frames = {0: box, 1: box}
+    short_pred = {0: box}   # frame 1 uncovered, clip ends lost
+
+    tracks = [
+        GtTrack(cls=1, track_id=1, frames=long_frames),
+        GtTrack(cls=1, track_id=2, frames=short_frames),
+    ]
+
+    def fake_run(frames, src_w, src_h, scheduler, lock, backend, meter, gt_traj,
+                 person_cls=1, reid_assist=None):
+        r = RunResult()
+        if len(gt_traj) == len(long_frames):
+            r.pred_traj = dict(long_pred)
+            r.n_frames = len(long_frames)
+        else:
+            r.pred_traj = dict(short_pred)
+            r.n_frames = len(short_frames)
+        r.total_tiles = r.n_frames
+        return r
+
+    monkeypatch.setattr(trials_mod, "run", fake_run)
+    agg = run_all_trials(
+        frames_factory=lambda: iter([]),
+        src_w=1920, src_h=1080, gt_tracks=tracks,
+        backend_factory=lambda: _NullBackend(),
+        budget=300.0, fps=30.0, discovery_fps=2.0,
+    )
+    # sanity: long track has 3 losses all recovered, short has 1 loss not recovered
+    assert agg.per_trial[0].loss_events == 3
+    assert abs(agg.per_trial[0].recovery_success_rate - 1.0) < 1e-9
+    assert agg.per_trial[1].loss_events == 1
+    assert abs(agg.per_trial[1].recovery_success_rate - 0.0) < 1e-9
+    # legacy unweighted: (1.0 + 0.0) / 2 = 0.5
+    assert abs(agg.mean_recovery_success - 0.5) < 1e-9
+    # event-weighted: 3 recovered / 4 total loss events
+    assert abs(agg.recovery_success_ew - 0.75) < 1e-9
+
+
+def test_event_weighted_recovery_none_when_no_losses(monkeypatch):
+    """No loss events anywhere -> recovery_success_ew is None."""
+    tracks = [GtTrack(cls=1, track_id=1, frames={i: (0.1, 0.1, 0.2, 0.2) for i in range(10)})]
+
+    def fake_run(frames, src_w, src_h, scheduler, lock, backend, meter, gt_traj,
+                 person_cls=1, reid_assist=None):
+        r = RunResult()
+        r.pred_traj = dict(gt_traj)   # perfectly covered -> zero losses
+        r.n_frames = 10
+        r.total_tiles = 10
+        return r
+
+    monkeypatch.setattr(trials_mod, "run", fake_run)
+    agg = run_all_trials(
+        frames_factory=lambda: iter([]),
+        src_w=1920, src_h=1080, gt_tracks=tracks,
+        backend_factory=lambda: _NullBackend(),
+        budget=300.0, fps=30.0, discovery_fps=2.0,
+    )
+    assert agg.recovery_success_ew is None
+
+
 def test_no_reid_assist_factory_means_no_reid_stats(monkeypatch):
     """policy=none path: no reid_assist_factory -> run() gets reid_assist=None and
     per-trial reid stats are zero (frac_dets_embedded == 0)."""
