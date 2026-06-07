@@ -220,6 +220,9 @@ class _CountedHefBackend:
 def _run_mode_a(frames: list, crops: list[CropRect], hef_path: Path,
                 nms_thresh: float) -> tuple[list[list[list[tuple]]], int]:
     """Mode A — HefBackend only, no cache."""
+    # raw ids OK: cache bit-exactness validator — IDs pass through symmetrically
+    # across modes A/B/C; class_offset would shift all three identically and is
+    # irrelevant to the cache-fidelity comparison.
     inner = HefBackend(hef_path=str(hef_path), nms_score_threshold=nms_thresh)
     counted = _CountedHefBackend(inner)
     try:
@@ -244,6 +247,7 @@ def _run_mode_b(frames: list, crops: list[CropRect], hef_path: Path,
 
     Returns (pass1, pass2, pass1_chip_crop_calls, pass2_chip_crop_calls).
     """
+    # raw ids OK: cache bit-exactness validator (see _run_mode_a).
     inner = HefBackend(hef_path=str(hef_path), nms_score_threshold=nms_thresh)
     counted = _CountedHefBackend(inner)
     if cache_path.exists():
@@ -304,6 +308,7 @@ def _check_floor_quantise_hit(frames: list, hef_path: Path, nms_thresh: float,
     base = CropRect(x=100, y=100, w=640, h=480, mode="m")
     # Offset within q=4 bucket (100 // 4 == 25; 102 // 4 == 25).
     offset = CropRect(x=102, y=103, w=641, h=482, mode="m")
+    # raw ids OK: cache bit-exactness validator (see _run_mode_a).
     inner = HefBackend(hef_path=str(hef_path), nms_score_threshold=nms_thresh)
     counted = _CountedHefBackend(inner)
     store = SqliteCacheStore.open(cache_path)
