@@ -1,19 +1,21 @@
-"""Regression guard: every HEF backend constructed in a `tiling_lab.cli`
-module must pass `class_offset=` explicitly.
+"""Regression guard: every HEF backend constructed in a `tiling_lab.cli` or
+`tiling_lab.gt` module must pass `class_offset=` explicitly.
 
 The yolov8n_4_classes_vga HEF emits person=1/vehicle=2 ONLY when the backend is
 built with `class_offset=1` (unified convention, single source of truth in
 `hailo_tiling/classes.py`). Two weekend bugs (591f557, eae88c1) came from CLI
 construction sites silently defaulting to offset 0, shifting person -> 0. This
-test ast-walks every module under `tiling_lab/cli/` and fails if any call whose
-callee name ends with "HefBackend" omits the `class_offset` keyword.
+test ast-walks every module under `tiling_lab/cli/` and `tiling_lab/gt/` and
+fails if any call whose callee name ends with "HefBackend" omits the
+`class_offset` keyword.
 """
 import ast
 from pathlib import Path
 
 import pytest
 
-CLI_DIR = Path(__file__).resolve().parents[1] / "cli"
+_LAB_DIR = Path(__file__).resolve().parents[1]
+SCAN_DIRS = (_LAB_DIR / "cli", _LAB_DIR / "gt")
 
 
 def _callee_name(func: ast.expr) -> str | None:
@@ -27,8 +29,9 @@ def _callee_name(func: ast.expr) -> str | None:
 
 def _hef_backend_calls():
     """Yield (path, lineno, has_class_offset) for every *HefBackend(...) call
-    constructed in a tiling_lab.cli module."""
-    for py in sorted(CLI_DIR.glob("*.py")):
+    constructed in a tiling_lab.cli or tiling_lab.gt module."""
+    pys = sorted(py for d in SCAN_DIRS for py in d.glob("*.py"))
+    for py in pys:
         tree = ast.parse(py.read_text(), filename=str(py))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -39,20 +42,20 @@ def _hef_backend_calls():
                 yield py, node.lineno, has_offset
 
 
-def test_cli_has_hef_backend_construction_sites():
+def test_has_hef_backend_construction_sites():
     """Sanity: the scan finds at least one construction site (else the guard is
     silently vacuous)."""
     calls = list(_hef_backend_calls())
-    assert calls, "no *HefBackend(...) calls found under tiling_lab/cli/"
+    assert calls, "no *HefBackend(...) calls found under tiling_lab/cli/ or tiling_lab/gt/"
 
 
-def test_every_cli_hef_backend_passes_class_offset():
+def test_every_hef_backend_passes_class_offset():
     missing = [
         f"{py.name}:{lineno}"
         for py, lineno, has_offset in _hef_backend_calls()
         if not has_offset
     ]
     assert not missing, (
-        "tiling_lab.cli HEF backend construction sites missing class_offset= : "
+        "tiling_lab HEF backend construction sites missing class_offset= : "
         + ", ".join(missing)
     )
