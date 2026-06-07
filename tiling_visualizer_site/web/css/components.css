@@ -702,6 +702,20 @@ input[type="range"]:active::-moz-range-thumb {
   gap: var(--sp-1);
 }
 
+/* RUNS header: title + All/None clustered left, TILES column label right
+   (sits above the per-row tile-source radios). */
+.runs-head-left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.runs-tiles-label {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  cursor: help;
+}
+
 .text-btn {
   background: none;
   border: none;

@@ -166,6 +166,11 @@ export function initRunsPanel(store) {
     runsPanel.innerHTML = '';
     const header = document.createElement('div');
     header.className = 'panel__header';
+    // Left cluster: title + All/None actions together; right: a TILES column
+    // label sitting above the per-row tile-source radios (clarifies what the
+    // rightmost radio column does).
+    const left = document.createElement('span');
+    left.className = 'runs-head-left';
     const title = document.createElement('span');
     title.textContent = `RUNS (${runs.length})`;
     const actions = document.createElement('span');
@@ -176,8 +181,14 @@ export function initRunsPanel(store) {
     noneBtn.addEventListener('click', () => store.set({ enabledRuns: [] }));
     actions.appendChild(allBtn);
     actions.appendChild(noneBtn);
-    header.appendChild(title);
-    header.appendChild(actions);
+    left.appendChild(title);
+    left.appendChild(actions);
+    const tilesLabel = document.createElement('span');
+    tilesLabel.className = 'runs-tiles-label';
+    tilesLabel.textContent = 'Tiles';
+    tilesLabel.title = 'Which run’s tile rectangles are drawn on the video (one at a time)';
+    header.appendChild(left);
+    header.appendChild(tilesLabel);
     runsPanel.appendChild(header);
 
     if (!runs.length) {
