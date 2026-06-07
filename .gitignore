@@ -36,14 +36,20 @@ txrx.key
 # GStreamer Shark profiling output
 gstshark_*/
 
-# Tiling benchmark run outputs + preview cache
-tiling_benchmark/pxt_runs/
-tiling_benchmark/pxt_runs_clean/
-tiling_benchmark/pxt_runs_yolov8m/
+# Tiling benchmark run outputs + preview cache (frozen tiling_benchmark dir)
+tiling_benchmark/pxt_runs*/
 
 # Warmed tile caches (Plan 6) — large runtime artifacts, not source.
 .tile_cache/
 
-# Ablation per-config frames.json are large reproducible artifacts; keep only
-# the committed ablation_table.md summaries.
-dynamic_tiling/runs/ablation_*/*.frames.json
+# GT-generation venv (large, never source)
+.venv_gt/
+
+# tiling_lab run artifacts: large, regenerable caches/frames dumps/gt trees.
+# Ignore everything under runs/ EXCEPT the committed *.md summaries
+# (BASELINE.md, ablation_table.md, legacy_dense/README.md, …). The
+# unignore-dir pattern is REQUIRED so git descends into subdirs to find the
+# *.md exception. Already-tracked files are unaffected by gitignore.
+tiling_lab/runs/**
+!tiling_lab/runs/**/
+!tiling_lab/runs/**/*.md
