@@ -54,9 +54,14 @@ def probe_video(path: Path) -> dict:
 
 
 def transcode_cmd(src: Path, dst: Path) -> list[str]:
+    # -g 30 / no scenecut: keyframe every second so the browser can seek and
+    # STEP BACKWARDS cheaply (default ~250-frame GOP makes reverse frame-step
+    # re-decode seconds of video per step). Costs some bitrate; worth it for
+    # a frame-scrubbing tool.
     return ["ffmpeg", "-y", "-i", str(src),
             "-vf", "scale=1920:-2", "-c:v", "libx264", "-preset", "slow",
-            "-crf", "22", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-crf", "22", "-g", "30", "-sc_threshold", "0",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             "-an", str(dst)]
 
 

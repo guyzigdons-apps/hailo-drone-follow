@@ -33,6 +33,7 @@ class TestTranscodeCmd(unittest.TestCase):
         self.assertIn("scale=1920:-2", joined)
         self.assertIn("yuv420p", joined)
         self.assertIn("-an", joined)
+        self.assertIn("-g 30", joined)          # 1s GOP: cheap backward stepping
 
     def test_needs_transcode(self):
         with mock.patch.object(Path, "exists", return_value=False):
