@@ -25,18 +25,30 @@ def interp_track_gaps(tracks, *, track_ids, max_gap):
 
 
 def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31,
-                          max_iter=20, anchor="top"):
+                          max_iter=20, anchor="top", choice_counts=None):
     """Restore detector-truncated bbox heights on each track in track_ids.
 
-    When a detection boxes only part of an object its height collapses while one
-    edge stays put. For each frame whose height is below ``min_ratio`` * the
-    local windowed-median height, the height is reset to that local median while
-    x and width are preserved and one vertical edge is held:
+    Bboxes are (xmin, ymin, w, h) top-left normalized (the format produced by
+    ``gt_mot`` and stored in gt_tracks.json: the first vertical value is the TOP
+    edge ymin, NOT a centre). When a detection boxes only part of an object its
+    height collapses while one edge stays put. For each frame whose height is
+    below ``min_ratio`` * the local windowed-median height, the height is reset
+    to that local median while x and width are preserved and one vertical edge
+    is held:
 
     - ``anchor="top"`` (default) holds the top edge (ymin) -- the legs were cut,
-      so the box grows back DOWNWARD to the feet.
+      so the box grows back DOWNWARD to the feet: new ymin = ymin (unchanged).
     - ``anchor="bottom"`` holds the bottom edge (ymin + h) -- the head was cut,
-      so the box grows back UPWARD over the head.
+      so the box grows back UPWARD over the head: new ymin = (ymin + h) - median.
+    - ``anchor="auto"`` decides PER FRAME which edge to hold. Some clips truncate
+      heads in some frames and legs in others, so a single global anchor is wrong
+      for the minority by construction. For each flagged frame the top edge
+      (ymin) and bottom edge (ymin + h) are each compared against their own
+      windowed-median edge position (same ``window``); the edge that moved LESS
+      is held (it is the stable, un-truncated edge) and the box grows toward the
+      other. If ``choice_counts`` (a dict) is given, it is updated in place with
+      ``"auto_top"`` / ``"auto_bottom"`` tallies of the per-frame holds (summed
+      across all selected tracks and iterations) for provenance recording.
 
     ``window`` (odd) sets the centered median window so genuine scale change
     (object walking nearer/farther) is tracked rather than flattened.
@@ -45,8 +57,7 @@ def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31,
     median, which can expose the shoulders of a gradual dip, so the pass repeats
     until no frame is below the threshold (or ``max_iter`` is hit). Heights only
     ever rise (capped at the local median), so this terminates. Tracks outside
-    track_ids pass through unchanged. Assumes (xmin, ymin, w, h) top-left
-    normalized bboxes."""
+    track_ids pass through unchanged."""
     ids = set(track_ids)
     half = window // 2
     out = []
@@ -58,12 +69,24 @@ def despike_track_heights(tracks, *, track_ids, min_ratio=0.7, window=31,
         frames = dict(t.frames)
         for _ in range(max_iter):
             heights = [frames[f][3] for f in fis]
+            tops = [frames[f][1] for f in fis]
+            bottoms = [frames[f][1] + frames[f][3] for f in fis]
             changed = False
             for i, f in enumerate(fis):
-                local_med = statistics.median(heights[max(0, i - half):i + half + 1])
+                sl = slice(max(0, i - half), i + half + 1)
+                local_med = statistics.median(heights[sl])
                 x, y, w, h = frames[f]
                 if h < min_ratio * local_med:
-                    ny = y + h - local_med if anchor == "bottom" else y
+                    if anchor == "auto":
+                        med_top = statistics.median(tops[sl])
+                        med_bot = statistics.median(bottoms[sl])
+                        hold_bottom = abs((y + h) - med_bot) < abs(y - med_top)
+                        if choice_counts is not None:
+                            key = "auto_bottom" if hold_bottom else "auto_top"
+                            choice_counts[key] = choice_counts.get(key, 0) + 1
+                    else:
+                        hold_bottom = anchor == "bottom"
+                    ny = y + h - local_med if hold_bottom else y
                     frames[f] = (x, ny, w, local_med)
                     changed = True
             if not changed:

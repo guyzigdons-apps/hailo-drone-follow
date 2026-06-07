@@ -128,6 +128,68 @@ def test_despike_default_anchor_is_top_unchanged():
     assert got[20] == (0.5, 0.7, 0.02, 0.07)  # ymin held, grows down
 
 
+def test_despike_auto_picks_correct_edge_for_mixed_truncation():
+    # One track that truncates the HEAD in one frame (top edge moves down ->
+    # bottom is the stable edge -> auto must HOLD BOTTOM, grow up) and the LEGS
+    # in another (bottom edge moves up -> top is stable -> HOLD TOP, grow down).
+    # Steady box: ymin=0.70, h=0.10 -> bottom edge 0.80.
+    frames = {i: (0.5, 0.70, 0.02, 0.10) for i in range(41)}
+    # head cut at frame 15: top edge dropped to 0.76, bottom stays at 0.80
+    frames[15] = (0.5, 0.76, 0.02, 0.04)
+    # leg cut at frame 25: top stays at 0.70, bottom rose to 0.74
+    frames[25] = (0.5, 0.70, 0.02, 0.04)
+    counts = {}
+    out = despike_track_heights([_t(3, 1, frames)], track_ids=[3],
+                                min_ratio=0.7, window=31, anchor="auto",
+                                choice_counts=counts)
+    got = out[0].frames
+    # both restored to local median height (0.10)
+    assert abs(got[15][3] - 0.10) < 1e-9
+    assert abs(got[25][3] - 0.10) < 1e-9
+    # head-cut frame 15: bottom edge held at 0.80 (grew UPWARD)
+    assert abs((got[15][1] + got[15][3]) - 0.80) < 1e-9
+    # leg-cut frame 25: top edge held at 0.70 (grew DOWNWARD)
+    assert abs(got[25][1] - 0.70) < 1e-9
+    # one of each hold recorded for provenance
+    assert counts == {"auto_top": 1, "auto_bottom": 1}
+
+
+def test_despike_auto_holds_top_for_real_0013_leg_cut():
+    # Mirrors the real clip-0013 track-5 spike (top-left format): a frame whose
+    # BOTTOM edge dropped (legs cut) while the top edge (ymin ~0.4432) is stable.
+    # The previous global anchor="bottom" lifted ymin to ~0.4078 (a visible
+    # jump). anchor="auto" must hold the top edge so ymin stays ~0.4432.
+    frames = {i: (0.61, 0.4400 - 0.0006 * i, 0.035, 0.183) for i in range(41)}
+    # spike frame: ymin barely moves but bottom edge collapses (h 0.147)
+    frames[20] = (0.61, 0.4432, 0.035, 0.147)
+    counts = {}
+    out = despike_track_heights([_t(5, 1, frames)], track_ids=[5],
+                                min_ratio=0.9, window=31, anchor="auto",
+                                choice_counts=counts)
+    got = out[0].frames
+    # height restored toward local median (~0.183)
+    assert got[20][3] > 0.18
+    # top edge held: ymin stays at 0.4432, NOT lifted to ~0.4078
+    assert abs(got[20][1] - 0.4432) < 1e-9
+    assert counts.get("auto_top", 0) == 1 and counts.get("auto_bottom", 0) == 0
+
+
+def test_despike_anchor_preserves_held_edge_exactly_top_left():
+    # Regression: in top-left format the held edge must be byte-exact.
+    # bottom anchor preserves ymin+h; top anchor preserves ymin.
+    base = {i: (0.3, 0.50, 0.04, 0.20) for i in range(41)}
+    base[20] = (0.3, 0.62, 0.04, 0.08)   # bottom edge held at 0.70
+    out_b = despike_track_heights([_t(7, 1, base)], track_ids=[7],
+                                  min_ratio=0.7, window=31, anchor="bottom")
+    g = out_b[0].frames[20]
+    assert abs((g[1] + g[3]) - 0.70) < 1e-12   # bottom edge 0.62+0.08 preserved
+    top = {i: (0.3, 0.50, 0.04, 0.20) for i in range(41)}
+    top[20] = (0.3, 0.50, 0.04, 0.08)
+    out_t = despike_track_heights([_t(7, 1, top)], track_ids=[7],
+                                  min_ratio=0.7, window=31, anchor="top")
+    assert out_t[0].frames[20][1] == 0.50   # top edge held exactly
+
+
 def test_despike_only_touches_selected_tracks_and_respects_ratio():
     short = {i: (0.5, 0.7, 0.02, 0.07) for i in range(41)}
     short[20] = (0.5, 0.7, 0.02, 0.062)   # 0.886*median -> above 0.7 ratio, keep
