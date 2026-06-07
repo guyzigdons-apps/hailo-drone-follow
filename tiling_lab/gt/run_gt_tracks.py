@@ -44,9 +44,16 @@ def _overlay_doc(tracks, label: str) -> dict:
     return {"label": label, "frames": frames}
 
 
-def overlay_doc_by_id(tracks, label: str = "gt-by-id") -> dict:
+def overlay_doc_by_id(tracks, label: str = "gt-by-id",
+                      tiles: list[dict] | None = None) -> dict:
     """Overlay where each box's label is '<class>#<track_id>' so the viewer shows
-    track identity (not just class)."""
+    track identity (not just class).
+
+    When ``tiles`` is given (a list of ``{x,y,w,h,category}`` dicts, the same
+    schema ``replay.emit_frames_json`` writes), the static tile set is placed
+    on EVERY emitted frame so the viewer can draw the GT dense-pass tiles as a
+    debugging aid. Default (``None``) keeps the historical empty ``tiles`` list.
+    """
     per_frame: dict = {}
     for t in tracks:
         name = f"{cls_label(t.cls)}#{t.track_id}"
@@ -54,7 +61,8 @@ def overlay_doc_by_id(tracks, label: str = "gt-by-id") -> dict:
             per_frame.setdefault(f, []).append(
                 {"label": name, "confidence": 1.0, "bbox": list(b),
                  "track_id": t.track_id})
-    frames = [{"frame": f, "detections": per_frame[f], "tiles": []}
+    tiles_out = list(tiles) if tiles else []
+    frames = [{"frame": f, "detections": per_frame[f], "tiles": tiles_out}
               for f in sorted(per_frame)]
     return {"label": label, "frames": frames}
 

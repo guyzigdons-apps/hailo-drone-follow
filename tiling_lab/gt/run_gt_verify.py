@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .gt_clean import clean_tracks
 from .gt_review import merge_and_flag, apply_decisions, ReviewCase
+from .gt_tiles import load_dense_tiles
 from .run_gt_tracks import tracks_to_doc, doc_to_tracks, overlay_doc_by_id
 
 
@@ -54,9 +55,24 @@ def _read_frames(video, frame_idxs):
     return out
 
 
+def _overlay_tiles(args):
+    """Static GT dense-pass tile set to draw on every overlay frame, or None.
+
+    Defaults to reconstructing from --dense when --tiles is set; an explicit
+    --tiles-from overrides the source (useful in --finalize, which has no
+    --dense)."""
+    if not getattr(args, "tiles", False):
+        return None
+    src = getattr(args, "tiles_from", None) or getattr(args, "dense", None)
+    if src is None:
+        raise SystemExit("--tiles requires --dense or --tiles-from")
+    return load_dense_tiles(src)
+
+
 def _build(args):
     from .gt_mot import build_raw_tracks_from_video, make_botsort
     from .gt_render_review import render_queue
+    tiles = _overlay_tiles(args)
     doc = json.loads(args.dense.read_text())
     raw = build_raw_tracks_from_video(doc, str(args.video),
                                       tracker_factory=make_botsort,
@@ -67,7 +83,8 @@ def _build(args):
     out = Path(args.outdir); out.mkdir(parents=True, exist_ok=True)
     (out / "gt_tracks.json").write_text(json.dumps(tracks_to_doc(merged, clip=Path(args.video).stem)))
     (out / "review_queue.json").write_text(json.dumps(cases_to_doc(cases), indent=2))
-    (out / "overlay_by_id.frames.json").write_text(json.dumps(overlay_doc_by_id(merged)))
+    (out / "overlay_by_id.frames.json").write_text(
+        json.dumps(overlay_doc_by_id(merged, tiles=tiles)))
     frames = _read_frames(args.video, [c.frame for c in cases])
     paths = render_queue(frames, cases, out / "review")
     print(f"tracks: {len(merged)} | review cases: {len(cases)} | images: {len(paths)}")
@@ -77,13 +94,15 @@ def _build(args):
 
 def _finalize(args):
     out = Path(args.outdir)
+    tiles = _overlay_tiles(args)
     tracks = doc_to_tracks(json.loads((out / "gt_tracks.json").read_text()))
     cases = doc_to_cases(json.loads((out / "review_queue.json").read_text()))
     decisions = {int(k): v for k, v in json.loads(Path(args.decisions).read_text()).items()}
     final = apply_decisions(tracks, cases, decisions)
     final_doc = tracks_to_doc(final, clip=out.name)
     (out / "gt_tracks.verified.json").write_text(json.dumps(final_doc))
-    (out / "overlay_verified.frames.json").write_text(json.dumps(overlay_doc_by_id(final)))
+    (out / "overlay_verified.frames.json").write_text(
+        json.dumps(overlay_doc_by_id(final, tiles=tiles)))
     print(f"verified tracks: {len(final)}")
     print(f"verified GT : {out/'gt_tracks.verified.json'}")
 
@@ -100,6 +119,11 @@ def main():
     ap.add_argument("--flag-iou", type=float, default=0.3)
     ap.add_argument("--finalize", action="store_true")
     ap.add_argument("--decisions", type=Path)
+    ap.add_argument("--tiles", action="store_true",
+                    help="draw the static GT dense-pass tile set on every "
+                         "overlay frame (viewer debug aid)")
+    ap.add_argument("--tiles-from", type=Path, default=None,
+                    help="dense run .json for the tile set (defaults to --dense)")
     args = ap.parse_args()
     if args.finalize:
         _finalize(args)
