@@ -49,9 +49,11 @@
 | Strategy | Result | Evidence | Status |
 |---|---|---|---|
 | Dense 12x9 + extras → BoT-SORT → review queue → corrections chain → lock | Produced 0025/0026/0027 + round-2 GT; replayable provenance | gt-generation-guide | **ADOPTED** |
-| Single `center_vga_3x` rescue rect in dense config | SUSPECT: on close clips NMS flips between scale sources at rect boundary → bbox jumps (0013 frame ~139) | forensics in flight | **OPEN** → likely replace with whole-frame vga-3x grid for close clips |
-| Despike anchor=top (grow down) for feet-cut | Worked for 0025-class | 0025 chain | **ADOPTED** |
-| Despike anchor=bottom (grow up) for head-cut + threshold 0.9 + h-only smooth | Close clips truncate HEADS; 0.7 threshold too lax (left 150 frames); 0.9+smooth → jitter ↓8–16× | `de85700`; 0013 v2 | **ADOPTED** for close clips (0012 locked at 0.7 — re-check pending) |
+| "Frame-sync glitch" hypothesis for 0013 bbox jumps | DISPROVEN: uniform PTS both files, 0 dup/drop, decoders aligned, transcode timing exact | 0013 forensics (PNGs /tmp/glitch_0013) | **REJECTED** |
+| vga3-rect NMS-flip hypothesis for the jumps | Dense dets were CORRECT at jump frames — rect not the culprit for THIS artifact. (BoT-SORT did match short leg-cut dets, so multiscale dense tiles remain a requested improvement) | 0013 forensics | **REJECTED** for the jump; multiscale dense config still **OPEN** (Gilad request) |
+| Despike with a single global anchor | ARTIFACT SOURCE: 0013 mixes head-cut (majority, long runs) + leg-cut (every ~3rd frame); anchor=bottom lifted leg-cut boxes over the head (cy +0.035, reproduced to 4 decimals). PLUS center-vs-topleft convention bug in the anchor math | 0013 forensics; fix in flight | **REJECTED** → per-frame **auto anchor** (hold the stabler edge) + convention fix |
+| Despike threshold 0.9 + h-only smooth (close clips) | 0.7 too lax (left 150 frames); 0.9+smooth → jitter ↓8–16× | `de85700`; 0013 v2 | **ADOPTED** (anchor choice superseded by auto) |
+| GT tiles rendered in overlay viewer | 116-tile dense layout visible for debug; render-only regen safe on locked dirs | `b271aff` | **ADOPTED** |
 | `max_gap` = frame-index distance, NOT missing-frame count | "12 missing frames → max-gap 12" silently no-ops | 0013 interp | **ADOPTED** (gotcha documented) |
 | Mandatory smoothing/deglitch in finalize | requested 2026-06-07 ("enforce tracking and smoothing") | — | **OPEN** (implementation pending forensics) |
 | Clips don't all need 3 FOVs — close clips use native FOV | 0012/0013 single-variant GT in minutes | round 2 | **ADOPTED** |
