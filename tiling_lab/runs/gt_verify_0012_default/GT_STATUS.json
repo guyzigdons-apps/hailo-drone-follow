@@ -1,0 +1,31 @@
+{
+ "status": "approved",
+ "locked": true,
+ "clip": "DJI_20260430104732_0012_D_rotated",
+ "fov": "default",
+ "approved_on": "2026-06-07",
+ "approved_by": "Gilad Nahor",
+ "gt_file": "gt_tracks.verified.json",
+ "sha256": "e5fe5e916fd92c60308f8a9185b979a1b61ec502b6f500a309b355bd3b747277",
+ "tracks": {
+  "person": [
+   1,
+   2
+  ],
+  "vehicle": [
+   3,
+   4
+  ]
+ },
+ "id_scheme": {
+  "1": "person-a",
+  "2": "person-b",
+  "3": "vehicle-a",
+  "4": "vehicle-b"
+ },
+ "corrections_chain": [
+  "despike_track_heights",
+  "interp_track_gaps"
+ ],
+ "note": "Close-range ReID clip, default (native) FOV. Approved after despike(anchor=bottom, head-cut fix, 18 frames) + interp(track 2, 12 frames). Zero review cases."
+}

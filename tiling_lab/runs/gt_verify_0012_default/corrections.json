@@ -1,0 +1,21 @@
+{
+  "despike_track_heights": {
+    "track_ids": [
+      1,
+      2
+    ],
+    "min_ratio": 0.7,
+    "window": 31,
+    "anchor": "bottom",
+    "source": "gt_tracks.verified.json"
+  },
+  "interp_track_gaps": [
+    {
+      "track_ids": [
+        2
+      ],
+      "max_gap": 13,
+      "source": "gt_tracks.verified.json"
+    }
+  ]
+}
