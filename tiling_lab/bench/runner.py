@@ -22,13 +22,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from ..aggregator.aggregator import Aggregator
-from ..aggregator.boundary_strip import BoundaryStripFilter
-from ..classes import PERSON
-from ..backends.replay import CacheMissError, ReplayBackend
-from ..cache.hashing import tile_norm_to_source_px
-from ..cache.store import SqliteCacheStore
-from ..types import CropRect, Det
+from hailo_tiling.aggregator.aggregator import Aggregator
+from hailo_tiling.aggregator.boundary_strip import BoundaryStripFilter
+from hailo_tiling.classes import PERSON
+from hailo_tiling.backends.replay import CacheMissError, ReplayBackend
+from hailo_tiling.cache.hashing import tile_norm_to_source_px
+from hailo_tiling.cache.store import SqliteCacheStore
+from hailo_tiling.types import CropRect, Det
+
+# TargetLock wraps the production ByteTracker (drone_follow) for the offline benchmark.
+from tiling_lab.harness.target_lock import TargetLock
+
 from .config import BenchConfig
 from .grid import grid_to_static_tiles
 
@@ -190,7 +194,7 @@ def run_static_config_crop_ordered(
     agg = _make_aggregator(cfg)
 
     # Per-crop ordered dets-json streams.
-    from ..cache.store import _json_to_dets
+    from hailo_tiling.cache.store import _json_to_dets
 
     streams: list[list] = []
     n_frames = None
@@ -264,15 +268,8 @@ def run_dynamic_config(
         raise ValueError("run_dynamic_config is for dynamic configs only")
 
     from hailo_tiling.dynamic.scheduler import TileScheduler
-    # TargetLock wraps the production ByteTracker (drone_follow) for the offline
-    # benchmark; it lives in the research workspace. This benchmark-only runner
-    # path therefore reaches into tiling_lab.harness — a lab dependency, lazily
-    # imported so the installed library never pulls it in at module load. See
-    # the tiling-lab restructure design (2026-06-07); the architecture-rule test
-    # exempts this benchmark seam (or relocates run_dynamic_config to the lab).
-    from tiling_lab.harness.target_lock import TargetLock
 
-    from ..budget import BudgetMeter
+    from hailo_tiling.budget import BudgetMeter
 
     src_w = int(video_meta["src_w"])
     src_h = int(video_meta["src_h"])

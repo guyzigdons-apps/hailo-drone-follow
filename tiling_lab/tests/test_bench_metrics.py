@@ -1,7 +1,7 @@
-"""Tests for hailo_tiling.bench.metrics (matched-compute delta — Night-2 B3)."""
+"""Tests for tiling_lab.bench.metrics (matched-compute delta — Night-2 B3)."""
 from __future__ import annotations
 
-from hailo_tiling.bench.metrics import (
+from tiling_lab.bench.metrics import (
     matched_compute_delta,
     recall_precision_vs_reference,
 )

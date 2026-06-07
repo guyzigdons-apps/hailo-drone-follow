@@ -1,4 +1,4 @@
-"""Tests for the hailo-tiling-bench CLI + ablation table (Plan 6 Task B3)."""
+"""Tests for the tiling-lab-bench CLI + ablation table (Plan 6 Task B3)."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ import pytest
 
 from hailo_tiling.cache.hashing import tile_norm_to_source_px
 from hailo_tiling.cache.store import SqliteCacheStore
-from hailo_tiling.cli import bench
+from tiling_lab.bench import cli as bench
 from hailo_tiling.types import Det
 from hailo_tiling.geometry import grid_to_static_tiles
 

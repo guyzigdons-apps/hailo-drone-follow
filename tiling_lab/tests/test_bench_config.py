@@ -1,7 +1,7 @@
 """Tests for the ablation bench config matrix (Plan 6 Task B1)."""
 from __future__ import annotations
 
-from hailo_tiling.bench.config import BenchConfig, default_matrix
+from tiling_lab.bench.config import BenchConfig, default_matrix
 
 
 def test_default_matrix_has_expected_rows():

@@ -89,8 +89,8 @@ def warm_dynamic(
 ) -> dict:
     from hailo_tiling.backends.caching import CachingBackend
     from hailo_tiling.backends.gst_cropper import GstCropperBackend
-    from hailo_tiling.bench.config import default_matrix
-    from hailo_tiling.bench.runner import run_dynamic_config
+    from tiling_lab.bench.config import default_matrix
+    from tiling_lab.bench.runner import run_dynamic_config
     from hailo_tiling.cache.hashing import file_sha256
     from hailo_tiling.cache.store import SqliteCacheStore
 

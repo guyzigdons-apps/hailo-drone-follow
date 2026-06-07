@@ -1,4 +1,4 @@
-"""hailo-tiling-bench — chip-free ablation harness CLI (Plan 6 Task B3).
+"""tiling-lab-bench — chip-free ablation harness CLI (Plan 6 Task B3).
 
 Runs the ablation config matrix against a warmed source-pixel-keyed cache,
 writing one ``<config>.frames.json`` per config and an ``ablation_table.md``
@@ -10,7 +10,7 @@ The whole thing is chip-free: every config replays the warmed cache via
 GT) defines the recall/precision denominators (IoU-matched at 0.5).
 
 Usage:
-    hailo-tiling-bench --cache .tile_cache/0026__fov50__<sha>.sqlite3 \\
+    tiling-lab-bench --cache .tile_cache/0026__fov50__<sha>.sqlite3 \\
         --video /path/0026__fov50.mp4 [--configs default|name1,name2] \\
         [--max-frames N] [--out-dir runs/ablation_0026_fov50]
 """
@@ -22,17 +22,17 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Sequence
 
-from ..bench.config import BenchConfig, default_matrix
-from ..bench.metrics import matched_compute_delta, recall_precision_vs_reference
-from ..classes import PERSON, TRACKED_CLASSES
-from ..bench.runner import (
+from .config import BenchConfig, default_matrix
+from .metrics import matched_compute_delta, recall_precision_vs_reference
+from hailo_tiling.classes import PERSON, TRACKED_CLASSES
+from .runner import (
     ConfigResult,
     run_config,
     run_dynamic_config,
     run_static_config_crop_ordered,
 )
-from ..cache.store import SqliteCacheStore
-from ..types import Det
+from hailo_tiling.cache.store import SqliteCacheStore
+from hailo_tiling.types import Det
 
 
 def _frames_in_cache(store: SqliteCacheStore, ppv: int = 1) -> list[int]:
@@ -172,7 +172,7 @@ def _dynamic_rows_from_cache(
     the same GT trajectory used to warm; replay must report 0 misses."""
     import sys
 
-    from ..backends.replay import ReplayBackend
+    from hailo_tiling.backends.replay import ReplayBackend
 
     # The warmer lives in scripts/; import its GT-trajectory helper by path.
     scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
@@ -363,7 +363,7 @@ def run(
 
 
 def _build_argparser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="hailo-tiling-bench")
+    ap = argparse.ArgumentParser(prog="tiling-lab-bench")
     ap.add_argument("--cache", required=True, help="Warmed source-pixel-keyed SQLite cache.")
     ap.add_argument("--video", required=True, help="Source video (recorded in the table).")
     ap.add_argument("--configs", default="default",

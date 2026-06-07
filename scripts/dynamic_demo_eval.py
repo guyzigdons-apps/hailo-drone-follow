@@ -22,12 +22,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hailo_tiling.backends.replay import ReplayBackend
-from hailo_tiling.bench.config import default_matrix
-from hailo_tiling.bench.metrics import (
+from tiling_lab.bench.config import default_matrix
+from tiling_lab.bench.metrics import (
     matched_compute_delta,
     recall_precision_vs_reference,
 )
-from hailo_tiling.bench.runner import (
+from tiling_lab.bench.runner import (
     run_dynamic_config,
     run_static_config_crop_ordered,
 )

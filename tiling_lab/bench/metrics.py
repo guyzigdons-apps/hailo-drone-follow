@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Collection, Sequence
 
-from ..types import Det
+from hailo_tiling.types import Det
 
 
 def iou(a: Det, b: Det) -> float:

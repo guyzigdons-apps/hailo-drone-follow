@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from hailo_tiling.bench.config import BenchConfig
-from hailo_tiling.bench.runner import (
+from tiling_lab.bench.config import BenchConfig
+from tiling_lab.bench.runner import (
     run_config,
     run_dynamic_config,
     run_static_config_crop_ordered,

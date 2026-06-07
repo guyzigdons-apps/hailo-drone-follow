@@ -42,18 +42,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-# Viewer-support helpers (PreviewCache / phantom + containment merge) still live
-# in the frozen ``tiling_benchmark`` package — they are shared with the legacy
-# pxt/upscale runners that were NOT moved by the tiling_lab restructure. Import
-# them lazily so module import (and ``--help``) never reaches into
-# tiling_benchmark; only an actual viewer session needs them.
+# Viewer-support helpers (PreviewCache / phantom + containment merge) are sibling
+# modules in ``tiling_lab.viewer``. Import them lazily so that simply importing
+# this module (e.g. ``--help``) does not eagerly pull them in.
 def _load_preview_cache():
-    from tiling_benchmark.preview_cache import PreviewCache  # noqa: E402
+    from .preview_cache import PreviewCache
     return PreviewCache
 
 
 def _load_analyze():
-    from tiling_benchmark.analyze_pxt import containment_merge, is_phantom  # noqa: E402
+    from .analyze_pxt import containment_merge, is_phantom
     return containment_merge, is_phantom
 
 # Distinct BGR colours — matches bench/overlay_dets.py palette order.
