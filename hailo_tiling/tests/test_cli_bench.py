@@ -9,14 +9,14 @@ from hailo_tiling.cache.hashing import tile_norm_to_source_px
 from hailo_tiling.cache.store import SqliteCacheStore
 from hailo_tiling.cli import bench
 from hailo_tiling.types import Det
-from tiling_benchmark.tiling_record import _grid_to_static_tiles
+from hailo_tiling.geometry import grid_to_static_tiles
 
 _W, _H = 3840, 2160
 
 
 def _crops_for_grid(tx, ty, ov):
     out = []
-    for r in _grid_to_static_tiles(tx, ty, ov, ov):
+    for r in grid_to_static_tiles(tx, ty, ov, ov):
         x, y, w, h = (float(v) for v in r.split(",")[:4])
         out.append(tile_norm_to_source_px(x, y, w, h, _W, _H))
     return out

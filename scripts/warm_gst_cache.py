@@ -42,9 +42,9 @@ from typing import Sequence
 
 # Reuse the canonical pipeline construction + run loop from the replay gate.
 # (Same directory; import by path so this works whether or not scripts/ is a
-# package.) Also put the repo root on sys.path so the top-level
-# `tiling_benchmark` / `hailo_tiling` packages resolve when this script is run
-# directly (not just under pytest, which injects the rootdir).
+# package.) Also put the repo root on sys.path so top-level packages resolve
+# when this script is run directly (not just under pytest, which injects the
+# rootdir).
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent
 for _p in (str(_THIS_DIR), str(_REPO_ROOT)):
@@ -58,7 +58,7 @@ from hailo_tiling.cache.store import SqliteCacheStore  # noqa: E402
 
 # Single source of truth for the normalized-grid -> tiles definition (also
 # used by the ablation harness's replay-key computation, per the plan).
-from tiling_benchmark.tiling_record import _grid_to_static_tiles  # noqa: E402
+from hailo_tiling.geometry import grid_to_static_tiles  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -93,8 +93,8 @@ def parse_grid_spec(spec: str) -> list[tuple[int, int, float]]:
 
 def grid_to_tiles_static(nx: int, ny: int, overlap: float) -> str:
     """Expand one (nx, ny, overlap) grid to a ``tiles-static`` string using the
-    canonical :func:`_grid_to_static_tiles` (single grid definition)."""
-    rects = _grid_to_static_tiles(nx, ny, overlap, overlap)
+    canonical :func:`grid_to_static_tiles` (single grid definition)."""
+    rects = grid_to_static_tiles(nx, ny, overlap, overlap)
     return ";".join(rects)
 
 

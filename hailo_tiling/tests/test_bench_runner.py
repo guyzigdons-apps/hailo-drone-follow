@@ -45,11 +45,11 @@ def test_tile_norm_to_source_px_matches_cropper_rule_across_grids():
     """The Python replay key must equal the cropper/warmer source-pixel rule
     EXACTLY across the canonical grid set — the foundation of chip-free replay
     (Plan-5b proved 0 deviations)."""
-    from tiling_benchmark.tiling_record import _grid_to_static_tiles
+    from hailo_tiling.geometry import grid_to_static_tiles
 
     for (nx, ny) in [(1, 1), (2, 2), (3, 2), (3, 3), (4, 3), (6, 4), (8, 6), (12, 9)]:
         for ov in (0.0, 0.25):
-            for r in _grid_to_static_tiles(nx, ny, ov, ov):
+            for r in grid_to_static_tiles(nx, ny, ov, ov):
                 x, y, w, h = (float(v) for v in r.split(",")[:4])
                 cr = tile_norm_to_source_px(x, y, w, h, _W, _H)
                 assert (cr.x, cr.y, cr.w, cr.h) == _gate_px(x, y, w, h, _W, _H), (
@@ -163,9 +163,9 @@ def test_crop_ordered_replay_reconstructs_source_frames(tmp_path):
 
 
 def _crops_for_grid_2x2():
-    from tiling_benchmark.tiling_record import _grid_to_static_tiles
+    from hailo_tiling.geometry import grid_to_static_tiles
     out = []
-    for r in _grid_to_static_tiles(2, 2, 0.0, 0.0):
+    for r in grid_to_static_tiles(2, 2, 0.0, 0.0):
         x, y, w, h = (float(v) for v in r.split(",")[:4])
         out.append(tile_norm_to_source_px(x, y, w, h, _W, _H))
     return out
