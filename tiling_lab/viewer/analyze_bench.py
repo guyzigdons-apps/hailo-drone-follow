@@ -4,7 +4,7 @@ Treats one bench run as pseudo-ground-truth (typically the highest-recall
 multi-scale config) and scores one or more other runs against it.
 
 Usage:
-  python analyze_bench.py \
+  python -m tiling_lab.viewer.analyze_bench \
       --gt /tmp/tiling_bench_GT-multi-scale-3.frames.json \
       --pred /tmp/tiling_bench_1x1.frames.json \
       --pred /tmp/tiling_bench_3x2.frames.json \

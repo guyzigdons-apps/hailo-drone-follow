@@ -2,12 +2,12 @@
 
 How to build a locked, human-verified ground-truth (GT) track set for a clip, at
 each FOV, for the tile-scheduler experiment. This is the flow that produced the
-locked **clip 0025** GT (`dynamic_tiling/runs/gt_verify_0025_fov{50,60,70}/`).
+locked **clip 0025** GT (`tiling_lab/runs/gt_verify_0025_fov{50,60,70}/`).
 
 ## Principles (read first)
 
 - **Track person + vehicle only.** Never face or license-plate. Class ids are
-  `person=1`, `vehicle=2` (see `dynamic_tiling/classes.py`). The 4-class HEF
+  `person=1`, `vehicle=2` (see `hailo_tiling/classes.py`). The 4-class HEF
   emits an extra leading slot — the runners apply `class_offset` so decoded ids
   land on person=1/vehicle=2.
 - **Canonical id scheme — same physical object, same id across every FOV.** For
@@ -15,7 +15,7 @@ locked **clip 0025** GT (`dynamic_tiling/runs/gt_verify_0025_fov{50,60,70}/`).
   `5 car-bottom`. Align ids with `remap_track_ids` so cross-FOV comparison and
   reprojection line up.
 - **Every edit is a reproducible correction, never a hand-edit.** Each fix is a
-  pure function in `dynamic_tiling/gt_edit.py` (unit-tested) driven by a
+  pure function in `tiling_lab/gt/gt_edit.py` (unit-tested) driven by a
   `run_gt_*` CLI that records itself in `corrections.json`. The verified GT is
   regenerable from `gt_tracks.json` by replaying that chain.
 - **Build the tightest FOV first (fov50).** It has the highest pixel resolution
@@ -30,7 +30,7 @@ locked **clip 0025** GT (`dynamic_tiling/runs/gt_verify_0025_fov{50,60,70}/`).
 - `source setup_env.sh` (Hailo venv) for the dense detection pass.
 - The boxmot tracker lives in the isolated `./.venv_gt` (protects the prod
   pipeline from boxmot's torch). `run_gt_verify`'s track step uses it.
-- The clip prepared at each FOV via `tiling_benchmark/prepare_video.py`
+- The clip prepared at each FOV via `python -m tiling_lab.video.prepare_video`
   (center-crop + lanczos scale to 4K; fov70 = full source, fov60/50 tighter
   center crops). Output: `<clip>_prepared__fov{50,60,70}.mp4`.
 
@@ -53,10 +53,10 @@ avoids recompute.
 ## Step 2 — Build raw GT tracks + review queue (per FOV)
 
 ```bash
-python -m dynamic_tiling.run_gt_verify \
+python -m tiling_lab.gt.run_gt_verify \
     --dense <dense_dir>/pxt_GT-12x9-25-multi.frames.json \
     --video <clip>_prepared__fov50.mp4 \
-    --outdir dynamic_tiling/runs/gt_verify_<clip>_fov50
+    --outdir tiling_lab/runs/gt_verify_<clip>_fov50
 ```
 
 This dedups per-frame tiling fragments (IoMin NMS), tracks with BoT-SORT (CMC
@@ -69,10 +69,10 @@ annotated PNGs under `review/`.
 
 Look at the tracks and decide what's real. Two tools:
 
-- **Flagged cases** (zoomed PNGs): `python -m dynamic_tiling.gt_review_gui
+- **Flagged cases** (zoomed PNGs): `python -m tiling_lab.gt.gt_review_gui
   --outdir <dir>` — click Merge/Keep or Keep/Drop; see the general
   `human-image-review` skill.
-- **Whole-clip visual check:** `tiling_benchmark/overlay_viewer.py --video <mp4>
+- **Whole-clip visual check:** `python -m tiling_lab.viewer.overlay_viewer --video <mp4>
   --frames <dir>/overlay_by_id.frames.json:<label>` (shows every native track
   with its id; play it to spot splits, spurious tracks, drift, truncation).
 
@@ -88,15 +88,15 @@ Run the relevant `run_gt_*` CLIs in order; each reads/writes
 (later steps build on earlier ones). The 0025 chains:
 
 ```bash
-D=dynamic_tiling/runs/gt_verify_0025_fov60
-python -m dynamic_tiling.run_gt_drop          --outdir $D --track-ids 6
-python -m dynamic_tiling.run_gt_remap         --outdir $D --mapping 1:1,3:2,2:3,5:4
-python -m dynamic_tiling.run_gt_interp        --outdir $D --track-ids 1,2,3 --max-gap 25
-python -m dynamic_tiling.run_gt_despike       --outdir $D --track-ids 3 --min-ratio 0.8
-python -m dynamic_tiling.run_gt_crossfov_fill --outdir $D --track-id 4 \
-    --src-dir dynamic_tiling/runs/gt_verify_0025_fov50 --src-track-id 4 --src-fov 50 --dst-fov 60
-python -m dynamic_tiling.run_gt_restore_width --outdir $D --track-ids 2 --anchor left
-python -m dynamic_tiling.run_gt_smooth        --outdir $D --track-ids 2 --dims x,w --window 21
+D=tiling_lab/runs/gt_verify_0025_fov60
+python -m tiling_lab.gt.run_gt_drop          --outdir $D --track-ids 6
+python -m tiling_lab.gt.run_gt_remap         --outdir $D --mapping 1:1,3:2,2:3,5:4
+python -m tiling_lab.gt.run_gt_interp        --outdir $D --track-ids 1,2,3 --max-gap 25
+python -m tiling_lab.gt.run_gt_despike       --outdir $D --track-ids 3 --min-ratio 0.8
+python -m tiling_lab.gt.run_gt_crossfov_fill --outdir $D --track-id 4 \
+    --src-dir tiling_lab/runs/gt_verify_0025_fov50 --src-track-id 4 --src-fov 50 --dst-fov 60
+python -m tiling_lab.gt.run_gt_restore_width --outdir $D --track-ids 2 --anchor left
+python -m tiling_lab.gt.run_gt_smooth        --outdir $D --track-ids 2 --dims x,w --window 21
 ```
 
 ### Corrections reference
@@ -128,7 +128,7 @@ python -m dynamic_tiling.run_gt_smooth        --outdir $D --track-ids 2 --dims x
 - **Cross-FOV reprojection is exact and cheap.** Both FOVs are center crops of
   the same source scaled to the same 4K, so a normalized bbox maps affinely
   about centre: `new = 0.5 + (old-0.5)·s`, `w·=sx`, `h·=sy`, with
-  `s = crop(src)/crop(dst)` from `prepare_video.fov_to_crop_dims`. Validated
+  `s = crop(src)/crop(dst)` from `hailo_tiling.geometry.fov_to_crop_dims`. Validated
   against native detections to ~3e-4. Use it to fill people from fov50 into the
   wider FOVs; per-frame, so it works for moving objects too.
 - **Extending a parked object backward:** don't freeze (it would drift off).
@@ -138,7 +138,7 @@ python -m dynamic_tiling.run_gt_smooth        --outdir $D --track-ids 2 --dims x
 
 ## Step 5 — Re-review and iterate
 
-Re-render and watch: `overlay_viewer.py --video <mp4> --frames
+Re-render and watch: `python -m tiling_lab.viewer.overlay_viewer --video <mp4> --frames
 <dir>/overlay_verified.frames.json:<label>`. The viewer paces in real time
 (it subtracts per-frame render cost from the frame period). Iterate Step 4 until
 clean. Note: corrections that can run more than once per chain

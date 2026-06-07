@@ -11,7 +11,7 @@ person, do I need a 3x2 grid or a 6x4 grid?". Headline classes are
 HEF emits that the user cares about — 'car' is folded into 'vehicle').
 
 Usage:
-  python bench/analyze_pxt.py \\
+  python -m tiling_lab.viewer.analyze_pxt \\
       --gt /home/giladn/Videos/Drone/Training/pxt_runs/pxt_GT-12x9-25.frames.json \\
       --pred /home/giladn/Videos/Drone/Training/pxt_runs/pxt_1x1-native.frames.json \\
       --pred /home/giladn/Videos/Drone/Training/pxt_runs/pxt_3x2-native.frames.json \\
