@@ -16,7 +16,11 @@ export default function App() {
   const [detections, setDetections] = useState([]);
   const [followingId, setFollowingId] = useState(null);
   const [velocity, setVelocity] = useState(null);
-  const [videoDims, setVideoDims] = useState({ width: 0, height: 0 });
+  // Default to the camera's FHD aspect so the SVG overlay still renders
+  // when no MJPEG video is being pushed (e.g. native-pipeline mode where
+  // the C++ binary owns video over a separate UDP channel). The decoder
+  // overwrites this with the real frame size as soon as JPEGs arrive.
+  const [videoDims, setVideoDims] = useState({ width: 1920, height: 1080 });
   const [logsOpen, setLogsOpen] = useState(true);
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
@@ -24,6 +28,24 @@ export default function App() {
   const [perf, setPerf] = useState(null);
   const [paused, setPaused] = useState(false);
   const [diag, setDiag] = useState(null);
+  // Per-frame tiling stats from the Python subscriber. None until first SSE
+  // event with stats arrives. Used for the tile-boundary overlay legend +
+  // small-target verification readout.
+  const [tileStats, setTileStats] = useState(null);
+  const [showTiles, setShowTiles] = useState(false);
+  // Active tile geometry from SSE — populated once the server starts
+  // sending. Until then, fall back to the framework default (rendered for
+  // visual continuity; replaced as soon as a real event arrives).
+  const [tiles, setTiles] = useState([
+    { name: "TL", x: 0.0, y: 0.0, w: 0.6, h: 0.6 },
+    { name: "TR", x: 0.4, y: 0.0, w: 0.6, h: 0.6 },
+    { name: "BL", x: 0.0, y: 0.4, w: 0.6, h: 0.6 },
+    { name: "BR", x: 0.4, y: 0.4, w: 0.6, h: 0.6 },
+    { name: "FULL", x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
+  ]);
+  const [tileEditorOpen, setTileEditorOpen] = useState(false);
+  const [tileSpecDraft, setTileSpecDraft] = useState("");
+  const [tileApplyState, setTileApplyState] = useState({ status: "idle" });
   const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -57,6 +79,12 @@ export default function App() {
         setVelocity(data.velocity || null);
         setPerf(data.perf || null);
         setPaused(data.paused ?? false);
+        if (data.stats && typeof data.stats === "object") {
+          setTileStats(data.stats);
+        }
+        if (Array.isArray(data.tiles) && data.tiles.length) {
+          setTiles(data.tiles);
+        }
       } catch {
         // malformed event
       }
@@ -235,42 +263,47 @@ export default function App() {
           if (done) break;
           buffer = concat(buffer, value);
 
-          // Process all complete frames in the buffer
+          // Scan the buffer for ALL complete frames, then draw only the
+          // newest one — older frames are discarded. If we instead awaited
+          // createImageBitmap per frame, a single slow decode would let
+          // the network buffer fill with more frames, the next iteration
+          // would parse those too, and lag would grow without bound.
+          // Detections don't hit this because each SSE event is small;
+          // 43 KB JPEGs accumulate fast.
+          let latestJpeg = null;
+          let consumedTo = 0;
           while (true) {
-            // Find the first boundary
-            const bStart = indexOf(buffer, BOUNDARY);
+            const bStart = indexOf(buffer.subarray(consumedTo), BOUNDARY);
             if (bStart === -1) break;
-
-            // Find the end of headers after the boundary
-            const headerStart = bStart + BOUNDARY.length;
+            const absStart = consumedTo + bStart;
+            const headerStart = absStart + BOUNDARY.length;
             const headerEnd = indexOf(
               buffer.subarray(headerStart),
               HEADER_END
             );
             if (headerEnd === -1) break;
-
             const jpegStart = headerStart + headerEnd + HEADER_END.length;
-
-            // Find the next boundary to determine the end of JPEG data
             const nextBoundary = indexOf(
               buffer.subarray(jpegStart),
               BOUNDARY
             );
             if (nextBoundary === -1) break;
-
-            // Extract JPEG bytes (strip trailing \r\n before next boundary)
             let jpegEnd = jpegStart + nextBoundary;
             while (jpegEnd > jpegStart && (buffer[jpegEnd - 1] === 0x0a || buffer[jpegEnd - 1] === 0x0d)) {
               jpegEnd--;
             }
-            const jpegData = buffer.slice(jpegStart, jpegEnd);
+            latestJpeg = buffer.slice(jpegStart, jpegEnd);
+            // Advance past this frame's data so the next iteration looks
+            // at what comes after the next boundary marker.
+            consumedTo = jpegStart + nextBoundary;
+          }
+          if (consumedTo > 0) {
+            buffer = buffer.slice(consumedTo);
+          }
 
-            // Advance buffer past the current frame (keep from next boundary)
-            buffer = buffer.slice(jpegStart + nextBoundary);
-
-            // Draw the frame
+          if (latestJpeg) {
             try {
-              const blob = new Blob([jpegData], { type: "image/jpeg" });
+              const blob = new Blob([latestJpeg], { type: "image/jpeg" });
               const bmp = await createImageBitmap(blob);
               if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
                 canvas.width = bmp.width;
@@ -426,8 +459,178 @@ export default function App() {
   const vw = videoDims.width;
   const vh = videoDims.height;
 
+  const applyTileSpec = async (spec) => {
+    setTileApplyState({ status: "applying" });
+    try {
+      const res = await fetch("/api/tiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ spec }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setTileApplyState({
+          status: "error",
+          message: data.error || `HTTP ${res.status}`,
+        });
+        return;
+      }
+      setTileApplyState({
+        status: "applied",
+        message: `${data.tiles?.length ?? 0} tiles active`,
+      });
+      // Auto-close after a moment so the editor doesn't linger over the
+      // video once the apply succeeds.
+      setTimeout(() => {
+        setTileEditorOpen(false);
+        setTileApplyState({ status: "idle" });
+      }, 1500);
+    } catch (e) {
+      setTileApplyState({ status: "error", message: String(e) });
+    }
+  };
+
+  const TILE_PRESETS = [
+    {
+      label: "Default (4 quadrants + full)",
+      spec: "0,0,0.6,0.6;0.4,0,0.6,0.6;0,0.4,0.6,0.6;0.4,0.4,0.6,0.6;0,0,1,1",
+    },
+    {
+      label: "2×2 no overlap + full",
+      spec: "0,0,0.5,0.5;0.5,0,0.5,0.5;0,0.5,0.5,0.5;0.5,0.5,0.5,0.5;0,0,1,1",
+    },
+    {
+      label: "3×3 thirds + full",
+      spec:
+        "0,0,0.333,0.333;0.333,0,0.334,0.333;0.667,0,0.333,0.333;" +
+        "0,0.333,0.333,0.334;0.333,0.333,0.334,0.334;0.667,0.333,0.333,0.334;" +
+        "0,0.667,0.333,0.333;0.333,0.667,0.334,0.333;0.667,0.667,0.333,0.333;" +
+        "0,0,1,1",
+    },
+    {
+      label: "Centre crop + full",
+      spec: "0.25,0.25,0.5,0.5;0,0,1,1",
+    },
+  ];
+
   return (
     <div className="app">
+      {tileEditorOpen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          onClick={() => setTileEditorOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "#222",
+              color: "#fff",
+              padding: 20,
+              borderRadius: 6,
+              width: 540,
+              fontFamily: "monospace",
+              fontSize: 13,
+            }}
+          >
+            <div style={{ fontSize: 15, marginBottom: 10 }}>
+              Edit tiles (applies and restarts the pipeline — brief video
+              pause while the C++ binary respawns)
+            </div>
+            <div style={{ marginBottom: 8, opacity: 0.85 }}>
+              Format: <code>x,y,w,h;x,y,w,h;...</code> — all normalized [0,1]
+              to frame. Need ≥ 2 tiles.
+            </div>
+            <textarea
+              value={tileSpecDraft}
+              onChange={(e) => setTileSpecDraft(e.target.value)}
+              rows={4}
+              style={{
+                width: "100%",
+                background: "#111",
+                color: "#fff",
+                border: "1px solid #555",
+                padding: 6,
+                fontFamily: "monospace",
+                fontSize: 13,
+                boxSizing: "border-box",
+              }}
+              spellCheck={false}
+            />
+            <div style={{ marginTop: 8, marginBottom: 10 }}>
+              Presets:{" "}
+              {TILE_PRESETS.map((p, i) => (
+                <button
+                  key={i}
+                  onClick={() => setTileSpecDraft(p.spec)}
+                  style={{
+                    marginRight: 6,
+                    marginBottom: 4,
+                    background: "#444",
+                    color: "#fff",
+                    border: "1px solid #666",
+                    padding: "3px 8px",
+                    cursor: "pointer",
+                    fontFamily: "monospace",
+                    fontSize: 12,
+                  }}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            {tileApplyState.status === "error" && (
+              <div style={{ color: "#ff8080", marginBottom: 8 }}>
+                Error: {tileApplyState.message}
+              </div>
+            )}
+            {tileApplyState.status === "applied" && (
+              <div style={{ color: "#80f060", marginBottom: 8 }}>
+                Applied — {tileApplyState.message}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setTileEditorOpen(false)}
+                style={{
+                  background: "#333",
+                  color: "#fff",
+                  border: "1px solid #555",
+                  padding: "6px 12px",
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => applyTileSpec(tileSpecDraft)}
+                disabled={tileApplyState.status === "applying"}
+                style={{
+                  background: "#225",
+                  color: "#fff",
+                  border: "1px solid #557",
+                  padding: "6px 12px",
+                  cursor:
+                    tileApplyState.status === "applying"
+                      ? "wait"
+                      : "pointer",
+                }}
+              >
+                {tileApplyState.status === "applying"
+                  ? "Applying..."
+                  : "Apply"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="status-bar">
         <span className="status-text">
           {followingId != null
@@ -712,8 +915,109 @@ export default function App() {
           ref={canvasRef}
           className="video-feed"
         />
+        {/* Tile stats badge. Shows the per-frame detection count + smallest
+            bbox + per-tile attribution, plus toggles for the tile-boundary
+            overlay and the [edit tiles] modal. Only renders in native
+            pipeline mode (gated on tileStats being populated). */}
+        <div
+          style={{
+            position: "absolute",
+            top: 4,
+            right: 4,
+            background: "rgba(0,0,0,0.55)",
+            color: "#fff",
+            fontFamily: "monospace",
+            fontSize: 12,
+            lineHeight: 1.3,
+            padding: "4px 6px",
+            borderRadius: 3,
+            pointerEvents: "none",
+            zIndex: 5,
+          }}
+        >
+          {tileStats && (
+            <>
+              <div style={{ opacity: 0.8 }}>
+                n={tileStats.count}, min{" "}
+                {(tileStats.smallest_w * 100).toFixed(1)}×
+                {(tileStats.smallest_h * 100).toFixed(1)}%
+              </div>
+              <div style={{ opacity: 0.8 }}>
+                {Object.entries(tileStats.per_tile || {})
+                  .filter(([, c]) => c > 0)
+                  .map(([n, c]) => `${n}${c}`)
+                  .join(" ") || "(no dets)"}
+              </div>
+              <div
+                style={{
+                  marginTop: 4,
+                  cursor: "pointer",
+                  pointerEvents: "auto",
+                  textDecoration: "underline",
+                  opacity: 0.8,
+                }}
+                onClick={() => setShowTiles((v) => !v)}
+              >
+                {showTiles ? "[hide tiles]" : "[show tiles]"}
+              </div>
+              <div
+                style={{
+                  cursor: "pointer",
+                  pointerEvents: "auto",
+                  textDecoration: "underline",
+                  opacity: 0.8,
+                }}
+                onClick={() => {
+                  setTileSpecDraft(
+                    tiles
+                      .map((t) => `${t.x},${t.y},${t.w},${t.h}`)
+                      .join(";"),
+                  );
+                  setTileEditorOpen(true);
+                }}
+              >
+                [edit tiles]
+              </div>
+            </>
+          )}
+        </div>
         {vw > 0 && vh > 0 && (
           <svg className="overlay" viewBox={`0 0 ${vw} ${vh}`}>
+            {/* Tile-boundary overlay. Driven by the SSE `tiles` field so
+                custom geometries set via the editor render correctly.
+                Full-frame tiles (w==h==1) get a white stroke; everything
+                else gets yellow. Rendered first so detections draw on
+                top. Toggled via the "show tiles" badge link. */}
+            {showTiles &&
+              tiles.map((t) => {
+                const isFull = t.w >= 0.999 && t.h >= 0.999;
+                const color = isFull ? "#ffffff" : "#ffd54f";
+                return (
+                  <g key={`tile-${t.name}`}>
+                    <rect
+                      x={t.x * vw}
+                      y={t.y * vh}
+                      width={t.w * vw}
+                      height={t.h * vh}
+                      fill="none"
+                      stroke={color}
+                      strokeWidth={2}
+                      strokeDasharray="6 4"
+                      opacity={0.55}
+                    />
+                    <text
+                      x={t.x * vw + 6}
+                      y={t.y * vh + 18}
+                      fill={color}
+                      fontSize={14}
+                      fontFamily="monospace"
+                      opacity={0.75}
+                    >
+                      {t.name}
+                    </text>
+                  </g>
+                );
+              })}
             {detections.map((det, i) => {
               const isFollowing =
                 det.id != null && det.id === followingId;
