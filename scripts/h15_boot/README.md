@@ -73,6 +73,9 @@ DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0"
 # Bench testing with Pixhawk (auto-OFFBOARD, no GCS):
 DRONE_FOLLOW_ARGS="--serial /dev/ttyACM0 --auto-offboard"
 
+# SITL on the same machine (auto-OFFBOARD over UDP):
+DRONE_FOLLOW_ARGS="--auto-offboard"
+
 # PX4 SITL on PC over UDP:
 DRONE_FOLLOW_ARGS=""
 

@@ -55,6 +55,11 @@ class SharedUIState:
         self._paused: bool = False
         self._frame_jpeg: Optional[bytes] = None
         self._frame_snapshot: Optional[dict] = None
+        # Active tile geometry — populated by drone_follow_h15.py at startup
+        # and replaced on /api/tiles POST. Read by the SSE handler so the
+        # UI can render the overlay against whatever's currently in use.
+        # Each entry: (name, x, y, w, h).
+        self._tiles: list = []
         self._velocity = {
             "forward_m_s": 0.0,
             "down_m_s": 0.0,
@@ -67,12 +72,53 @@ class SharedUIState:
         self._log_counter: int = 0
 
     def update_detections(self, detections: list, following_id: Optional[int] = None,
-                          paused: bool = False):
-        """Called from app_callback with detection metadata."""
+                          paused: bool = False, commit: bool = False,
+                          stats: Optional[dict] = None):
+        """Called from app_callback with detection metadata.
+
+        ``commit=True`` also advances ``_frame_seq`` and wakes the SSE
+        consumers, snapshotting the current state into ``_frame_snapshot``
+        without changing ``_frame_jpeg``. Use this from producers that
+        have detections but no JPEG of their own (e.g. the native-pipeline
+        ZMQ subscriber — the C++ binary publishes H264 over UDP on a
+        separate channel, so Python never sees per-frame JPEGs in that
+        mode). With commit=False the call is a plain detection-only
+        update and behaves exactly as before.
+        """
+        if commit:
+            with self._cond:
+                self._detections = detections
+                self._following_id = following_id
+                self._paused = paused
+                snapshot = {
+                    "detections": list(self._detections),
+                    "following_id": self._following_id,
+                    "paused": self._paused,
+                    "velocity": dict(self._velocity),
+                    "perf": dict(self._perf),
+                }
+                if stats is not None:
+                    snapshot["stats"] = stats
+                self._frame_snapshot = snapshot
+                self._frame_seq += 1
+                self._cond.notify_all()
+            return
         with self._lock:
             self._detections = detections
             self._following_id = following_id
             self._paused = paused
+
+    def set_tiles(self, tiles: list) -> None:
+        """Replace the active tile geometry. Picked up by SSE on the next
+        snapshot. Caller is responsible for restarting the C++ pipeline
+        (and the subscriber's attribution) — this method only updates the
+        published view of what's active."""
+        with self._lock:
+            self._tiles = list(tiles)
+
+    def get_tiles(self) -> list:
+        with self._lock:
+            return list(self._tiles)
 
     def update_frame(self, jpeg_bytes: bytes):
         """Called from appsink callback with pre-encoded JPEG bytes.
@@ -179,6 +225,7 @@ class _WebHandler(BaseHTTPRequestHandler):
     controller_config = None  # ControllerConfig
     follow_server_port: int = 8080
     recording_ctl = None  # object with start_recording/stop_recording/is_recording
+    apply_tiles_callback = None  # callable(list-of-(name,x,y,w,h)) -> None
     def log_message(self, format, *args):
         pass
 
@@ -221,6 +268,8 @@ class _WebHandler(BaseHTTPRequestHandler):
             self._handle_status()
         elif self.path == "/api/config":
             self._handle_get_config()
+        elif self.path == "/api/tiles":
+            self._handle_get_tiles()
         elif self.path.startswith("/api/logs"):
             self._handle_logs()
         else:
@@ -270,7 +319,27 @@ class _WebHandler(BaseHTTPRequestHandler):
                 )
                 if snapshot is None:
                     continue
-                self.wfile.write(f"data: {json.dumps(snapshot)}\n\n".encode())
+                # Stamp server-side ages right before send so the browser
+                # can compute end-to-end lag without sharing a clock with
+                # the H15 (the H15's BSP wall clock is years off from any
+                # browser; the deltas below are entirely in H15 time and
+                # therefore clock-skew-safe). Video and detection ages
+                # are reported separately so the UI can show which path
+                # is queuing — the user has been seeing video drift by
+                # minutes while detections stayed sub-second.
+                # Annotate the snapshot with the active tile geometry so
+                # the UI can render the overlay + populate the editor's
+                # initial value. ``stats`` is opaque here — passes through
+                # to UI as-is (tiling attribution lives in
+                # subscriber._compute_tile_stats).
+                annotated = dict(snapshot)
+                tiles = self.ui_state._tiles
+                if tiles:
+                    annotated["tiles"] = [
+                        {"name": n, "x": x, "y": y, "w": w, "h": h}
+                        for (n, x, y, w, h) in tiles
+                    ]
+                self.wfile.write(f"data: {json.dumps(annotated)}\n\n".encode())
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -413,6 +482,8 @@ class _WebHandler(BaseHTTPRequestHandler):
             self._handle_record_start()
         elif self.path == "/api/record/stop":
             self._handle_record_stop()
+        elif self.path == "/api/tiles":
+            self._handle_post_tiles()
         else:
             self.send_error(404, "Not Found")
 
@@ -468,13 +539,98 @@ class _WebHandler(BaseHTTPRequestHandler):
         path = self.recording_ctl.stop_recording()
         self._send_json({"recording": False, "path": path})
 
+    # ------------------------------------------------------------------
+    # Tile configuration
+    # ------------------------------------------------------------------
+
+    def _handle_get_tiles(self):
+        """Return the active tile geometry."""
+        tiles = self.ui_state.get_tiles()
+        self._send_json({
+            "tiles": [{"name": n, "x": x, "y": y, "w": w, "h": h}
+                      for (n, x, y, w, h) in tiles],
+        })
+
+    def _handle_post_tiles(self):
+        """Replace the active tile geometry. Triggers a pipeline restart.
+
+        Body: JSON with one of
+          - {"spec": "x,y,w,h;x,y,w,h;..."}  — same format the C++ binary accepts
+          - {"tiles": [{"name": ..., "x":..., "y":..., "w":..., "h":...}, ...]}
+
+        Responds 200 with the parsed tiles on success, 400 on parse error,
+        503 if no apply_tiles_callback was wired (i.e. not running native
+        mode).
+        """
+        if self.apply_tiles_callback is None:
+            self._send_json(
+                {"error": "Tile reconfiguration is only available in native "
+                          "pipeline mode (--native-pipeline)."},
+                status=503,
+            )
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+            body = self.rfile.read(length) if length else b""
+            payload = json.loads(body or b"{}")
+        except (ValueError, json.JSONDecodeError) as e:
+            self._send_json({"error": f"Bad JSON: {e}"}, status=400)
+            return
+
+        # Local import to keep web_server.py decoupled from native_pipeline
+        # in non-native deployments.
+        try:
+            from robot_follow.native_pipeline.subscriber import parse_tiles_spec
+        except ImportError as e:
+            self._send_json({"error": f"native_pipeline unavailable: {e}"},
+                            status=500)
+            return
+
+        try:
+            if "spec" in payload:
+                tiles = parse_tiles_spec(payload["spec"])
+            elif "tiles" in payload:
+                # Accept the list-of-dicts form (mirrors the SSE payload).
+                tiles = [
+                    (t.get("name") or f"T{i}",
+                     float(t["x"]), float(t["y"]),
+                     float(t["w"]), float(t["h"]))
+                    for i, t in enumerate(payload["tiles"])
+                ]
+                # Re-validate via the spec parser by round-tripping (catches
+                # out-of-range values, too-few-tiles, etc.).
+                spec = ";".join(f"{x},{y},{w},{h}" for (_n, x, y, w, h) in tiles)
+                # parse_tiles_spec re-derives auto-names if absent, but we
+                # want to preserve names from the input — so just use it
+                # for validation, then keep our tiles.
+                parse_tiles_spec(spec)
+            else:
+                raise ValueError("expected 'spec' or 'tiles' in body")
+        except (ValueError, KeyError, TypeError) as e:
+            self._send_json({"error": str(e)}, status=400)
+            return
+
+        try:
+            self.apply_tiles_callback(tiles)
+        except Exception as e:  # noqa: BLE001  — surface any failure to client
+            LOGGER.exception("apply_tiles_callback failed")
+            self._send_json({"error": f"apply failed: {e}"}, status=500)
+            return
+
+        self._send_json({
+            "applied": True,
+            "tiles": [{"name": n, "x": x, "y": y, "w": w, "h": h}
+                      for (n, x, y, w, h) in tiles],
+        })
+
 
 class WebServer:
     """Web server for drone-follow UI. Runs in a daemon thread."""
 
     def __init__(self, ui_state, target_state=None, shared_state=None,
                  controller_config=None, host="0.0.0.0", port=5001, static_dir=None,
-                 follow_server_port=8080, recording_ctl=None):
+                 follow_server_port=8080, recording_ctl=None,
+                 apply_tiles_callback=None):
         self.ui_state = ui_state
         self.target_state = target_state
         self.shared_state = shared_state
@@ -484,6 +640,11 @@ class WebServer:
         self.static_dir = static_dir
         self.follow_server_port = follow_server_port
         self.recording_ctl = recording_ctl
+        # callable(new_tiles_list) → None, supplied by drone_follow_h15 when
+        # in native mode. Called from /api/tiles POST to restart the C++
+        # pipeline + Python subscriber with new tile geometry. None in
+        # non-native mode → POST returns 503.
+        self.apply_tiles_callback = apply_tiles_callback
         self.server = None
         self.thread = None
 
@@ -495,6 +656,15 @@ class WebServer:
         _WebHandler.static_dir = self.static_dir
         _WebHandler.follow_server_port = self.follow_server_port
         _WebHandler.recording_ctl = self.recording_ctl
+        # Wrap with staticmethod so the function-as-class-attribute doesn't
+        # trigger Python's descriptor protocol and bind `self` when accessed
+        # via an instance — without this, calling
+        # ``self.apply_tiles_callback(tiles)`` passes ``(self, tiles)`` to
+        # the callback.
+        _WebHandler.apply_tiles_callback = (
+            staticmethod(self.apply_tiles_callback)
+            if self.apply_tiles_callback is not None else None
+        )
 
         ThreadingHTTPServer.allow_reuse_address = True
         self.server = ThreadingHTTPServer((self.host, self.port), _WebHandler)

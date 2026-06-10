@@ -179,6 +179,22 @@ def _build_parser() -> argparse.ArgumentParser:
                             "the live camera. No recording, no UDP output. Implies --dry-run.")
     group.add_argument("--loop", action="store_true",
                        help="Loop the replay when it reaches EOS (only with -i/--input).")
+    group.add_argument("--native-pipeline", action="store_true",
+                       help="Use the C++ native_pipeline binary (libhailo_analytics) for "
+                            "video + inference instead of the Python Hailo15PipelineApp. "
+                            "Detections arrive over ZMQ. Default: off. "
+                            "Caveat: no in-app recording or web UI live video in this mode "
+                            "yet — use the Hailo analytic_viewer for live overlays.")
+    group.add_argument("--zmq-port", type=int, default=7000,
+                       help="ZMQ port to publish/subscribe detections when --native-pipeline "
+                            "is set (default: 7000).")
+    group.add_argument("--tiles", default=None,
+                       help="Override the C++ pipeline's DEFAULT_TILES with a custom "
+                            "tile geometry. Format: \"x,y,w,h;x,y,w,h;...\" with values "
+                            "normalized to [0,1]. Needs ≥ 2 tiles. Same string is "
+                            "forwarded to the C++ binary and used by the Python "
+                            "subscriber for per-tile attribution stats. Omit to use "
+                            "framework default (4 overlapping 60%% quadrants + full).")
 
     return parser
 
@@ -271,12 +287,83 @@ def main():
         else:
             LOGGER.info("[app] Recording video to %s", record_path)
 
-    from robot_follow.pipeline_adapter.hailo15_pipeline import create_h15_app
+    native_mode = getattr(args, "native_pipeline", False)
+    app = None
+    native_proc = None
+    subscriber = None
+    recorder_proc = None
+    video_bridge = None
 
-    app = create_h15_app(
-        shared_state, target_state=target_state, eos_reached=eos_reached,
-        ui_state=ui_state, record_path=record_path, replay_path=replay_path,
-        replay_loop=getattr(args, "loop", False))
+    if native_mode:
+        # New path: C++ binary owns the ISP/inference; Python orchestrator
+        # consumes detections via ZMQ. The Hailo15PipelineApp isn't built
+        # in this mode — Python no longer owns the GStreamer pipeline.
+        from robot_follow.native_pipeline.process import (
+            MulticastRecorderProcess,
+            NativePipelineProcess,
+        )
+        from robot_follow.native_pipeline.subscriber import (
+            DEFAULT_TILES,
+            NativePipelineSubscriber,
+            parse_tiles_spec,
+            tiles_to_spec,
+        )
+        from robot_follow.native_pipeline.video_bridge import NativeVideoBridge
+        from robot_follow.pipeline_adapter.byte_tracker import ByteTracker
+
+        # Active tile list. None on the CLI → framework DEFAULT_TILES.
+        # Validated up front so a bad spec fails fast (before we spawn
+        # subprocesses or open ports).
+        if args.tiles:
+            active_tiles = parse_tiles_spec(args.tiles)
+            tiles_spec_for_cpp = tiles_to_spec(active_tiles)
+            LOGGER.info("[app] Custom tiles: %s", active_tiles)
+        else:
+            active_tiles = list(DEFAULT_TILES)
+            tiles_spec_for_cpp = None
+
+        if replay_path is not None:
+            raise SystemExit("--native-pipeline does not support replay mode (-i/--input); "
+                             "use the Python pipeline for replays")
+
+        # Match the existing tracker init in hailo15_pipeline.py so behavior
+        # is consistent across modes. det_thresh override sidesteps the
+        # built-in +0.1 buffer (see the lengthy debug session in this repo).
+        byte_tracker = ByteTracker(
+            track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=15,
+        )
+        byte_tracker.det_thresh = 0.4
+
+        # In native mode we always multicast — sink0 (4K) and sink1 (720p)
+        # both go to the multicast group so multiple consumers can tap
+        # them independently:
+        #   sink0 → MulticastRecorderProcess (--record only) + analytic_viewer
+        #   sink1 → NativeVideoBridge → web UI MJPEG
+        # Recording stays gated on --record; the UI bridge runs always.
+        if record_path is not None:
+            recorder_proc = MulticastRecorderProcess(record_path=record_path)
+
+        native_proc = NativePipelineProcess(
+            zmq_port=args.zmq_port,
+            multicast=True,
+            tiles_spec=tiles_spec_for_cpp,
+        )
+        subscriber = NativePipelineSubscriber(
+            shared_state,
+            target_state=target_state,
+            ui_state=ui_state,
+            byte_tracker=byte_tracker,
+            zmq_endpoint=f"tcp://127.0.0.1:{args.zmq_port}",
+            record_path=record_path,  # opens .jsonl sidecar when set
+            tiles=active_tiles,
+        )
+        video_bridge = NativeVideoBridge(ui_state)
+    else:
+        from robot_follow.pipeline_adapter.hailo15_pipeline import create_h15_app
+        app = create_h15_app(
+            shared_state, target_state=target_state, eos_reached=eos_reached,
+            ui_state=ui_state, record_path=record_path, replay_path=replay_path,
+            replay_loop=getattr(args, "loop", False))
 
     # Start follow server
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
@@ -310,27 +397,88 @@ def main():
 
     _WebHandler.do_POST = _patched_do_post
 
+    # Apply-tiles callback for /api/tiles POST: stop the running native
+    # pipeline + subscriber + video bridge, rebuild them with new tile
+    # geometry, restart. Order matches the existing shutdown/startup
+    # sequence in _quit_pipeline / the main try block. Native mode only —
+    # the WebServer rejects POSTs with 503 when this is None.
+    apply_tiles_cb = None
+    if native_mode:
+        def apply_tiles_cb(new_tiles):  # noqa: E306 — nested for closure capture
+            nonlocal native_proc, subscriber, video_bridge
+            new_spec = tiles_to_spec(new_tiles)
+            LOGGER.info("[app] Applying new tile config: %s", new_tiles)
+            # Tear down in startup-reverse order: bridge first (so it
+            # doesn't get a flood of EOS-then-restart packets), then
+            # subscriber, then the C++ binary.
+            if video_bridge is not None:
+                video_bridge.stop()
+            if subscriber is not None:
+                subscriber.stop()
+            if native_proc is not None:
+                native_proc.stop()
+            # Rebuild
+            native_proc = NativePipelineProcess(
+                zmq_port=args.zmq_port,
+                multicast=True,
+                tiles_spec=new_spec,
+            )
+            subscriber = NativePipelineSubscriber(
+                shared_state,
+                target_state=target_state,
+                ui_state=ui_state,
+                byte_tracker=byte_tracker,
+                zmq_endpoint=f"tcp://127.0.0.1:{args.zmq_port}",
+                record_path=record_path,
+                tiles=new_tiles,
+            )
+            video_bridge = NativeVideoBridge(ui_state)
+            # Reflect the new tiles in the SSE feed so any open UI sees
+            # them immediately.
+            ui_state.set_tiles(new_tiles)
+            native_proc.start()
+            subscriber.start()
+            time.sleep(0.5)  # same handshake delay as initial startup
+            if video_bridge is not None:
+                video_bridge.start()
+
+        ui_state.set_tiles(active_tiles)
+
     # Start web server (MJPEG + detections + config UI)
     ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
     LOGGER.info("[app] UI static dir: %s (exists=%s)", ui_dir, os.path.isdir(ui_dir))
     web_server = WebServer(
         ui_state, target_state=target_state, shared_state=shared_state,
         controller_config=controller_config, port=5001, static_dir=ui_dir,
-        follow_server_port=5001, recording_ctl=app)
+        follow_server_port=5001, recording_ctl=app,
+        apply_tiles_callback=apply_tiles_cb)  # app may be None in native mode
     web_server.start()
     LOGGER.info("[app] Web UI at http://10.0.0.1:5001")
 
     def _quit_pipeline():
         try:
-            app.stop()
+            if native_mode:
+                if subscriber is not None:
+                    subscriber.stop()
+                if video_bridge is not None:
+                    video_bridge.stop()
+                # Stop the recorder BEFORE the native pipeline so it gets a
+                # last frame and SIGINT-clean EOS while UDP is still flowing.
+                if recorder_proc is not None:
+                    recorder_proc.stop()
+                if native_proc is not None:
+                    native_proc.stop()
+            else:
+                app.stop()
         except Exception:
             pass
 
-    def _eos_to_shutdown():
-        eos_reached.wait()
-        shutdown.set()
-        _quit_pipeline()
-    threading.Thread(target=_eos_to_shutdown, daemon=True).start()
+    if not native_mode:
+        def _eos_to_shutdown():
+            eos_reached.wait()
+            shutdown.set()
+            _quit_pipeline()
+        threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
     def run_robot():
         """Run the new robot_api orchestrator in a background thread with
@@ -391,15 +539,42 @@ def main():
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, on_signal)
 
-    # Run the GStreamer pipeline on the main thread
-    LOGGER.info("[app] Starting Hailo15 pipeline on main thread")
+    # Run the pipeline on the main thread (or wait for shutdown in native mode).
     try:
-        app.run()
+        if native_mode:
+            LOGGER.info("[app] Starting native pipeline subprocess + ZMQ subscriber")
+            native_proc.start()
+            subscriber.start()
+            # Start the multicast consumers AFTER the C++ binary so the
+            # group has packets flowing by the time udpsrc joins it.
+            # Otherwise the first few frames are missed and downstream
+            # decoders may stall waiting for a key frame.
+            time.sleep(0.5)
+            if video_bridge is not None:
+                video_bridge.start()
+            if recorder_proc is not None:
+                recorder_proc.start()
+            # ``shutdown`` is an asyncio.Event; its wait() is a coroutine,
+            # so we can't block on it from sync code. Poll is_set() with
+            # short sleeps and also bail if the C++ subprocess dies.
+            while not shutdown.is_set():
+                time.sleep(0.5)
+                proc = native_proc.process
+                if proc is not None and proc.poll() is not None:
+                    LOGGER.warning("[app] Native pipeline subprocess exited "
+                                   "(code=%s); shutting down.",
+                                   proc.returncode)
+                    break
+        else:
+            LOGGER.info("[app] Starting Hailo15 pipeline on main thread")
+            app.run()
     except (SystemExit, KeyboardInterrupt):
         pass
     finally:
         if not shutdown.is_set():
             shutdown.set()
+        if native_mode:
+            _quit_pipeline()
         # Wait for robot thread to finish cleanly. _land_safely does an 8s
         # sleep after issuing land(), so allow generous time.
         drone_thread.join(timeout=20.0)
