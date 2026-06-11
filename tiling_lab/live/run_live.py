@@ -75,8 +75,12 @@ def main():
     ap.add_argument("--out", required=True, help="output run dir")
     ap.add_argument("--frames", type=int, default=0, help="0 = whole clip")
     ap.add_argument("--fps", type=float, default=30.0)
-    ap.add_argument("--budget", type=float, default=60.0,
-                    help="inference budget, tiles/sec")
+    ap.add_argument("--budget", type=float, default=300.0,
+                    help="inference budget, tiles/sec. Must be high enough that "
+                         "the discovery grid can fire while searching — at 60 "
+                         "(~2/frame) discovery is starved and a small aerial "
+                         "target is rarely acquired (7.8%% detected); at 300 "
+                         "(~10/frame cap, ~3.5 used) acquisition jumps to ~65%%.")
     ap.add_argument("--hef", default=DEFAULT_HEF)
     ap.add_argument("--post-so", default=DEFAULT_SO)
     ap.add_argument("--func", default=DEFAULT_FUNC)
