@@ -89,7 +89,6 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
     out_mkv = os.path.join(args.out, "overlay.mkv")
-    tiles_jsonl = open(os.path.join(args.out, "tiles.jsonl"), "w")
 
     w, h = probe_dims(args.video)
     print(f"[live] video dims {w}x{h}", flush=True)
@@ -100,6 +99,10 @@ def main():
                        args.labels, w, h, args.fps, out_mkv))
     cropper = pipeline.get_by_name("tc")
     agg = pipeline.get_by_name("agg")
+
+    # Opened only after probe_dims + parse_launch succeed, so an early failure
+    # never leaves a stray/partial tiles.jsonl behind.
+    tiles_jsonl = open(os.path.join(args.out, "tiles.jsonl"), "w")
 
     ctrl = DynamicTilingController(src_w=w, src_h=h, fps=args.fps,
                                    budget_inf_per_s=args.budget)
@@ -119,11 +122,12 @@ def main():
                                x=b.xmin(), y=b.ymin(),
                                w=b.width(), h=b.height()))
         tiles = ctrl.update(persons)
-        cropper.set_property("tiles-static", tiles or INITIAL_TILES)
+        pushed = tiles or INITIAL_TILES  # what the cropper actually runs
+        cropper.set_property("tiles-static", pushed)
         f = state["frame"]
         tiles_jsonl.write(json.dumps({
             "frame": f, "status": ctrl.status, "n_persons": len(persons),
-            "n_tiles": (tiles.count(";") + 1) if tiles else 0, "tiles": tiles,
+            "n_tiles": pushed.count(";") + 1 if pushed else 0, "tiles": pushed,
         }) + "\n")
         if f % 30 == 0:
             print(f"[live] frame {f} status={ctrl.status} "
