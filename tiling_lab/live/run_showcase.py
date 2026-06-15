@@ -44,6 +44,24 @@ INITIAL_TILES = ("0.0,0.0,0.18,0.18,m;0.40,0.0,0.18,0.18,m;"
                  "0.80,0.0,0.18,0.18,m;0.40,0.40,0.18,0.18,m")
 
 
+def tiles_static_to_dicts(s):
+    """Parse a 'x,y,w,h,mode;...' tiles-static string into the viewer's tile
+    schema: a list of {x,y,w,h,category} dicts (overlay_viewer.load_frames_indexed).
+    mode 'm' (dense discovery) -> 'multi-scale'; 's' (ROI/recovery) -> 'dynamic'."""
+    out = []
+    for seg in s.split(";"):
+        if not seg:
+            continue
+        parts = seg.split(",")
+        if len(parts) < 4:
+            continue
+        x, y, w, h = (float(v) for v in parts[:4])
+        mode = parts[4] if len(parts) > 4 else "s"
+        out.append({"x": x, "y": y, "w": w, "h": h,
+                    "category": "multi-scale" if mode == "m" else "dynamic"})
+    return out
+
+
 def probe_dims(video):
     out = subprocess.check_output([
         "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -141,7 +159,7 @@ def main():
         tile_counts.append(n_tiles)
         f = state["frame"]
         frame_records.append({"frame": f, "detections": records,
-                              "tiles": pushed})
+                              "tiles": tiles_static_to_dicts(pushed)})
         if f % 60 == 0:
             print(f"[showcase] frame {f} status={ctrl.status} "
                   f"n_tiles={n_tiles}", flush=True)
