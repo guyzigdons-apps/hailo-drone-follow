@@ -1,6 +1,5 @@
 from hailo_tiling.dynamic.striped import StripedDenseScheduler
 from hailo_tiling.types import LockState
-from hailo_tiling.budget import BudgetMeter
 
 
 def test_stripes_partition_full_grid_with_no_overlap():
@@ -84,3 +83,17 @@ def test_recovery_owns_frame_no_dense_stripe():
     # 3x3 recovery grid, all single-scale, no multi-scale dense tiles.
     assert len(crops) == 9
     assert all(c.mode == "s" for c in crops)
+
+
+def test_recovery_respects_zero_budget():
+    s = StripedDenseScheduler(3840, 2160, dense_grid=(8, 6),
+                              fps=60.0, cadence_fps=2.0, recovery_grid=(3, 3))
+    lock = LockState(track_id=7, bbox_norm=(0.5, 0.5, 0.04, 0.03),
+                     status="SEARCHING", frames_since_seen=3,
+                     last_velocity=(0.0, 0.0))
+
+    class _ZeroBudget:
+        def available(self, frame_idx):
+            return 0.0
+    crops = s.decide(lock, frame_idx=0, meter=_ZeroBudget())
+    assert crops == []
