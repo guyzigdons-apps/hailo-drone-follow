@@ -36,3 +36,36 @@ class StripedDenseScheduler:
     def stripe_indices(self, frame_idx: int) -> list[int]:
         """Logical dense-cell indices run on `frame_idx` (== crop indices)."""
         return self._stripes[frame_idx % self.K]
+
+    def _target_crops(self, lock: LockState):
+        """Return (crops, in_recovery). ROI when TRACKING; recovery grid when
+        SEARCHING/LOST with a known track. Mirrors TileScheduler.decide minus
+        the discovery grid (this class owns the dense pass)."""
+        if lock.status in ("SEARCHING", "LOST") and lock.track_id is not None:
+            gx, gy = self._v1.recovery_grid
+            bx, by, bw, bh = lock.bbox_norm
+            ecx = bx + bw / 2 + lock.last_velocity[0] * lock.frames_since_seen
+            ecy = by + bh / 2 + lock.last_velocity[1] * lock.frames_since_seen
+            span = self._v1.recovery_span
+            half = span / 2
+            x0_n = max(0.0, min(1.0 - span, ecx - half))
+            y0_n = max(0.0, min(1.0 - span, ecy - half))
+            crops = self._v1._grid(gx, gy, x0_n * self.src_w, y0_n * self.src_h,
+                                   span * self.src_w, span * self.src_h, "s")
+            return crops, True
+        crops = []
+        if lock.status == "TRACKING":
+            crops.append(self._v1._roi(lock))
+        return crops, False
+
+    def decide(self, lock: LockState, frame_idx: int, meter) -> list[CropRect]:
+        target_crops, in_recovery = self._target_crops(lock)
+        if in_recovery:
+            crops = target_crops          # recovery owns the frame
+        else:
+            stripe = [self._dense[i] for i in self.stripe_indices(frame_idx)]
+            crops = target_crops + stripe  # ROI first, then dense stripe
+        budget = int(meter.available(frame_idx))
+        if budget >= 0 and len(crops) > budget:
+            crops = crops[:max(0, budget)]
+        return crops
