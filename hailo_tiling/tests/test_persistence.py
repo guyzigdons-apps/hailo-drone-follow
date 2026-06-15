@@ -44,3 +44,11 @@ def test_detection_landing_outside_run_cells_is_ignored():
     # Run cell {0} but the det belongs to cell 1 -> not stored.
     p.update([0], [_det(0.13, 0.01)])
     assert p.published() == []
+
+
+def test_cell_of_clamps_out_of_bounds_coords():
+    p = DetectionPersistence(dense_grid=(8, 6))
+    # Slightly negative center clamps to cell 0.
+    assert p.cell_of(_det(-0.01, -0.005)) == 0
+    # Center beyond 1.0 (wide bbox near the edge) clamps to the last cell.
+    assert p.cell_of(_det(0.99, 0.99, w=0.05, h=0.05)) == 8 * 6 - 1
