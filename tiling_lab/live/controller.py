@@ -21,6 +21,10 @@ from tiling_lab.harness.target_lock import TargetLock
 
 from tiling_lab.live.tiles_format import crops_to_tiles_static
 
+# IoU above which a persisted detection is treated as the locked target's own
+# box (and thus deduped from the published records when TRACKING).
+_SOT_DEDUP_IOU = 0.5
+
 
 class DynamicTilingController:
     def __init__(self, src_w: int, src_h: int, *, fps: float = 30.0,
@@ -70,8 +74,9 @@ class DynamicTilingController:
 
         target_dets : Sequence[Det]   target-class detections (for the lock)
         all_dets    : Sequence[dict]  ALL detections, visualizer-schema dicts
-        Returns (tiles_static_str, record_dets) where record_dets is the live
-        SOT detection plus the persisted dense union (SOT box de-duplicated).
+        Returns (tiles_static_str, record_dets). With persist=True, record_dets
+        is the live SOT detection plus the persisted dense union (SOT box
+        de-duplicated); with persist disabled, only the live target record.
         """
         if not self.striped:
             raise RuntimeError("step_showcase requires striped=True")
@@ -94,7 +99,7 @@ class DynamicTilingController:
                                  list(all_dets))
             for d in self._persist.published():
                 if target_bbox is not None and \
-                        self._iou(target_bbox, tuple(d["bbox"])) > 0.5:
+                        self._iou(target_bbox, tuple(d["bbox"])) > _SOT_DEDUP_IOU:
                     continue
                 records.append(d)
 
