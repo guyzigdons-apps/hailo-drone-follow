@@ -39,7 +39,8 @@ DEFAULT_SO = "/usr/local/hailo/resources/so/libyolo_hailortpp_postprocess.so"
 DEFAULT_FUNC = "filter"
 DEFAULT_LABELS = "/usr/local/hailo/resources/json/hailo_4_classes.json"
 
-# 8x6 dense seed for frame 0 (multi-scale), before any lock exists.
+# Small 4-tile multi-scale seed for frame 0, before any lock/stripe exists.
+# (The full 8x6 dense grid is owned by the controller via --dense-grid.)
 INITIAL_TILES = ("0.0,0.0,0.18,0.18,m;0.40,0.0,0.18,0.18,m;"
                  "0.80,0.0,0.18,0.18,m;0.40,0.40,0.18,0.18,m")
 
@@ -47,7 +48,10 @@ INITIAL_TILES = ("0.0,0.0,0.18,0.18,m;0.40,0.0,0.18,0.18,m;"
 def tiles_static_to_dicts(s):
     """Parse a 'x,y,w,h,mode;...' tiles-static string into the viewer's tile
     schema: a list of {x,y,w,h,category} dicts (overlay_viewer.load_frames_indexed).
-    mode 'm' (dense discovery) -> 'multi-scale'; 's' (ROI/recovery) -> 'dynamic'."""
+    mode 'm' (dense discovery) -> 'multi-scale'; 's' (ROI/recovery) -> 'dynamic'.
+
+    Input is trusted internal data (crops_to_tiles_static output); segments with
+    fewer than 4 fields are skipped, numeric fields are assumed well-formed."""
     out = []
     for seg in s.split(";"):
         if not seg:
@@ -62,7 +66,7 @@ def tiles_static_to_dicts(s):
     return out
 
 
-def probe_dims(video):
+def probe_dims(video: str) -> tuple[int, int]:
     out = subprocess.check_output([
         "ffprobe", "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", video,
@@ -123,7 +127,6 @@ def main():
         args.video, args.hef, args.post_so, args.func, args.labels,
         w, h, args.fps))
     cropper = pipeline.get_by_name("tc")
-    agg = pipeline.get_by_name("agg")
 
     ctrl = DynamicTilingController(
         src_w=w, src_h=h, fps=args.fps, budget_inf_per_s=args.budget,
