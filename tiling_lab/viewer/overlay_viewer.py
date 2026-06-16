@@ -739,10 +739,20 @@ class OverlayViewer:
         return cx - vw / 2.0, cy - vh / 2.0, vw, vh
 
     def _canvas_to_src(self, cx: float, cy: float) -> tuple[float, float]:
-        vx, vy, vw, vh = self._viewport_src_rect()
-        cw, ch = self._canvas_size()
-        sx = vx + (cx / cw) * vw
-        sy = vy + (cy / ch) * vh
+        """Screen (canvas) px -> source px. Exact inverse of the _render draw
+        transform `canvas = (src - x0) * scale + off`, including the letterbox
+        offset, so the src-px readout and zoom-around-cursor align with the
+        drawn image. Falls back to the viewport mapping before the first render."""
+        tf = getattr(self, "_draw_tf", None)
+        if tf is None:
+            vx, vy, vw, vh = self._viewport_src_rect()
+            cw, ch = self._canvas_size()
+            return vx + (cx / cw) * vw, vy + (cy / ch) * vh
+        x0, y0, scale, off_x, off_y = tf
+        if scale <= 0:
+            return float(x0), float(y0)
+        sx = (cx - off_x) / scale + x0
+        sy = (cy - off_y) / scale + y0
         return sx, sy
 
     # -------------------------------------------------- frame I/O
@@ -909,6 +919,14 @@ class OverlayViewer:
         scale_y = scale_uniform
         _draw_off_x = off_x
         _draw_off_y = off_y
+        # Cache the EXACT image/overlay draw transform so screen->src readout
+        # (and wheel-zoom-around-cursor) are perfect inverses of src->canvas:
+        #   canvas = (src - x0) * scale_uniform + off
+        # (clamped viewport origin x0/y0 + letterbox offset off_x/off_y). Without
+        # this, _canvas_to_src used the unclamped viewport over the full canvas
+        # and ignored the letterbox offset, so the src-px readout ran off-range
+        # (e.g. -1920..5753) and overlays drifted from the image.
+        self._draw_tf = (x0, y0, scale_uniform, off_x, off_y)
 
         # The disp image is RGB (cache is RGB; full-res path converts at
         # read time). cv2 draw fns are channel-agnostic — they just write
