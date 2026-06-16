@@ -65,6 +65,26 @@ class TileScheduler:
         return CropRect.from_center_width(cx, cy, int(round(crop_w))).clamp(
             self.src_w, self.src_h)
 
+    def _roi_proportional(self, lock: LockState) -> CropRect:
+        """Dynamic ROI sized to the target bbox + margin on BOTH axes (4:3), so
+        the window always sits a bit larger than the bbox and tracks its size:
+        it GROWS past native (640) for a large/near target (downscales to keep
+        it whole) and tightens (zooms in, capped at ``max_zoom``) for a small/
+        far one. Unlike ``_roi`` it does not pin a small target to native 640 —
+        the tile hugs the bbox. (Used by the live showcase; ``_roi`` is kept for
+        the benchmark/parity-tested paths.)"""
+        bx, by, bw, bh = lock.bbox_norm
+        cx = (bx + bw / 2) * self.src_w
+        cy = (by + bh / 2) * self.src_h
+        m = 1.0 + 2.0 * self.roi_margin_frac
+        need_w = bw * self.src_w * m
+        need_h = bh * self.src_h * m
+        crop_w = max(need_w, need_h * MODEL_ASPECT)   # contain both axes in 4:3
+        crop_w = max(crop_w, MODEL_W / self.max_zoom)  # cap zoom-in (upscale blur)
+        crop_w = min(crop_w, float(self.src_w))        # never exceed the frame
+        return CropRect.from_center_width(cx, cy, int(round(crop_w))).clamp(
+            self.src_w, self.src_h)
+
     def decide(self, lock: LockState, frame_idx: int, meter) -> list[CropRect]:
         crops: list[CropRect] = []
         on_cadence = (frame_idx % self.discovery_period == 0)

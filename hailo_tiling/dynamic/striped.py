@@ -72,7 +72,10 @@ class StripedDenseScheduler:
         # sweep alone is the (flat, whole-frame) search.
         crops: list[CropRect] = []
         if lock.status == "TRACKING":
-            crops.append(self._v1._roi(lock))    # ROI first so budget keeps it
+            # bbox-proportional ROI: the dynamic window always sits a bit larger
+            # than the target bbox and grows/shrinks with it (past native for a
+            # near target, zoom-in for a far one). ROI first so budget keeps it.
+            crops.append(self._v1._roi_proportional(lock))
         crops += [self._dense[i] for i in self.stripe_indices(frame_idx)]
         budget = int(meter.available(frame_idx))
         if budget >= 0 and len(crops) > budget:

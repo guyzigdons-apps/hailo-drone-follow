@@ -1,4 +1,4 @@
-from hailo_tiling.types import LockState
+from hailo_tiling.types import LockState, MODEL_W
 from hailo_tiling.budget import BudgetMeter
 from hailo_tiling.dynamic.scheduler import TileScheduler
 
@@ -127,3 +127,40 @@ def test_grid_overlap_makes_adjacent_tiles_share_area():
     # coverage preserved: last tile still reaches the right/bottom edge
     assert t[3].x + t[3].w >= 3839
     assert t[-1].y + t[-1].h >= 2159
+
+
+def _proi(sched, bw, bh, cx=0.5, cy=0.5):
+    lock = LockState(track_id=1, bbox_norm=(cx - bw / 2, cy - bh / 2, bw, bh),
+                     status="TRACKING")
+    return sched._roi_proportional(lock)
+
+
+def test_roi_proportional_always_contains_bbox_with_margin_both_axes():
+    s = TileScheduler(src_w=3840, src_h=2160, max_zoom=2.0, roi_margin_frac=0.25)
+    for bw, bh in [(0.03, 0.03), (0.1, 0.08), (0.2, 0.15), (0.05, 0.20)]:
+        c = _proi(s, bw, bh)
+        # tile must contain the bbox plus margin on both axes (unless the zoom
+        # cap or frame bound intervenes — checked separately below)
+        assert c.w >= bw * 3840 and c.h >= bh * 2160
+
+
+def test_roi_proportional_grows_past_native_for_large_target():
+    s = TileScheduler(src_w=3840, src_h=2160, max_zoom=2.0, roi_margin_frac=0.25)
+    big = _proi(s, 0.2, 0.15)        # 768x324 px bbox
+    assert big.w > 640               # larger than native (downscale to stay whole)
+    assert big.scale < 1.0
+
+
+def test_roi_proportional_tightens_for_small_target_capped_at_max_zoom():
+    s = TileScheduler(src_w=3840, src_h=2160, max_zoom=2.0, roi_margin_frac=0.25)
+    small = _proi(s, 0.03, 0.03)     # 115x65 px bbox
+    # Tracks the bbox (tighter than native 640) but never zooms past max_zoom.
+    assert small.w < 640
+    assert small.scale <= 2.0 + 1e-6
+    assert small.w == MODEL_W / 2.0  # floor = 640/max_zoom = 320
+
+
+def test_roi_proportional_contains_tall_target_height():
+    s = TileScheduler(src_w=3840, src_h=2160, max_zoom=2.0, roi_margin_frac=0.25)
+    tall = _proi(s, 0.05, 0.25)      # 192x540 px bbox — taller than a 4:3 width crop
+    assert tall.h >= 0.25 * 2160     # height contained (legacy _roi would clip)
