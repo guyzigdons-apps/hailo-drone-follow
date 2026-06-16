@@ -82,6 +82,33 @@ def test_seed_mode_draws_real_bbox_not_seed_box():
     assert tgt[0]["bbox"] == [0.521, 0.318, 0.05, 0.035]
 
 
+def test_seed_mode_nms_merges_stale_friend_into_target():
+    """A stale persisted box that partially overlaps the live target (IoU ~0.37,
+    below the old 0.5 dedup threshold but above the 0.3 NMS threshold) must be
+    absorbed by nms_merge so only the 'target' record survives near that location.
+    """
+    ctrl = DynamicTilingController(3840, 2160, fps=60.0, budget_inf_per_s=600.0,
+                                   striped=True, persist=True, dense_grid=(7, 6),
+                                   grid_overlap=0.15, acquire_mode="seed")
+    ctrl.seed((0.50, 0.50, 0.04, 0.04))
+    real = _target_det(0.521, 0.518, w=0.05, h=0.035)
+    # real_dict: the target's vehicle detection (same box)
+    real_dict = {"label": "vehicle", "confidence": 0.9,
+                 "bbox": [0.521, 0.518, 0.05, 0.035]}
+    # stale_friend: a slightly shifted copy of the target (IoU ~0.37 with target).
+    # This escapes the old _SOT_DEDUP_IOU=0.5 guard but is caught by NMS at 0.3.
+    stale_friend = {"label": "vehicle", "confidence": 0.85,
+                    "bbox": [0.53, 0.53, 0.05, 0.035]}
+    far = _det_dict(0.05, 0.90, 0.06, 0.05, label="vehicle")
+    records = []
+    for _ in range(30):
+        _tiles, records = ctrl.step_showcase([real], [real_dict, stale_friend, far])
+    near = [r for r in records
+            if abs(r["bbox"][0] - 0.521) < 0.05 and abs(r["bbox"][1] - 0.518) < 0.05]
+    assert len(near) == 1 and near[0]["label"] == "target"   # friend merged away
+    assert any(abs(r["bbox"][0] - 0.05) < 0.03 for r in records)  # far car kept
+
+
 def test_seed_mode_does_not_switch_to_a_different_car():
     ctrl = DynamicTilingController(3840, 2160, fps=60.0, budget_inf_per_s=300.0,
                                    striped=True, persist=True, dense_grid=(7, 6),

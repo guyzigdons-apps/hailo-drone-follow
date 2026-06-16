@@ -16,14 +16,11 @@ from hailo_tiling.budget import BudgetMeter
 from hailo_tiling.dynamic.scheduler import TileScheduler
 from hailo_tiling.dynamic.striped import StripedDenseScheduler
 from hailo_tiling.dynamic.persistence import DetectionPersistence
+from hailo_tiling.dynamic.nms import nms_merge
 from hailo_tiling.types import Det
 from tiling_lab.harness.target_lock import TargetLock, SeedTracker
 
 from tiling_lab.live.tiles_format import crops_to_tiles_static
-
-# IoU above which a persisted detection is treated as the locked target's own
-# box (and thus deduped from the published records when TRACKING).
-_SOT_DEDUP_IOU = 0.5
 
 
 class DynamicTilingController:
@@ -84,17 +81,6 @@ class DynamicTilingController:
         until a track activates there and is adopted."""
         self._lock.seed(bbox_norm)
 
-    @staticmethod
-    def _iou(a, b) -> float:
-        ax, ay, aw, ah = a
-        bx, by, bw, bh = b
-        ix1 = max(ax, bx); iy1 = max(ay, by)
-        ix2 = min(ax + aw, bx + bw); iy2 = min(ay + ah, by + bh)
-        iw = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
-        inter = iw * ih
-        ua = aw * ah + bw * bh - inter
-        return inter / ua if ua > 0 else 0.0
-
     def step_showcase(self, target_dets, all_dets):
         """Step one frame for the showcase runner.
 
@@ -133,11 +119,9 @@ class DynamicTilingController:
         if self._persist is not None:
             self._persist.update(self._sched.stripe_indices(self._frame),
                                  list(all_dets))
-            for d in self._persist.published():
-                if target_bbox is not None and \
-                        self._iou(target_bbox, tuple(d["bbox"])) > _SOT_DEDUP_IOU:
-                    continue
-                records.append(d)
+            self._persist.tick()
+            union = list(records) + self._persist.published()   # target + carried
+            records = nms_merge(union, iou_thresh=0.3)
 
         tiles = crops_to_tiles_static(crops, self.src_w, self.src_h)
         self._frame += 1
