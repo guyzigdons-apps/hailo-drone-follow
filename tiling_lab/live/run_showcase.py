@@ -129,9 +129,10 @@ def main():
                          "track must accumulate before it is locked.")
     ap.add_argument("--init-bbox", default=None, metavar="x,y,w,h",
                     help="initial-location seed: lock the target at this "
-                         "normalized bbox (0-1) from the start, bypassing "
-                         "auto-acquisition. Fallback for when the target is too "
-                         "small/sparse to auto-acquire.")
+                         "normalized bbox (0-1), bypassing auto-acquisition. "
+                         "Manual target selection (see tiling_lab.live.pick_target).")
+    ap.add_argument("--init-frame", type=int, default=0,
+                    help="frame at which to apply --init-bbox (default 0).")
     ap.add_argument("--label", default="showcase")
     ap.add_argument("--hef", default=DEFAULT_HEF)
     ap.add_argument("--post-so", default=DEFAULT_SO)
@@ -157,11 +158,13 @@ def main():
         cadence_fps=args.cadence_fps, acquire_mode=args.acquire_mode,
         center_frac=args.center_frac, central_frames=args.central_frames)
 
+    init_bbox = None
     if args.init_bbox:
-        bx, by, bw, bh = (float(v) for v in args.init_bbox.split(","))
-        ctrl.seed((bx, by, bw, bh))
-        print(f"[showcase] seeded initial target bbox={bx:.3f},{by:.3f},"
-              f"{bw:.3f},{bh:.3f}", flush=True)
+        init_bbox = tuple(float(v) for v in args.init_bbox.split(","))
+        if args.init_frame <= 0:
+            ctrl.seed(init_bbox)   # seed immediately
+            print(f"[showcase] seeded target bbox={args.init_bbox} @frame 0",
+                  flush=True)
 
     frame_records = []
     tile_counts = []
@@ -171,6 +174,11 @@ def main():
     def probe(_pad, info):
         if state["t0"] is None:
             state["t0"] = time.perf_counter()
+        if init_bbox is not None and state["frame"] == args.init_frame \
+                and args.init_frame > 0:
+            ctrl.seed(init_bbox)
+            print(f"[showcase] seeded target bbox={args.init_bbox} "
+                  f"@frame {args.init_frame}", flush=True)
         buf = info.get_buffer()
         roi = hailo.get_roi_from_buffer(buf)
         dets = roi.get_objects_typed(hailo.HAILO_DETECTION)
