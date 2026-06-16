@@ -66,6 +66,25 @@ PALETTE = [
     (128, 0, 255),  # purple
 ]
 
+# Label-to-colour map (BGR, matching PALETTE convention).  The `_rgb()` helper
+# in the draw path flips to RGB when painting onto the RGB `disp` array.
+_LABEL_COLORS: dict[str, tuple[int, int, int]] = {
+    "target":  (0, 0, 255),    # red   — tracked SOT target, must stand out
+    "vehicle": (0, 200, 0),    # green — dense detections
+    "person":  (255, 160, 0),  # orange
+}
+_DEFAULT_LABEL_COLOR: tuple[int, int, int] = (200, 200, 200)  # light grey
+
+
+def color_for_label(label: str) -> tuple[int, int, int]:
+    """Return a BGR colour tuple for *label*.
+
+    The tracked ``"target"`` is always red so it stands out from dense
+    detections.  Unknown labels fall back to light grey.
+    """
+    return _LABEL_COLORS.get(label, _DEFAULT_LABEL_COLOR)
+
+
 # Discrete playback speeds for the speed selector.
 SPEEDS = [-4.0, -2.0, -1.0, 0.0, 1.0, 2.0, 4.0]
 SPEED_LABELS = ["-4x", "-2x", "-1x", "Pause", "1x", "2x", "4x"]
@@ -963,10 +982,17 @@ class OverlayViewer:
                 dy1 = int((sy1 - y0) * scale_y) + _draw_off_y
                 dx2 = int((sx2 - x0) * scale_x) + _draw_off_x
                 dy2 = int((sy2 - y0) * scale_y) + _draw_off_y
-                cv2.rectangle(disp, (dx1, dy1), (dx2, dy2), colour, 2)
-                tag = f"{det.get('label', '?')} {conf:.2f}"
+                det_label = det.get("label", "")
+                # Use label-specific colour when the detection has a known
+                # label (e.g. "target" → red); fall back to the run colour
+                # for unlabelled or unknown-label detections.
+                det_colour = (_rgb(color_for_label(det_label))
+                              if det_label in _LABEL_COLORS
+                              else colour)
+                cv2.rectangle(disp, (dx1, dy1), (dx2, dy2), det_colour, 2)
+                tag = f"{det_label or '?'} {conf:.2f}"
                 cv2.putText(disp, tag, (dx1, max(15, dy1 - 4)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, det_colour, 1,
                             cv2.LINE_AA)
             if hide_phantoms and n_phantoms > 0:
                 self._phantoms_hidden_per_run[r.label] = n_phantoms
