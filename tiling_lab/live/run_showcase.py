@@ -69,9 +69,11 @@ def tiles_static_to_dicts(s):
 def build_frame_record(frame, detections, applied_tiles):
     """Pair a frame's detections with the tiles that ACTUALLY produced them
     (the tiles applied to this frame = the ones pushed on the previous probe),
-    so the viewer draws each box inside the tile that detected it."""
+    so the viewer draws each box inside the tile that detected it.
+
+    `applied_tiles` is a list of categorised tile dicts ({x,y,w,h,category})."""
     return {"frame": frame, "detections": detections,
-            "tiles": tiles_static_to_dicts(applied_tiles)}
+            "tiles": list(applied_tiles)}
 
 
 def probe_dims(video: str) -> tuple[int, int]:
@@ -217,7 +219,8 @@ def main():
 
     frame_records = []
     tile_counts = []
-    state = {"frame": 0, "t0": None, "t_last": None, "applied": INITIAL_TILES}
+    state = {"frame": 0, "t0": None, "t_last": None,
+             "applied": tiles_static_to_dicts(INITIAL_TILES)}
     loop = GLib.MainLoop()
 
     def probe(_pad, info):
@@ -243,13 +246,15 @@ def main():
                                        x=b.xmin(), y=b.ymin(),
                                        w=b.width(), h=b.height()))
         tiles, records = ctrl.step_showcase(target_dets, all_dets)
+        tile_dicts = ctrl.last_tiles                  # categorised (ROI/dense/pyramid)
         pushed = tiles or INITIAL_TILES
         # Record THIS frame's detections against the tiles that produced them
-        # (pushed on the PREVIOUS probe), then push `pushed` for the next frame.
+        # (applied on the PREVIOUS probe), then push `pushed` for the next frame.
         frame_records.append(build_frame_record(state["frame"], records,
                                                 state["applied"]))
         cropper.set_property("tiles-static", pushed)
-        state["applied"] = pushed
+        state["applied"] = (tile_dicts if tiles
+                            else tiles_static_to_dicts(INITIAL_TILES))
         n_tiles = pushed.count(";") + 1 if pushed else 0
         tile_counts.append(n_tiles)
         f = state["frame"]

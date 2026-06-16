@@ -21,7 +21,7 @@ from hailo_tiling.dynamic.nms import nms_merge
 from hailo_tiling.types import Det
 from tiling_lab.harness.target_lock import TargetLock, SeedTracker
 
-from tiling_lab.live.tiles_format import crops_to_tiles_static
+from tiling_lab.live.tiles_format import crops_to_tiles_static, _clamp_axis
 
 
 class DynamicTilingController:
@@ -73,6 +73,13 @@ class DynamicTilingController:
         self._total_tiles = 0
         self._select_mode = "detection"
         self._click: tuple | None = None
+        self._last_tiles: list[dict] = []   # categorised tiles emitted last step
+
+    @property
+    def last_tiles(self) -> list[dict]:
+        """Categorised tile dicts ({x,y,w,h,category}) from the most recent
+        step_showcase — for the viewer to colour ROI vs dense vs pyramid."""
+        return self._last_tiles
 
     def update(self, persons: Sequence[Det]) -> str:
         """Step one frame; return the tiles-static string for the next frame."""
@@ -119,13 +126,32 @@ class DynamicTilingController:
                         and self._lock.state.bbox_norm[2] > 0)
         st = self._lock.state
         crops = self._sched.decide(st, self._frame, self._meter)
+        # Categorise by role for the viewer (decoupled from the cropper's mode,
+        # which is single-scale for all). The scheduler emits the tracking ROI
+        # first when TRACKING, then the dense search-sweep cells.
+        n_roi = 1 if (st.status == "TRACKING" and crops) else 0
+        cats = ["dynamic"] * n_roi + ["multi-scale"] * (len(crops) - n_roi)
         if (self._seed_mode and self._select_mode == "click"
                 and self._click is not None and not self._lock.bound):
-            dense = [c for c in crops if c.mode == "m"]
-            crops = pyramid_crops(self._click[0], self._click[1],
-                                  self.src_w, self.src_h) + dense
+            # Click-acquisition: replace the pre-bind ROI with the zoom pyramid;
+            # keep the dense sweep cells (which are now single-scale, so the old
+            # mode=="m" filter no longer identified them — split by n_roi).
+            dense, dense_cats = crops[n_roi:], cats[n_roi:]
+            pyr = pyramid_crops(self._click[0], self._click[1],
+                                self.src_w, self.src_h)
+            crops = pyr + dense
+            cats = ["single-scale"] * len(pyr) + dense_cats
         self._meter.charge(len(crops), self._frame)
         self._total_tiles += len(crops)
+        # Categorised tile dicts for the viewer (ROI=dynamic, dense=multi-scale,
+        # pyramid=single-scale), normalised + clamped to match the cropper string.
+        self._last_tiles = []
+        for c, cat in zip(crops, cats):
+            nx, nw = _clamp_axis(c.x / self.src_w, c.w / self.src_w)
+            ny, nh = _clamp_axis(c.y / self.src_h, c.h / self.src_h)
+            if nw > 0.0 and nh > 0.0:
+                self._last_tiles.append({"x": nx, "y": ny, "w": nw, "h": nh,
+                                         "category": cat})
 
         records: list[dict] = []
         target_bbox = None
