@@ -1097,7 +1097,7 @@ class OverlayViewer:
             dx2 = int((sx2 - x0) * scale_x) + off_x
             dy2 = int((sy2 - y0) * scale_y) + off_y
             colour = CAT_COLOURS.get(cat, DEFAULT_TILE_COLOUR)
-            cv2.rectangle(disp, (dx1, dy1), (dx2, dy2), colour, 1)
+            cv2.rectangle(disp, (dx1, dy1), (dx2, dy2), colour, 2)
             drawn += 1
         return source_run, drawn
 
@@ -1422,6 +1422,11 @@ def export_runs(video_path: Path, runs: list["Run"], out_path: Path, *,
     first = max(0, start)
     last = (total - 1) if end is None else min(end, total - 1)
 
+    # Line widths scale with output resolution so overlays stay legible at 4K
+    # (a 1px line is invisible on a 3840-wide frame).
+    box_lw = max(2, round(out_w / 960))      # ~4 px at 3840 wide
+    tile_lw = max(1, round(out_w / 1280))    # ~3 px at 3840 wide
+
     tile_run: "Run | None" = None
     if tiles_source:
         tile_run = next((r for r in runs if r.label == tiles_source), None)
@@ -1465,7 +1470,7 @@ def export_runs(video_path: Path, runs: list["Run"], out_path: Path, *,
                 cv2.rectangle(frame,
                               (int(tx * sx), int(ty * sy)),
                               (int((tx + tw) * sx), int((ty + th) * sy)),
-                              CAT_COLOURS.get(cat, (255, 255, 255)), 1)
+                              CAT_COLOURS.get(cat, (255, 255, 255)), tile_lw)
 
         for r in runs:
             colour = r.colour_bgr  # frame and palette are both BGR
@@ -1481,13 +1486,19 @@ def export_runs(video_path: Path, runs: list["Run"], out_path: Path, *,
                 conf = float(det.get("confidence", 0.0))
                 if conf < conf_min:
                     continue
+                label = det.get("label", "?")
+                # Per-label colour (target red, vehicle green, person orange).
+                # The export frame is BGR (no _rgb swap, unlike the GUI's RGB
+                # disp), so color_for_label's BGR tuple is used verbatim.
+                det_colour = (color_for_label(label)
+                              if label in _LABEL_COLORS else colour)
                 bx, by, bw, bh = det["bbox"]
                 p1 = (int(bx * sx), int(by * sy))
                 p2 = (int((bx + bw) * sx), int((by + bh) * sy))
-                cv2.rectangle(frame, p1, p2, colour, 2)
-                tag = f"{det.get('label', '?')} {conf:.2f}"
+                cv2.rectangle(frame, p1, p2, det_colour, box_lw)
+                tag = f"{label} {conf:.2f}"
                 cv2.putText(frame, tag, (p1[0], max(15, p1[1] - 4)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, det_colour, 1,
                             cv2.LINE_AA)
 
         cv2.putText(frame, f"frame {n}", (8, 26),
