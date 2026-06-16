@@ -29,14 +29,21 @@ class DetectionPersistence:
 
     def update(self, run_cells, dets) -> None:
         """Refresh `run_cells`: clear them, then refill from `dets` that land
-        in them. Cells not in `run_cells` are left untouched (persist)."""
+        in them. Cells not in `run_cells` are left untouched (persist).
+        Stores a COPY of each detection with `age` stamped to 0."""
         run = set(run_cells)
         for c in run:
             self._cells[c] = []
         for d in dets:
             c = self.cell_of(d)
             if c in run:
-                self._cells[c].append(d)
+                self._cells[c].append({**d, "age": 0})
+
+    def tick(self) -> None:
+        """Advance one frame: age every carried-forward detection."""
+        for ds in self._cells.values():
+            for d in ds:
+                d["age"] = d.get("age", 0) + 1
 
     def published(self) -> list[dict]:
         out: list[dict] = []

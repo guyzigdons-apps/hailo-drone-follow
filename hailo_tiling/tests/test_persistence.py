@@ -25,9 +25,10 @@ def test_update_replaces_only_run_cells_others_persist():
     d_cell0b = _det(0.02, 0.02)
     p.update([0], [d_cell0b])
     pub = p.published()
-    assert d_cell0 not in pub          # old cell-0 det gone
-    assert d_cell0b in pub             # new cell-0 det present
-    assert d_cell1 in pub              # cell-1 det persisted
+    pub_bboxes = [d["bbox"] for d in pub]
+    assert d_cell0["bbox"] not in pub_bboxes   # old cell-0 det gone
+    assert d_cell0b["bbox"] in pub_bboxes      # new cell-0 det present (copy with age)
+    assert d_cell1["bbox"] in pub_bboxes       # cell-1 det persisted
 
 
 def test_run_cell_with_no_detection_clears_that_cell():
@@ -52,3 +53,15 @@ def test_cell_of_clamps_out_of_bounds_coords():
     assert p.cell_of(_det(-0.01, -0.005)) == 0
     # Center beyond 1.0 (wide bbox near the edge) clamps to the last cell.
     assert p.cell_of(_det(0.99, 0.99, w=0.05, h=0.05)) == 8 * 6 - 1
+
+
+def test_published_detections_carry_increasing_age():
+    p = DetectionPersistence(dense_grid=(7, 6))
+    cell = p.cell_of(_det(0.50, 0.50))
+    p.update([cell], [_det(0.50, 0.50)])            # fresh: age 0
+    assert p.published()[0]["age"] == 0
+    p.tick()
+    p.tick()
+    assert p.published()[0]["age"] == 2           # aged, not re-detected
+    p.update([cell], [_det(0.50, 0.50)])            # re-detected: age resets
+    assert p.published()[0]["age"] == 0
