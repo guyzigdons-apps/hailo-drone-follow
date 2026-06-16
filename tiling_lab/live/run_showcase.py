@@ -66,6 +66,14 @@ def tiles_static_to_dicts(s):
     return out
 
 
+def build_frame_record(frame, detections, applied_tiles):
+    """Pair a frame's detections with the tiles that ACTUALLY produced them
+    (the tiles applied to this frame = the ones pushed on the previous probe),
+    so the viewer draws each box inside the tile that detected it."""
+    return {"frame": frame, "detections": detections,
+            "tiles": tiles_static_to_dicts(applied_tiles)}
+
+
 def probe_dims(video: str) -> tuple[int, int]:
     out = subprocess.check_output([
         "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -200,7 +208,7 @@ def main():
 
     frame_records = []
     tile_counts = []
-    state = {"frame": 0, "t0": None, "t_last": None}
+    state = {"frame": 0, "t0": None, "t_last": None, "applied": INITIAL_TILES}
     loop = GLib.MainLoop()
 
     def probe(_pad, info):
@@ -226,12 +234,15 @@ def main():
                                        w=b.width(), h=b.height()))
         tiles, records = ctrl.step_showcase(target_dets, all_dets)
         pushed = tiles or INITIAL_TILES
+        # Record THIS frame's detections against the tiles that produced them
+        # (pushed on the PREVIOUS probe), then push `pushed` for the next frame.
+        frame_records.append(build_frame_record(state["frame"], records,
+                                                state["applied"]))
         cropper.set_property("tiles-static", pushed)
+        state["applied"] = pushed
         n_tiles = pushed.count(";") + 1 if pushed else 0
         tile_counts.append(n_tiles)
         f = state["frame"]
-        frame_records.append({"frame": f, "detections": records,
-                              "tiles": tiles_static_to_dicts(pushed)})
         if f % 60 == 0:
             print(f"[showcase] frame {f} status={ctrl.status} "
                   f"n_tiles={n_tiles}", flush=True)
