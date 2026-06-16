@@ -326,12 +326,12 @@ class SeedTracker:
       consecutive misses the lock goes LOST.
     """
 
-    def __init__(self, *, track_buffer: int = 90, acq_radius: float = 0.10,
+    def __init__(self, *, track_buffer: int = 90, select_radius: float = 0.04,
                  track_radius: float = 0.06, radius_growth: float = 0.004):
         self.track_buffer = track_buffer
-        self.acq_radius = acq_radius        # gate while still acquiring (no bind yet)
-        self.track_radius = track_radius    # gate once bound to a real detection
-        self.radius_growth = radius_growth  # gate growth per consecutive miss
+        self.select_radius = select_radius   # tight, FIXED gate for the click-to-select
+        self.track_radius = track_radius     # gate once bound to a real detection
+        self.radius_growth = radius_growth   # growth per consecutive miss, POST-bind only
         self.state = LockState()
         self.track_id: int | None = None
         self.detected = False               # a real detection was associated this frame
@@ -363,8 +363,10 @@ class SeedTracker:
             return False
 
         pcx, pcy = self._pred_center
-        base = self.track_radius if self._bound else self.acq_radius
-        gate = base + self.radius_growth * s.frames_since_seen
+        if self._bound:
+            gate = self.track_radius + self.radius_growth * s.frames_since_seen
+        else:
+            gate = self.select_radius            # fixed: select only a box AT the click
         best, best_d = None, gate
         for d in target_dets:
             cx, cy = d.x + d.w / 2.0, d.y + d.h / 2.0

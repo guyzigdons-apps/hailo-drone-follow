@@ -92,3 +92,19 @@ def test_reseed_resets_to_fresh_acquisition():
     assert detected is False                      # it's outside the new seed gate
     new_cx = st.state.bbox_norm[0] + st.state.bbox_norm[2] / 2
     assert abs(new_cx - 0.12) < 1e-6              # ROI now at the NEW seed
+
+
+def test_seed_binds_immediately_to_detection_at_selection():
+    st = SeedTracker()
+    st.seed((0.50, 0.30, 0.04, 0.04))             # selection centre (0.52, 0.32)
+    real = _det(0.518, 0.317, 0.03, 0.02)         # dense detection right there
+    assert st.step([real]) is True                # binds on the selection frame
+    assert st.state.bbox_norm == (0.518, 0.317, 0.03, 0.02)
+
+
+def test_seed_tight_gate_never_grabs_far_neighbour_even_after_waiting():
+    st = SeedTracker()
+    st.seed((0.50, 0.30, 0.04, 0.04))             # centre (0.52, 0.32)
+    far = _det(0.64, 0.27, 0.03, 0.02)            # a different car ~0.15 away
+    for _ in range(40):                            # wait many frames
+        assert st.step([far]) is False             # gate must NOT grow to reach it
