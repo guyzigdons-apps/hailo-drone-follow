@@ -60,7 +60,15 @@ class DynamicTilingController:
                                     central_frames=central_frames)
         self._meter = BudgetMeter(budget_inf_per_s=float(budget_inf_per_s),
                                   fps=float(fps))
-        self._persist = DetectionPersistence(dense_grid) if persist else None
+        # Carry-forward TTL ~= two full dense sweeps. A dense cell is re-swept
+        # every ceil(n_cells / dense_per_frame) frames; its detection then
+        # arrives a few frames later (pipeline latency). 2x the sweep period
+        # keeps a box alive across that gap without flicker, and expires a
+        # departed object within ~2 sweeps.
+        gx, gy = dense_grid
+        sweep = -(-(gx * gy) // max(1, dense_per_frame))   # ceil division
+        self._persist = (DetectionPersistence(dense_grid, ttl=2 * sweep)
+                         if persist else None)
         self._frame = 0
         self._total_tiles = 0
         self._select_mode = "detection"
@@ -128,8 +136,13 @@ class DynamicTilingController:
                             "bbox": list(target_bbox)})
 
         if self._persist is not None:
-            self._persist.update(self._sched.stripe_indices(self._frame),
-                                 list(all_dets))
+            # Detection-driven carry-forward: each detection refreshes its own
+            # cell, regardless of which cells were scheduled this frame. The
+            # schedule and the detection arrival are offset by pipeline latency,
+            # so gating on stripe_indices(self._frame) would drop nearly every
+            # dense detection (verified: a tile detects the car, but its arrival
+            # frame's swept cells no longer include that cell).
+            self._persist.update(list(all_dets))
             self._persist.tick()
             union = list(records) + self._persist.published()   # target + carried
             records = nms_merge(union, iou_thresh=0.3)

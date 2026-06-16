@@ -48,8 +48,13 @@ class StripedDenseScheduler:
                                  grid_overlap=grid_overlap, **v1_kwargs)
         gx, gy = dense_grid
         # Row-major (j outer, i inner) => crop index == logical cell j*gx + i.
+        # SINGLE-SCALE ("s"): each native ~640x480 cell is already model-sized, so
+        # there is no pyramid to build. Tagging dense tiles multi-scale ("m") makes
+        # hailotileaggregator apply cross-scale suppression with no companion layer
+        # and SILENTLY DROP their detections (verified: a native crop detects the
+        # cars at conf~0.88, but the "m" dense path recorded 0). Keep them "s".
         self._dense = self._v1._grid(gx, gy, 0, 0,
-                                     self.src_w, self.src_h, "m")
+                                     self.src_w, self.src_h, "s")
         self._stripes = [list(range(i, len(self._dense), self.K))
                          for i in range(self.K)]
 

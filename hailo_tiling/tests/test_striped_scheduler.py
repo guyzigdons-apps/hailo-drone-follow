@@ -86,7 +86,9 @@ def test_decide_roi_first_then_dense():
     crops = s.decide(_tracking_lock(), frame_idx=0, meter=_Unlimited())
     assert len(crops) == 1 + 2              # ROI + 2 dense cells
     assert crops[0].mode == "s"             # ROI first (single-scale)
-    assert all(c.mode == "m" for c in crops[1:])  # dense multi-scale
+    # Dense tiles are single-scale too: each native ~640x480 cell is already
+    # model-sized, and multi-scale ("m") makes the aggregator drop their dets.
+    assert all(c.mode == "s" for c in crops[1:])
 
 
 def test_decide_per_frame_count_is_flat():
@@ -118,7 +120,7 @@ def test_search_when_lost_runs_dense_sweep_not_recovery_grid():
     crops = s.decide(lock, frame_idx=0, meter=_Unlimited())
     # No ROI (not TRACKING); the rolling dense sweep IS the whole-frame search.
     assert len(crops) == 2
-    assert all(c.mode == "m" for c in crops)
+    assert all(c.mode == "s" for c in crops)   # dense is single-scale (native)
 
 
 def test_search_respects_zero_budget():
