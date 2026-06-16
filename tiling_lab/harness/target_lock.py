@@ -51,7 +51,9 @@ class TargetLock:
     """
 
     def __init__(self, track_buffer: int = 90, reacq_motion: str = "frozen",
-                 reacq_radius_growth: float = 0.0, **tracker_kwargs):
+                 reacq_radius_growth: float = 0.0,
+                 acquire_mode: str = "largest", center_frac: float = 0.2,
+                 central_frames: int = 5, **tracker_kwargs):
         self._tracker = create_tracker("byte", track_buffer=track_buffer,
                                        **tracker_kwargs)
         self.track_buffer = track_buffer
@@ -65,6 +67,33 @@ class TargetLock:
         self.reacq_motion = reacq_motion
         self.reacq_radius_growth = reacq_radius_growth
         self._anchor: tuple | None = None   # (x, y, w, h) normalized, motion-updated
+        # Acquisition policy. "largest": lock the biggest activated track (legacy).
+        # "central": lock the track whose bbox centre sits within the central
+        # region (|c-0.5| <= center_frac on both axes) and stays the most-central
+        # candidate for `central_frames` consecutive frames (debounce). Lets the
+        # operator pick the SOT by re-centring it in frame for a moment.
+        self.acquire_mode = acquire_mode
+        self.center_frac = center_frac
+        self.central_frames = central_frames
+        self._acq_candidate_id: int | None = None
+        self._acq_count = 0
+
+    def _most_central_track(self, tracks):
+        """Activated track within the central region with the smallest centre
+        distance to (0.5, 0.5); None if no activated track is central."""
+        lo, hi = 0.5 - self.center_frac, 0.5 + self.center_frac
+        best, best_d = None, None
+        for t in tracks:
+            if not (t.is_activated and t.filtered_tlwh):
+                continue
+            x, y, w, h = t.filtered_tlwh
+            cx, cy = x + w / 2.0, y + h / 2.0
+            if not (lo <= cx <= hi and lo <= cy <= hi):
+                continue
+            d = (cx - 0.5) ** 2 + (cy - 0.5) ** 2
+            if best_d is None or d < best_d:
+                best_d, best = d, t
+        return best
 
     @property
     def reacq_anchor(self) -> tuple | None:
@@ -117,6 +146,16 @@ class TargetLock:
         if self._bt_track_id is None:
             if gt_bbox_norm is not None:
                 self.lock_from_gt(gt_bbox_norm, tracks)
+            elif lock_if_unlocked and self.acquire_mode == "central":
+                cand = self._most_central_track(tracks)
+                cand_id = cand.track_id if cand is not None else None
+                if cand_id is not None and cand_id == self._acq_candidate_id:
+                    self._acq_count += 1
+                else:
+                    self._acq_candidate_id = cand_id
+                    self._acq_count = 1 if cand_id is not None else 0
+                if cand is not None and self._acq_count >= self.central_frames:
+                    self._set_track(cand.track_id)
             elif lock_if_unlocked:
                 acts = [t for t in tracks if t.is_activated and t.filtered_tlwh]
                 if acts:

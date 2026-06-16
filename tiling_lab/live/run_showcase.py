@@ -109,6 +109,17 @@ def main():
     ap.add_argument("--target-class", default="vehicle")
     ap.add_argument("--dense-grid", default="8x6")
     ap.add_argument("--cadence-fps", type=float, default=2.0)
+    ap.add_argument("--acquire-mode", default="central",
+                    choices=["central", "largest"],
+                    help="auto-acquisition policy: 'central' locks the target "
+                         "held nearest frame centre for --central-frames frames; "
+                         "'largest' locks the biggest detection (legacy).")
+    ap.add_argument("--center-frac", type=float, default=0.15,
+                    help="half-width of the central acquisition region "
+                         "(centre in [0.5-f, 0.5+f] on both axes).")
+    ap.add_argument("--central-frames", type=int, default=10,
+                    help="consecutive frames a target must stay most-central "
+                         "before it is locked.")
     ap.add_argument("--label", default="showcase")
     ap.add_argument("--hef", default=DEFAULT_HEF)
     ap.add_argument("--post-so", default=DEFAULT_SO)
@@ -131,7 +142,8 @@ def main():
     ctrl = DynamicTilingController(
         src_w=w, src_h=h, fps=args.fps, budget_inf_per_s=args.budget,
         striped=True, persist=True, dense_grid=(gx, gy),
-        cadence_fps=args.cadence_fps)
+        cadence_fps=args.cadence_fps, acquire_mode=args.acquire_mode,
+        center_frac=args.center_frac, central_frames=args.central_frames)
 
     frame_records = []
     tile_counts = []

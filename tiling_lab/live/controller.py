@@ -31,7 +31,9 @@ class DynamicTilingController:
                  budget_inf_per_s: float = 60.0, track_buffer: int = 90,
                  scheduler_kwargs: dict | None = None,
                  striped: bool = False, persist: bool = False,
-                 dense_grid: tuple = (8, 6), cadence_fps: float = 2.0):
+                 dense_grid: tuple = (8, 6), cadence_fps: float = 2.0,
+                 acquire_mode: str = "largest", center_frac: float = 0.15,
+                 central_frames: int = 10):
         self.src_w = int(src_w)
         self.src_h = int(src_h)
         self.striped = striped
@@ -42,7 +44,10 @@ class DynamicTilingController:
         else:
             self._sched = TileScheduler(self.src_w, self.src_h,
                                         **(scheduler_kwargs or {}))
-        self._lock = TargetLock(track_buffer=track_buffer)
+        self._lock = TargetLock(track_buffer=track_buffer,
+                                acquire_mode=acquire_mode,
+                                center_frac=center_frac,
+                                central_frames=central_frames)
         self._meter = BudgetMeter(budget_inf_per_s=float(budget_inf_per_s),
                                   fps=float(fps))
         self._persist = DetectionPersistence(dense_grid) if persist else None
