@@ -49,3 +49,41 @@ A short burst (e.g. `--frames 30`) reads fast because GStreamer pre-buffers
 during startup — it reports ~60 fps even when sustained throughput is ~2 fps.
 Always measure ≥300 frames for a real number. `run_showcase.py` reports
 `achieved_fps` from the first-probe→last-probe window in `metrics.json`.
+
+# Live tiling — DETECTION-CORRECTNESS gotchas (2026-06-16)
+
+The pipeline can run at full fps yet silently drop most detections. Verify the
+model first: crop a tile region offline (`hailo_tiling.backends.hef_runtime`
+`HefHandle` → `infer` → `decode_nms_output`) and confirm it detects. On 0007 the
+road cars detect at conf ~0.88 in a native crop — so a pipeline showing 0 was a
+pipeline bug, not a model/scale limit. Two traps, each dropped ~all dense dets:
+
+## 4. Dense tiles tagged multi-scale ("m") get dropped by the aggregator.
+`hailotilecropper_dynamic` accepts a per-tile 5th mode field (`x,y,w,h,m|s`).
+`m` flags the tile MULTI_SCALE; `hailotileaggregator` then applies cross-scale
+suppression — but with no companion scale layer it **discards those detections**.
+The single-scale ("s") ROI tile detected fine while the "m" dense grid recorded
+0. **Fix:** dense grid tiles must be single-scale `"s"` — each native ~640×480
+cell is already model-sized, there is nothing to pyramid. (`StripedDenseScheduler._dense`
+now builds with `_grid(...,"s")`.)
+
+## 5. Persistence must be DETECTION-DRIVEN, not schedule-driven (pipeline latency).
+A tile's detection arrives at the probe **several frames after** the tile was
+inferred (decode+crop+infer+aggregate+queue latency — observed ~10+ frames).
+`DetectionPersistence.update(stripe_indices(current_frame), dets)` refilled only
+the cells *scheduled this frame*, so a real detection landed in a cell no longer
+being swept and was discarded — dropping nearly every dense detection (0007: 50 →
+3348 vehicle records over 720 frames after the fix). **Fix:** `update(dets)` keys
+off each detection's own `cell_of(det)` (latency-robust) with an age-based TTL
+(~2× sweep period) for "saved until the tile's next iteration" + departed-object
+expiry. Confirm with a RAW-`all_dets` probe log: the SUV WAS in the aggregator
+output, just dropped before `frames.json`.
+
+## 6. overlay_viewer src-px readout must invert the exact draw transform.
+The image draws at `canvas = (src - x0)*scale_uniform + off` (clamped viewport
+origin + letterbox offset). `_canvas_to_src` had used the *unclamped* viewport
+over the *full* canvas with *no* letterbox offset → screen→src wasn't the inverse
+of src→canvas, so the readout ran wildly off-range (e.g. -1920..5753) and overlays
+drifted. **Fix:** cache `(x0,y0,scale_uniform,off_x,off_y)` in `_render` as
+`self._draw_tf` and invert it in `_canvas_to_src`. The black letterbox bars are
+cosmetic (16:9 image in a non-16:9 canvas) — correct the alignment, don't clamp.
