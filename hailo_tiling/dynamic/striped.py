@@ -7,22 +7,39 @@ __all__ = ["StripedDenseScheduler"]
 
 
 class StripedDenseScheduler:
-    """Round-robin striped dense tiling.
+    """Flat-load dense tiling that sweeps the whole frame at a low effective rate.
 
-    The dense grid (default 8x6, whole frame, multi-scale) is partitioned into
-    K = round(fps / cadence_fps) interleaved stripes. Each frame emits exactly
-    one stripe of dense tiles plus the wrapped v1 ROI/recovery tile(s), so the
-    per-frame inference count is flat (no periodic discovery spike). A full
-    dense refresh completes every K frames (~cadence_fps Hz).
+    The dense grid (default 8x6, whole frame, multi-scale) is laid out row-major
+    and swept a few cells per frame so the per-frame dense cost is flat (no
+    discovery spike) while any given cell is refreshed only ~once per sweep — the
+    "lower-fps full-frame dense" pass. Off-sweep detections are carried forward by
+    DetectionPersistence (the research's skipped-tile carry-forward). Two sweep
+    orders:
+
+      - ``rolling`` (default): emit ``dense_per_frame`` consecutive cells in
+        row-major order, advancing each frame and wrapping — a row-band of dense
+        tiles that rolls down the frame. Full-frame refresh every
+        ceil(n_cells / dense_per_frame) frames. With 8x6 and dense_per_frame=2
+        that is 24 frames (~2.5 Hz/cell at 60 fps).
+      - ``interleaved``: K = round(fps / cadence_fps) interleaved stripes,
+        stripe ``frame % K`` per frame (legacy).
+
+    decide() emits the locked-target ROI tile (every TRACKING frame) FIRST, then
+    the dense cells. While SEARCHING/LOST there is no ROI, so the rolling dense
+    sweep alone performs a flat whole-frame search (it re-detects a target that
+    reappears anywhere, unlike a local recovery grid).
     """
 
     def __init__(self, src_w: int, src_h: int, *,
                  dense_grid: tuple = (8, 6), fps: float = 60.0,
                  cadence_fps: float = 2.0, grid_overlap: float = 0.0,
+                 stripe_mode: str = "rolling", dense_per_frame: int = 2,
                  **v1_kwargs):
         self.src_w = int(src_w)
         self.src_h = int(src_h)
         self.dense_grid = dense_grid
+        self.stripe_mode = stripe_mode
+        self.dense_per_frame = max(1, int(dense_per_frame))
         self.K = max(1, int(round(fps / cadence_fps)))
         self._v1 = TileScheduler(self.src_w, self.src_h,
                                  grid_overlap=grid_overlap, **v1_kwargs)
@@ -34,37 +51,21 @@ class StripedDenseScheduler:
                          for i in range(self.K)]
 
     def stripe_indices(self, frame_idx: int) -> list[int]:
-        """Logical dense-cell indices run on `frame_idx` (== crop indices)."""
+        """Dense-cell indices swept on `frame_idx` (== crop indices). These are
+        also the cells DetectionPersistence refreshes (carry-forward elsewhere)."""
+        n = len(self._dense)
+        if self.stripe_mode == "rolling":
+            start = (frame_idx * self.dense_per_frame) % n
+            return [(start + k) % n for k in range(min(self.dense_per_frame, n))]
         return self._stripes[frame_idx % self.K]
 
-    def _target_crops(self, lock: LockState):
-        """Return (crops, in_recovery). ROI when TRACKING; recovery grid when
-        SEARCHING/LOST with a known track. Mirrors TileScheduler.decide minus
-        the discovery grid (this class owns the dense pass)."""
-        if lock.status in ("SEARCHING", "LOST") and lock.track_id is not None:
-            gx, gy = self._v1.recovery_grid
-            bx, by, bw, bh = lock.bbox_norm
-            ecx = bx + bw / 2 + lock.last_velocity[0] * lock.frames_since_seen
-            ecy = by + bh / 2 + lock.last_velocity[1] * lock.frames_since_seen
-            span = self._v1.recovery_span
-            half = span / 2
-            x0_n = max(0.0, min(1.0 - span, ecx - half))
-            y0_n = max(0.0, min(1.0 - span, ecy - half))
-            crops = self._v1._grid(gx, gy, x0_n * self.src_w, y0_n * self.src_h,
-                                   span * self.src_w, span * self.src_h, "s")
-            return crops, True
-        crops = []
-        if lock.status == "TRACKING":
-            crops.append(self._v1._roi(lock))
-        return crops, False
-
     def decide(self, lock: LockState, frame_idx: int, meter) -> list[CropRect]:
-        target_crops, in_recovery = self._target_crops(lock)
-        if in_recovery:
-            crops = target_crops          # recovery owns the frame
-        else:
-            stripe = [self._dense[i] for i in self.stripe_indices(frame_idx)]
-            crops = target_crops + stripe  # ROI first, then dense stripe
+        # ROI tile only while actively TRACKING; otherwise the rolling dense
+        # sweep alone is the (flat, whole-frame) search.
+        crops: list[CropRect] = []
+        if lock.status == "TRACKING":
+            crops.append(self._v1._roi(lock))    # ROI first so budget keeps it
+        crops += [self._dense[i] for i in self.stripe_indices(frame_idx)]
         budget = int(meter.available(frame_idx))
         if budget >= 0 and len(crops) > budget:
             crops = crops[:max(0, budget)]

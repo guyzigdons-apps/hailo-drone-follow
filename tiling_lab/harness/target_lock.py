@@ -90,10 +90,19 @@ class TargetLock:
         self._seed_age = 0
 
     def seed(self, bbox_norm: tuple) -> None:
-        """Externally seed the target by bbox (x, y, w, h) normalized — the
-        initial-location fallback. Cleared once a track is bound or it times out."""
+        """Externally seed the target by bbox (x, y, w, h) normalized — manual
+        target selection / re-acquisition. Resets any existing binding so the
+        seed takes over as a FRESH lock (e.g. re-acquiring a reappeared target at
+        a new location). Cleared once a track is bound or it times out."""
         self._pending_seed = tuple(bbox_norm)
         self._seed_age = 0
+        self._bt_track_id = None
+        self.track_id = None
+        self._anchor = None
+        self._acq_count = 0
+        self._acq_misses = 0
+        self._acq_cand_bbox = None
+        self._acq_cand_center = None
 
     def _most_central_det(self, dets: Sequence[Det]):
         """Raw detection within the central region nearest (0.5, 0.5); None if

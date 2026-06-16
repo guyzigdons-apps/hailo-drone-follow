@@ -32,6 +32,7 @@ class DynamicTilingController:
                  scheduler_kwargs: dict | None = None,
                  striped: bool = False, persist: bool = False,
                  dense_grid: tuple = (8, 6), cadence_fps: float = 2.0,
+                 stripe_mode: str = "rolling", dense_per_frame: int = 2,
                  acquire_mode: str = "largest", center_frac: float = 0.15,
                  central_frames: int = 10):
         self.src_w = int(src_w)
@@ -40,7 +41,8 @@ class DynamicTilingController:
         if striped:
             self._sched = StripedDenseScheduler(
                 self.src_w, self.src_h, dense_grid=dense_grid, fps=float(fps),
-                cadence_fps=cadence_fps, **(scheduler_kwargs or {}))
+                cadence_fps=cadence_fps, stripe_mode=stripe_mode,
+                dense_per_frame=dense_per_frame, **(scheduler_kwargs or {}))
         else:
             self._sched = TileScheduler(self.src_w, self.src_h,
                                         **(scheduler_kwargs or {}))
