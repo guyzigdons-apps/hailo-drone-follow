@@ -46,3 +46,18 @@ def test_offcenter_target_never_acquired_in_central_mode():
     lock = TargetLock(acquire_mode="central", center_frac=0.15, central_frames=3)
     _step_n(lock, [BIG_OFF], 10)
     assert lock.track_id is None
+
+
+def test_central_acquisition_tolerates_detection_gaps():
+    # The striped dense grid samples a not-yet-locked target only intermittently.
+    # Central observations must accumulate ACROSS gaps (no detection at all on the
+    # gap frames), not require consecutive frames.
+    lock = TargetLock(acquire_mode="central", center_frac=0.2, central_frames=4)
+    # Warm up the track so ByteTracker keeps a stable activated id across gaps.
+    _step_n(lock, [CENTRAL], 3)
+    # Now alternate: central detection, then several empty (gap) frames.
+    for _ in range(4):
+        lock.step([CENTRAL], lock_if_unlocked=True)      # central observation
+        _step_n(lock, [], 5)                              # gap: nothing detected
+    assert lock.track_id is not None                      # accumulated -> locked
+    assert lock.state.bbox_norm[2] > 0

@@ -77,6 +77,7 @@ class TargetLock:
         self.central_frames = central_frames
         self._acq_candidate_id: int | None = None
         self._acq_count = 0
+        self._acq_misses = 0
 
     def _most_central_track(self, tracks):
         """Activated track within the central region with the smallest centre
@@ -147,15 +148,29 @@ class TargetLock:
             if gt_bbox_norm is not None:
                 self.lock_from_gt(gt_bbox_norm, tracks)
             elif lock_if_unlocked and self.acquire_mode == "central":
+                # Count central *observations* of the same track, tolerating
+                # gaps: the striped dense grid only samples a given cell every
+                # cropping period, so a not-yet-locked target is detected
+                # intermittently. Requiring consecutive frames would never
+                # accumulate. The counter resets only when a DIFFERENT track
+                # becomes the central candidate, or after the candidate has been
+                # unseen for longer than track_buffer (it left the centre).
                 cand = self._most_central_track(tracks)
-                cand_id = cand.track_id if cand is not None else None
-                if cand_id is not None and cand_id == self._acq_candidate_id:
-                    self._acq_count += 1
+                if cand is not None:
+                    if cand.track_id == self._acq_candidate_id:
+                        self._acq_count += 1
+                    else:
+                        self._acq_candidate_id = cand.track_id
+                        self._acq_count = 1
+                    self._acq_misses = 0
+                    if self._acq_count >= self.central_frames:
+                        self._set_track(cand.track_id)
                 else:
-                    self._acq_candidate_id = cand_id
-                    self._acq_count = 1 if cand_id is not None else 0
-                if cand is not None and self._acq_count >= self.central_frames:
-                    self._set_track(cand.track_id)
+                    self._acq_misses += 1
+                    if self._acq_misses > self.track_buffer:
+                        self._acq_candidate_id = None
+                        self._acq_count = 0
+                        self._acq_misses = 0
             elif lock_if_unlocked:
                 acts = [t for t in tracks if t.is_activated and t.filtered_tlwh]
                 if acts:

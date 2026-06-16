@@ -76,9 +76,15 @@ def probe_dims(video: str) -> tuple[int, int]:
 
 
 def build_pipeline(video, hef, post_so, func, labels, w, h, fps):
+    # Dedicated vdevice group, NOT the default "SHARED": this is a standalone
+    # measurement tool, and because we os._exit() to dodge the Hailo NULL-teardown
+    # abort, network-groups aren't released cleanly — pinning them to a private
+    # group keeps that from polluting the SHARED group other apps use (a polluted
+    # SHARED group was observed to halve throughput after many runs).
     inner = INFERENCE_PIPELINE(hef_path=hef, post_process_so=post_so,
                                post_function_name=func, batch_size=1,
-                               config_json=labels, name="show_infer")
+                               config_json=labels, name="show_infer",
+                               vdevice_group_id="showcase_solo")
     src = SOURCE_PIPELINE(video_source=video, video_width=w, video_height=h,
                           frame_rate=fps, sync=False)
     return (
@@ -117,9 +123,10 @@ def main():
     ap.add_argument("--center-frac", type=float, default=0.15,
                     help="half-width of the central acquisition region "
                          "(centre in [0.5-f, 0.5+f] on both axes).")
-    ap.add_argument("--central-frames", type=int, default=10,
-                    help="consecutive frames a target must stay most-central "
-                         "before it is locked.")
+    ap.add_argument("--central-frames", type=int, default=5,
+                    help="number of central *observations* (detections, which "
+                         "arrive ~cadence-fps/s for an unlocked target) the same "
+                         "track must accumulate before it is locked.")
     ap.add_argument("--label", default="showcase")
     ap.add_argument("--hef", default=DEFAULT_HEF)
     ap.add_argument("--post-so", default=DEFAULT_SO)
