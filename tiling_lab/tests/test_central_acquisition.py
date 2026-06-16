@@ -48,6 +48,26 @@ def test_offcenter_target_never_acquired_in_central_mode():
     assert lock.track_id is None
 
 
+def test_manual_seed_binds_offcenter_target():
+    # seed() fallback locks a target by location even when it's NOT central
+    # (auto-central would never pick it). central_frames huge so only seed acts.
+    lock = TargetLock(acquire_mode="central", center_frac=0.15, central_frames=999)
+    lock.seed((0.78, 0.40, 0.20, 0.20))   # BIG_OFF location (off-centre)
+    st = _step_n(lock, [BIG_OFF], 6)
+    assert lock.track_id is not None       # bound to the seeded target
+    cx = st.bbox_norm[0] + st.bbox_norm[2] / 2
+    assert cx > 0.7 and st.status == "TRACKING"
+
+
+def test_seed_times_out_if_target_absent():
+    # A seed pointing where nothing is detected is given up after seed_timeout.
+    lock = TargetLock(acquire_mode="central", central_frames=999, seed_timeout=5)
+    lock.seed((0.5, 0.5, 0.05, 0.05))
+    _step_n(lock, [], 8)                    # nothing ever detected there
+    assert lock.track_id is None
+    assert lock._pending_seed is None       # seed abandoned
+
+
 def test_central_acquisition_tolerates_detection_gaps():
     # The striped dense grid samples a not-yet-locked target only intermittently.
     # Central observations must accumulate ACROSS gaps (no detection at all on the

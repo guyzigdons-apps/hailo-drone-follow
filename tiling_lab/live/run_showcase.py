@@ -127,6 +127,11 @@ def main():
                     help="number of central *observations* (detections, which "
                          "arrive ~cadence-fps/s for an unlocked target) the same "
                          "track must accumulate before it is locked.")
+    ap.add_argument("--init-bbox", default=None, metavar="x,y,w,h",
+                    help="initial-location seed: lock the target at this "
+                         "normalized bbox (0-1) from the start, bypassing "
+                         "auto-acquisition. Fallback for when the target is too "
+                         "small/sparse to auto-acquire.")
     ap.add_argument("--label", default="showcase")
     ap.add_argument("--hef", default=DEFAULT_HEF)
     ap.add_argument("--post-so", default=DEFAULT_SO)
@@ -151,6 +156,12 @@ def main():
         striped=True, persist=True, dense_grid=(gx, gy),
         cadence_fps=args.cadence_fps, acquire_mode=args.acquire_mode,
         center_frac=args.center_frac, central_frames=args.central_frames)
+
+    if args.init_bbox:
+        bx, by, bw, bh = (float(v) for v in args.init_bbox.split(","))
+        ctrl.seed((bx, by, bw, bh))
+        print(f"[showcase] seeded initial target bbox={bx:.3f},{by:.3f},"
+              f"{bw:.3f},{bh:.3f}", flush=True)
 
     frame_records = []
     tile_counts = []

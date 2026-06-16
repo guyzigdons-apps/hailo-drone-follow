@@ -53,7 +53,8 @@ class TargetLock:
     def __init__(self, track_buffer: int = 90, reacq_motion: str = "frozen",
                  reacq_radius_growth: float = 0.0,
                  acquire_mode: str = "largest", center_frac: float = 0.2,
-                 central_frames: int = 5, **tracker_kwargs):
+                 central_frames: int = 5, seed_timeout: int = 90,
+                 **tracker_kwargs):
         self._tracker = create_tracker("byte", track_buffer=track_buffer,
                                        **tracker_kwargs)
         self.track_buffer = track_buffer
@@ -75,26 +76,72 @@ class TargetLock:
         self.acquire_mode = acquire_mode
         self.center_frac = center_frac
         self.central_frames = central_frames
-        self._acq_candidate_id: int | None = None
+        self.seed_timeout = seed_timeout
+        self.acq_assoc_radius = 0.12   # max centre drift to count as same candidate
         self._acq_count = 0
         self._acq_misses = 0
+        self._acq_cand_bbox: tuple | None = None    # running raw-det candidate bbox
+        self._acq_cand_center: tuple | None = None  # running raw-det candidate centre
+        # Pending seed: a bbox we want to lock onto. Set either by central
+        # auto-acquisition or externally via seed(). While pending, the lock
+        # holds an ROI on it (TRACKING state) so the dense tile samples it until
+        # a real activated track appears there and is adopted.
+        self._pending_seed: tuple | None = None
+        self._seed_age = 0
 
-    def _most_central_track(self, tracks):
-        """Activated track within the central region with the smallest centre
-        distance to (0.5, 0.5); None if no activated track is central."""
+    def seed(self, bbox_norm: tuple) -> None:
+        """Externally seed the target by bbox (x, y, w, h) normalized — the
+        initial-location fallback. Cleared once a track is bound or it times out."""
+        self._pending_seed = tuple(bbox_norm)
+        self._seed_age = 0
+
+    def _most_central_det(self, dets: Sequence[Det]):
+        """Raw detection within the central region nearest (0.5, 0.5); None if
+        none is central. Used for auto-acquisition (no track id needed)."""
         lo, hi = 0.5 - self.center_frac, 0.5 + self.center_frac
         best, best_d = None, None
-        for t in tracks:
-            if not (t.is_activated and t.filtered_tlwh):
-                continue
-            x, y, w, h = t.filtered_tlwh
-            cx, cy = x + w / 2.0, y + h / 2.0
+        for d in dets:
+            cx, cy = d.x + d.w / 2.0, d.y + d.h / 2.0
             if not (lo <= cx <= hi and lo <= cy <= hi):
                 continue
-            d = (cx - 0.5) ** 2 + (cy - 0.5) ** 2
-            if best_d is None or d < best_d:
-                best_d, best = d, t
+            dist = (cx - 0.5) ** 2 + (cy - 0.5) ** 2
+            if best_d is None or dist < best_d:
+                best_d, best = dist, d
         return best
+
+    def _raw_central_acquire(self, dets: Sequence[Det]) -> None:
+        """Accumulate central raw-detection observations of the same target
+        (associated frame-to-frame by IoU), tolerating sampling gaps. On reaching
+        central_frames, set a pending seed at that location."""
+        cand = self._most_central_det(dets)
+        if cand is not None:
+            cb = (cand.x, cand.y, cand.w, cand.h)
+            ccx, ccy = cand.x + cand.w / 2.0, cand.y + cand.h / 2.0
+            # Associate by CENTRE DISTANCE, not IoU: targets here are tiny
+            # (a few px wide) and wobble between sparse samples, so their boxes
+            # rarely overlap (IoU~0) even when it's plainly the same object.
+            if self._acq_cand_center is not None:
+                pcx, pcy = self._acq_cand_center
+                same = ((ccx - pcx) ** 2 + (ccy - pcy) ** 2) ** 0.5 < self.acq_assoc_radius
+                self._acq_count = self._acq_count + 1 if same else 1
+            else:
+                self._acq_count = 1
+            self._acq_cand_bbox = cb
+            self._acq_cand_center = (ccx, ccy)
+            self._acq_misses = 0
+            if self._acq_count >= self.central_frames:
+                self._pending_seed = cb
+                self._seed_age = 0
+                self._acq_count = 0
+                self._acq_cand_bbox = None
+                self._acq_cand_center = None
+        else:
+            self._acq_misses += 1
+            if self._acq_misses > self.track_buffer:
+                self._acq_cand_bbox = None
+                self._acq_cand_center = None
+                self._acq_count = 0
+                self._acq_misses = 0
 
     @property
     def reacq_anchor(self) -> tuple | None:
@@ -145,32 +192,19 @@ class TargetLock:
         self.last_tracks = tracks
 
         if self._bt_track_id is None:
-            if gt_bbox_norm is not None:
+            if self._pending_seed is not None:
+                # A seed is pending (from central auto-acquire or seed()): bind
+                # to an activated track overlapping it as soon as one appears.
+                self.lock_from_gt(self._pending_seed, tracks)
+                if self._bt_track_id is not None:
+                    self._pending_seed = None
+            elif gt_bbox_norm is not None:
                 self.lock_from_gt(gt_bbox_norm, tracks)
             elif lock_if_unlocked and self.acquire_mode == "central":
-                # Count central *observations* of the same track, tolerating
-                # gaps: the striped dense grid only samples a given cell every
-                # cropping period, so a not-yet-locked target is detected
-                # intermittently. Requiring consecutive frames would never
-                # accumulate. The counter resets only when a DIFFERENT track
-                # becomes the central candidate, or after the candidate has been
-                # unseen for longer than track_buffer (it left the centre).
-                cand = self._most_central_track(tracks)
-                if cand is not None:
-                    if cand.track_id == self._acq_candidate_id:
-                        self._acq_count += 1
-                    else:
-                        self._acq_candidate_id = cand.track_id
-                        self._acq_count = 1
-                    self._acq_misses = 0
-                    if self._acq_count >= self.central_frames:
-                        self._set_track(cand.track_id)
-                else:
-                    self._acq_misses += 1
-                    if self._acq_misses > self.track_buffer:
-                        self._acq_candidate_id = None
-                        self._acq_count = 0
-                        self._acq_misses = 0
+                # Auto-acquire from raw central DETECTIONS (not activated tracks):
+                # a sparsely-sampled target never forms an activated track before
+                # locking, so we seed on the detection and let the ROI densify it.
+                self._raw_central_acquire(person_dets)
             elif lock_if_unlocked:
                 acts = [t for t in tracks if t.is_activated and t.filtered_tlwh]
                 if acts:
@@ -239,6 +273,21 @@ class TargetLock:
             self._anchor = tuple(cur.filtered_tlwh)
             s.status = "TRACKING"
             s.frames_since_seen = 0
+            self._seed_age = 0
+        elif self._pending_seed is not None:
+            # Seeded but not yet bound to a track: report TRACKING at the seed so
+            # the scheduler places an ROI tile there, densely sampling that spot
+            # until a track activates and lock_from_gt (above) adopts it. Give up
+            # after seed_timeout frames so a bad seed doesn't pin the ROI forever.
+            s.bbox_norm = tuple(self._pending_seed)
+            s.status = "TRACKING"
+            s.frames_since_seen = 0
+            self._anchor = tuple(self._pending_seed)
+            self._seed_age += 1
+            if self._seed_age > self.seed_timeout:
+                self._pending_seed = None
+                self._seed_age = 0
+                s.status = "LOST"
         else:
             # last_velocity is deliberately retained during loss so the scheduler can extrapolate ROI placement.
             s.frames_since_seen += 1

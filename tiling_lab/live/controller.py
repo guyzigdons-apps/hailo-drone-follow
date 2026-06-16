@@ -63,6 +63,12 @@ class DynamicTilingController:
         self._frame += 1
         return crops_to_tiles_static(crops, self.src_w, self.src_h)
 
+    def seed(self, bbox_norm: tuple) -> None:
+        """Initial-location fallback: seed the lock with the target bbox
+        (x, y, w, h normalized). The ROI tile then densely samples that spot
+        until a track activates there and is adopted."""
+        self._lock.seed(bbox_norm)
+
     @staticmethod
     def _iou(a, b) -> float:
         ax, ay, aw, ah = a
