@@ -113,7 +113,7 @@ def build_pipeline(video, hef, post_so, func, labels, w, h, fps):
     )
 
 
-def main():
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", required=True)
     ap.add_argument("--out", required=True)
@@ -149,6 +149,11 @@ def main():
                          "(never jumps to another object); 'central' locks the "
                          "target held nearest frame centre for --central-frames "
                          "frames; 'largest' locks the biggest detection (legacy).")
+    ap.add_argument("--select-mode", default="click", choices=["click", "detection"],
+                    help="how a --seed acts: 'click' runs a zoom pyramid at the "
+                         "location until the target is found (works before dense "
+                         "detects it); 'detection' snaps to an existing nearby "
+                         "detection (tight gate, no zoom).")
     ap.add_argument("--center-frac", type=float, default=0.15,
                     help="half-width of the central acquisition region "
                          "(centre in [0.5-f, 0.5+f] on both axes).")
@@ -171,7 +176,11 @@ def main():
     ap.add_argument("--post-so", default=DEFAULT_SO)
     ap.add_argument("--func", default=DEFAULT_FUNC)
     ap.add_argument("--labels", default=DEFAULT_LABELS)
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
 
     gx, gy = (int(v) for v in args.dense_grid.lower().split("x"))
     os.makedirs(args.out, exist_ok=True)
@@ -215,9 +224,10 @@ def main():
         if state["t0"] is None:
             state["t0"] = time.perf_counter()
         if state["frame"] in seeds_by_frame:
-            ctrl.seed(seeds_by_frame[state["frame"]])
+            ctrl.seed(seeds_by_frame[state["frame"]], mode=args.select_mode)
             print(f"[showcase] seeded target @frame {state['frame']} "
-                  f"bbox={seeds_by_frame[state['frame']]}", flush=True)
+                  f"bbox={seeds_by_frame[state['frame']]} mode={args.select_mode}",
+                  flush=True)
         buf = info.get_buffer()
         roi = hailo.get_roi_from_buffer(buf)
         dets = roi.get_objects_typed(hailo.HAILO_DETECTION)
