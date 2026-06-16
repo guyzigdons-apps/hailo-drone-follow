@@ -339,6 +339,10 @@ class SeedTracker:
         self._pred_center: tuple | None = None   # predicted target centre next frame
         self._last_center: tuple | None = None   # last actually-observed centre
 
+    @property
+    def bound(self) -> bool:
+        return self._bound
+
     def seed(self, bbox_norm: tuple) -> None:
         """(Re)seed the target by POSITION. Resets any existing binding so a
         second seed (e.g. a new trail) is a fresh acquisition, not a continuation."""

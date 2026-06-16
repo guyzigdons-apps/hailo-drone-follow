@@ -13,6 +13,7 @@ ready to push onto hailotilecropper_dynamic.
 from collections.abc import Sequence
 
 from hailo_tiling.budget import BudgetMeter
+from hailo_tiling.dynamic.acquisition import pyramid_crops
 from hailo_tiling.dynamic.scheduler import TileScheduler
 from hailo_tiling.dynamic.striped import StripedDenseScheduler
 from hailo_tiling.dynamic.persistence import DetectionPersistence
@@ -62,6 +63,8 @@ class DynamicTilingController:
         self._persist = DetectionPersistence(dense_grid) if persist else None
         self._frame = 0
         self._total_tiles = 0
+        self._select_mode = "detection"
+        self._click: tuple | None = None
 
     def update(self, persons: Sequence[Det]) -> str:
         """Step one frame; return the tiles-static string for the next frame."""
@@ -75,10 +78,13 @@ class DynamicTilingController:
         self._frame += 1
         return crops_to_tiles_static(crops, self.src_w, self.src_h)
 
-    def seed(self, bbox_norm: tuple) -> None:
-        """Initial-location fallback: seed the lock with the target bbox
-        (x, y, w, h normalized). The ROI tile then densely samples that spot
-        until a track activates there and is adopted."""
+    def seed(self, bbox_norm: tuple, mode: str = "detection") -> None:
+        """Seed the target. mode='detection' snaps to an existing nearby
+        detection (tight gate); mode='click' runs a zoom pyramid at the click
+        until a detection is found (works before dense has detected it)."""
+        self._select_mode = mode
+        self._click = (bbox_norm[0] + bbox_norm[2] / 2.0,
+                       bbox_norm[1] + bbox_norm[3] / 2.0)
         self._lock.seed(bbox_norm)
 
     def step_showcase(self, target_dets, all_dets):
@@ -105,6 +111,11 @@ class DynamicTilingController:
                         and self._lock.state.bbox_norm[2] > 0)
         st = self._lock.state
         crops = self._sched.decide(st, self._frame, self._meter)
+        if (self._seed_mode and self._select_mode == "click"
+                and self._click is not None and not self._lock.bound):
+            dense = [c for c in crops if c.mode == "m"]
+            crops = pyramid_crops(self._click[0], self._click[1],
+                                  self.src_w, self.src_h) + dense
         self._meter.charge(len(crops), self._frame)
         self._total_tiles += len(crops)
 

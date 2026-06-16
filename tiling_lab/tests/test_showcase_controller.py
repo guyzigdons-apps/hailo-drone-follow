@@ -118,3 +118,25 @@ def test_seed_mode_does_not_switch_to_a_different_car():
     _tiles, records = ctrl.step_showcase([far], [_det_dict(0.10, 0.85, 0.06, 0.05)])
     # The lock must NOT adopt the far car as the target.
     assert not [r for r in records if r["label"] == "target"]
+
+
+from hailo_tiling.dynamic.acquisition import DEFAULT_PYRAMID_WIDTHS
+
+
+def test_click_seed_emits_pyramid_before_detection_then_stops_after_bind():
+    ctrl = DynamicTilingController(3840, 2160, fps=60.0, budget_inf_per_s=600.0,
+                                   striped=True, persist=True, dense_grid=(7, 6),
+                                   grid_overlap=0.15, acquire_mode="seed")
+    ctrl.seed((0.50, 0.30, 0.04, 0.04), mode="click")    # raw click, nothing detected yet
+    # No detection yet: the pyramid (multiple "s" tiles at the click) must be emitted.
+    tiles, _ = ctrl.step_showcase([], [])
+    dyn = [seg for seg in tiles.split(";") if seg.endswith(",s")]
+    assert len(dyn) >= len([w for w in DEFAULT_PYRAMID_WIDTHS if w <= 3840])
+    # Now a zoomed level detects the car at the click → bind → pyramid stops.
+    real = _target_det(0.518, 0.317, w=0.03, h=0.02)
+    ctrl.step_showcase([real], [{"label": "vehicle", "confidence": 0.9,
+                                 "bbox": [0.518, 0.317, 0.03, 0.02]}])
+    tiles2, _ = ctrl.step_showcase([real], [{"label": "vehicle", "confidence": 0.9,
+                                             "bbox": [0.518, 0.317, 0.03, 0.02]}])
+    dyn2 = [seg for seg in tiles2.split(";") if seg.endswith(",s")]
+    assert len(dyn2) == 1                                 # single tracking ROI, no pyramid
