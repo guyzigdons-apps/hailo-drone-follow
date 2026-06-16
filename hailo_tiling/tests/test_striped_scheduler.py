@@ -132,3 +132,21 @@ def test_search_respects_zero_budget():
         def available(self, frame_idx):
             return 0.0
     assert s.decide(lock, frame_idx=0, meter=_ZeroBudget()) == []
+
+
+def test_flat_load_not_trimmed_under_showcase_budget():
+    """With the showcase default budget (600/s @ 60 fps), the flat ROI+dense
+    load of 3 tiles/frame must never be trimmed.  BudgetMeter.available()
+    returns a per-frame average share; at steady state that is
+    (600 - 3*60) / 60 = 7.0 >> 3, so no tile should be dropped."""
+    from hailo_tiling.budget import BudgetMeter
+    s = StripedDenseScheduler(3840, 2160, fps=60.0, dense_per_frame=2)
+    meter = BudgetMeter(budget_inf_per_s=600.0, fps=60.0)  # showcase default
+    lock = _tracking_lock()
+    counts = []
+    for f in range(120):                       # two full dense sweeps
+        crops = s.decide(lock, f, meter)
+        meter.charge(len(crops), f)            # charge like the controller does
+        counts.append(len(crops))
+    # Every TRACKING frame keeps ROI(1) + dense(2) = 3; never trimmed to 2.
+    assert min(counts) == 3 and max(counts) == 3

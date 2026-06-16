@@ -111,7 +111,12 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--frames", type=int, default=0, help="0 = whole clip")
     ap.add_argument("--fps", type=float, default=60.0)
-    ap.add_argument("--budget", type=float, default=300.0)
+    ap.add_argument("--budget", type=float, default=600.0,
+                    help="inference budget (tiles/s, sliding-window). The showcase "
+                         "load is flat: ROI(1) + --dense-per-frame tiles per frame. "
+                         "budget/fps must exceed 2*(1 + dense_per_frame) so the meter "
+                         "never trims it; 600 @ 60 fps leaves headroom for recovery "
+                         "bursts (steady-state share ≈ 7 tiles/frame vs a load of 3).")
     ap.add_argument("--target-class", default="vehicle")
     ap.add_argument("--dense-grid", default="7x6",
                     help="full-frame dense grid (cols x rows). 7x6 on a 4K "

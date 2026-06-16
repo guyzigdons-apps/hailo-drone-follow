@@ -28,7 +28,7 @@ _SOT_DEDUP_IOU = 0.5
 
 class DynamicTilingController:
     def __init__(self, src_w: int, src_h: int, *, fps: float = 30.0,
-                 budget_inf_per_s: float = 60.0, track_buffer: int = 90,
+                 budget_inf_per_s: float = 600.0, track_buffer: int = 90,
                  scheduler_kwargs: dict | None = None,
                  striped: bool = False, persist: bool = False,
                  dense_grid: tuple = (8, 6), cadence_fps: float = 2.0,
