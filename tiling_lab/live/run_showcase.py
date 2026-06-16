@@ -138,7 +138,7 @@ def main():
     state = {"frame": 0, "t0": None, "t_last": None}
     loop = GLib.MainLoop()
 
-    def probe(pad, info):
+    def probe(_pad, info):
         if state["t0"] is None:
             state["t0"] = time.perf_counter()
         buf = info.get_buffer()
@@ -214,9 +214,9 @@ def main():
         "max_tiles_per_frame": max(counts),
         "p95_tiles_per_frame": sorted(counts)[int(0.95 * (len(counts) - 1))],
     }
-    with open(os.path.join(args.out, "frames.json"), "w") as fp:
+    with open(os.path.join(args.out, "frames.json"), "w", encoding="utf-8") as fp:
         json.dump({"label": args.label, "frames": frame_records}, fp)
-    with open(os.path.join(args.out, "metrics.json"), "w") as fp:
+    with open(os.path.join(args.out, "metrics.json"), "w", encoding="utf-8") as fp:
         json.dump(metrics, fp, indent=2)
     print(f"[showcase] {n} frames, achieved_fps={achieved:.2f} "
           f"sustains_60fps={metrics['sustains_60fps']} "

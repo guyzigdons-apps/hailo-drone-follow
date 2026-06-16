@@ -7,8 +7,9 @@
 
 Pipeline: filesrc -> decodebin -> hailotilecropper_dynamic -> hailonet infer
 -> hailotileaggregator -> overlay -> x264 -> mkv. A buffer probe on the
-aggregator src steps the DynamicTilingController with this frame's person
-detections and pushes the returned tiles-static string onto the cropper for the
+aggregator's OUTPUT QUEUE (not its src pad — probing src serialises the
+aggregator thread to ~7 fps) steps the DynamicTilingController with this frame's
+person detections and pushes the returned tiles-static string onto the cropper for the
 NEXT frame (one cropping-period latency, confirmed by spike S1). Saves an
 overlay .mkv and a per-frame tiles JSONL so the run is verifiable headless.
 """
@@ -98,7 +99,6 @@ def main():
         build_pipeline(args.video, args.hef, args.post_so, args.func,
                        args.labels, w, h, args.fps, out_mkv))
     cropper = pipeline.get_by_name("tc")
-    agg = pipeline.get_by_name("agg")
 
     # Opened only after probe_dims + parse_launch succeed, so an early failure
     # never leaves a stray/partial tiles.jsonl behind.
@@ -138,7 +138,12 @@ def main():
             loop.quit()
         return Gst.PadProbeReturn.OK
 
-    agg.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, probe)
+    # Probe DOWNSTREAM of live_out_q, not on agg.src: on the aggregator's src
+    # pad the probe runs on the aggregator's streaming thread, and stepping the
+    # controller + pushing tiles-static back to the upstream cropper stalls
+    # aggregation (~7 fps). Probing after the queue decouples it -> full speed.
+    out_q = pipeline.get_by_name("live_out_q")
+    out_q.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, probe)
 
     bus = pipeline.get_bus()
     bus.add_signal_watch()
