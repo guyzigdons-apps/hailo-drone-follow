@@ -59,3 +59,35 @@ def test_step_showcase_dedups_persisted_target_box():
                    if abs(r["bbox"][0] - 0.5) < 0.02 and abs(r["bbox"][1] - 0.5) < 0.02]
     assert len(near_target) == 1
     assert near_target[0]["label"] == "target"
+
+
+def test_seed_mode_draws_real_bbox_not_seed_box():
+    ctrl = DynamicTilingController(3840, 2160, fps=60.0, budget_inf_per_s=300.0,
+                                   striped=True, persist=True, dense_grid=(7, 6),
+                                   grid_overlap=0.15, acquire_mode="seed")
+    # Seed a POSITION; the real car is a slightly different box nearby.
+    ctrl.seed((0.50, 0.30, 0.04, 0.04))           # seed centre (0.52, 0.32)
+    real = _target_det(0.521, 0.318, w=0.05, h=0.035)
+
+    # Frame with NO target detection: a tile must still be placed (ROI at seed)
+    # but NO "target" record is emitted (no made-up seed box drawn).
+    tiles, records = ctrl.step_showcase([], [])
+    assert tiles
+    assert not [r for r in records if r["label"] == "target"]
+
+    # Frame WITH the real detection: exactly one "target" record, the REAL bbox.
+    tiles, records = ctrl.step_showcase([real], [_det_dict(0.521, 0.318, 0.05, 0.035)])
+    tgt = [r for r in records if r["label"] == "target"]
+    assert len(tgt) == 1
+    assert tgt[0]["bbox"] == [0.521, 0.318, 0.05, 0.035]
+
+
+def test_seed_mode_does_not_switch_to_a_different_car():
+    ctrl = DynamicTilingController(3840, 2160, fps=60.0, budget_inf_per_s=300.0,
+                                   striped=True, persist=True, dense_grid=(7, 6),
+                                   grid_overlap=0.15, acquire_mode="seed")
+    ctrl.seed((0.50, 0.30, 0.04, 0.04))           # centre (0.52, 0.32)
+    far = _target_det(0.10, 0.85, w=0.06, h=0.05)  # a different, bigger car
+    _tiles, records = ctrl.step_showcase([far], [_det_dict(0.10, 0.85, 0.06, 0.05)])
+    # The lock must NOT adopt the far car as the target.
+    assert not [r for r in records if r["label"] == "target"]

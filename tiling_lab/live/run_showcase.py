@@ -113,7 +113,12 @@ def main():
     ap.add_argument("--fps", type=float, default=60.0)
     ap.add_argument("--budget", type=float, default=300.0)
     ap.add_argument("--target-class", default="vehicle")
-    ap.add_argument("--dense-grid", default="8x6")
+    ap.add_argument("--dense-grid", default="7x6",
+                    help="full-frame dense grid (cols x rows). 7x6 on a 4K "
+                         "source yields ~native 640x480 crops.")
+    ap.add_argument("--grid-overlap", type=float, default=0.15,
+                    help="fraction of each dense cell shared with its neighbour "
+                         "so boundary objects appear whole in an adjacent tile.")
     ap.add_argument("--cadence-fps", type=float, default=2.0,
                     help="(interleaved mode only) full-frame refresh rate.")
     ap.add_argument("--stripe-mode", default="rolling",
@@ -123,11 +128,14 @@ def main():
     ap.add_argument("--dense-per-frame", type=int, default=2,
                     help="(rolling) dense inferences allocated per frame; the "
                          "rest of the budget serves the tracking ROI tile.")
-    ap.add_argument("--acquire-mode", default="central",
-                    choices=["central", "largest"],
-                    help="auto-acquisition policy: 'central' locks the target "
-                         "held nearest frame centre for --central-frames frames; "
-                         "'largest' locks the biggest detection (legacy).")
+    ap.add_argument("--acquire-mode", default="seed",
+                    choices=["seed", "central", "largest"],
+                    help="target policy: 'seed' (default) follows exactly the "
+                         "--seed/--init-bbox position via a direct nearest-"
+                         "detection associator and shows the REAL detected bbox "
+                         "(never jumps to another object); 'central' locks the "
+                         "target held nearest frame centre for --central-frames "
+                         "frames; 'largest' locks the biggest detection (legacy).")
     ap.add_argument("--center-frac", type=float, default=0.15,
                     help="half-width of the central acquisition region "
                          "(centre in [0.5-f, 0.5+f] on both axes).")
@@ -169,7 +177,8 @@ def main():
         striped=True, persist=True, dense_grid=(gx, gy),
         cadence_fps=args.cadence_fps, stripe_mode=args.stripe_mode,
         dense_per_frame=args.dense_per_frame, acquire_mode=args.acquire_mode,
-        center_frac=args.center_frac, central_frames=args.central_frames)
+        center_frac=args.center_frac, central_frames=args.central_frames,
+        grid_overlap=args.grid_overlap)
 
     # Build the timed-seed map {frame -> bbox} from --init-bbox/--init-frame and
     # any --seed FRAME:x,y,w,h entries. Applied in the probe when the frame hits.
@@ -180,6 +189,9 @@ def main():
     for spec in args.seed:
         fr_str, bbox_str = spec.split(":")
         seeds_by_frame[int(fr_str)] = tuple(float(v) for v in bbox_str.split(","))
+    if args.acquire_mode == "seed" and not seeds_by_frame:
+        print("[showcase][WARN] acquire-mode=seed but no --seed/--init-bbox "
+              "given; the target will never be acquired.", flush=True)
 
     frame_records = []
     tile_counts = []

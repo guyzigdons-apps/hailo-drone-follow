@@ -1,5 +1,26 @@
 from hailo_tiling.dynamic.striped import StripedDenseScheduler
-from hailo_tiling.types import LockState
+from hailo_tiling.types import LockState, MODEL_W
+
+
+# ---- native-resolution overlapping dense grid (default) --------------------
+
+def test_default_dense_grid_is_native_overlapping():
+    # Defaults must give ~native 640x480 crops WITH overlap on a 4K source.
+    s = StripedDenseScheduler(3840, 2160)
+    assert s.dense_grid == (7, 6)
+    assert s._v1.grid_overlap == 0.15
+    assert len(s._dense) == 42
+    # Every dense crop runs at ~scale 1.0 (native) — no >~5% up/downscale.
+    for c in s._dense:
+        assert 0.95 <= c.scale <= 1.10, (c.w, c.scale)
+
+
+def test_default_dense_tiles_overlap_neighbours():
+    s = StripedDenseScheduler(3840, 2160)
+    # First two cells in row 0 share horizontal extent (right edge of cell 0
+    # past the left edge of cell 1) => real overlap, not a gap.
+    c0, c1 = s._dense[0], s._dense[1]
+    assert (c0.x + c0.w) > c1.x
 
 
 # ---- interleaved mode (legacy, opt-in) -------------------------------------

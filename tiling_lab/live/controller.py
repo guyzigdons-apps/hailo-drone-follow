@@ -17,7 +17,7 @@ from hailo_tiling.dynamic.scheduler import TileScheduler
 from hailo_tiling.dynamic.striped import StripedDenseScheduler
 from hailo_tiling.dynamic.persistence import DetectionPersistence
 from hailo_tiling.types import Det
-from tiling_lab.harness.target_lock import TargetLock
+from tiling_lab.harness.target_lock import TargetLock, SeedTracker
 
 from tiling_lab.live.tiles_format import crops_to_tiles_static
 
@@ -34,7 +34,7 @@ class DynamicTilingController:
                  dense_grid: tuple = (8, 6), cadence_fps: float = 2.0,
                  stripe_mode: str = "rolling", dense_per_frame: int = 2,
                  acquire_mode: str = "largest", center_frac: float = 0.15,
-                 central_frames: int = 10):
+                 central_frames: int = 10, grid_overlap: float = 0.0):
         self.src_w = int(src_w)
         self.src_h = int(src_h)
         self.striped = striped
@@ -42,14 +42,24 @@ class DynamicTilingController:
             self._sched = StripedDenseScheduler(
                 self.src_w, self.src_h, dense_grid=dense_grid, fps=float(fps),
                 cadence_fps=cadence_fps, stripe_mode=stripe_mode,
-                dense_per_frame=dense_per_frame, **(scheduler_kwargs or {}))
+                dense_per_frame=dense_per_frame, grid_overlap=grid_overlap,
+                **(scheduler_kwargs or {}))
         else:
             self._sched = TileScheduler(self.src_w, self.src_h,
+                                        grid_overlap=grid_overlap,
                                         **(scheduler_kwargs or {}))
-        self._lock = TargetLock(track_buffer=track_buffer,
-                                acquire_mode=acquire_mode,
-                                center_frac=center_frac,
-                                central_frames=central_frames)
+        # "seed" acquisition follows exactly the operator-seeded target via a
+        # direct nearest-detection associator (no ByteTracker "largest"/IoU path),
+        # so the lock never jumps to a different object and only ever reports the
+        # REAL detected bbox. Other modes keep the ByteTracker-backed TargetLock.
+        self._seed_mode = (acquire_mode == "seed")
+        if self._seed_mode:
+            self._lock = SeedTracker(track_buffer=track_buffer)
+        else:
+            self._lock = TargetLock(track_buffer=track_buffer,
+                                    acquire_mode=acquire_mode,
+                                    center_frac=center_frac,
+                                    central_frames=central_frames)
         self._meter = BudgetMeter(budget_inf_per_s=float(budget_inf_per_s),
                                   fps=float(fps))
         self._persist = DetectionPersistence(dense_grid) if persist else None
@@ -58,6 +68,9 @@ class DynamicTilingController:
 
     def update(self, persons: Sequence[Det]) -> str:
         """Step one frame; return the tiles-static string for the next frame."""
+        if self._seed_mode:
+            raise RuntimeError("seed acquire_mode is showcase-only; "
+                               "use step_showcase(), not update()")
         self._lock.step(list(persons), lock_if_unlocked=True)
         crops = self._sched.decide(self._lock.state, self._frame, self._meter)
         self._meter.charge(len(crops), self._frame)
@@ -93,15 +106,25 @@ class DynamicTilingController:
         """
         if not self.striped:
             raise RuntimeError("step_showcase requires striped=True")
-        self._lock.step(list(target_dets), lock_if_unlocked=True)
-        crops = self._sched.decide(self._lock.state, self._frame, self._meter)
+        # Step the lock and decide whether a REAL target detection exists this
+        # frame. In seed mode the associator returns that directly; in the
+        # ByteTracker path it's TRACKING with a non-empty bbox (the filtered
+        # track). Either way `detected` gates the drawn box, so we never emit
+        # the synthetic seed position as a "target".
+        if self._seed_mode:
+            detected = self._lock.step(list(target_dets))
+        else:
+            self._lock.step(list(target_dets), lock_if_unlocked=True)
+            detected = (self._lock.state.status == "TRACKING"
+                        and self._lock.state.bbox_norm[2] > 0)
+        st = self._lock.state
+        crops = self._sched.decide(st, self._frame, self._meter)
         self._meter.charge(len(crops), self._frame)
         self._total_tiles += len(crops)
 
         records: list[dict] = []
         target_bbox = None
-        st = self._lock.state
-        if st.status == "TRACKING" and st.bbox_norm[2] > 0:
+        if detected and st.bbox_norm[2] > 0:
             target_bbox = tuple(st.bbox_norm)
             conf = max((d.score for d in target_dets), default=1.0)
             records.append({"label": "target", "confidence": float(conf),

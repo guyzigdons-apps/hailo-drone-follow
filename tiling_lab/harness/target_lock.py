@@ -305,6 +305,102 @@ class TargetLock:
         return s
 
 
+class SeedTracker:
+    """Direct seed->nearest-detection associator for the single-target showcase.
+
+    Unlike :class:`TargetLock` (which routes through ByteTracker activation and
+    a "largest"/IoU acquisition policy designed for auto-following the biggest
+    person), this tracker follows exactly the one object the operator seeds:
+
+    - ``seed(bbox)`` takes a POSITION (the bbox centre) to look at — it is never
+      drawn. The tracker immediately reports ``TRACKING`` at the seed so the
+      scheduler places an ROI tile there and starts sampling that spot.
+    - Each ``step(dets)`` adopts the target-class detection nearest the predicted
+      position, but ONLY within a gate radius. Anything outside the gate is
+      ignored, so the lock can never jump to a different car. The adopted bbox is
+      the REAL detection — ``detected`` is True only on frames where a real box
+      was associated (so the showcase draws the real bbox and nothing else).
+    - During a miss the predicted position is extrapolated by the last velocity
+      and the ROI keeps gliding along it; the gate widens with the miss streak so
+      a target that moved during a brief gap is re-grabbed. After ``track_buffer``
+      consecutive misses the lock goes LOST.
+    """
+
+    def __init__(self, *, track_buffer: int = 90, acq_radius: float = 0.10,
+                 track_radius: float = 0.06, radius_growth: float = 0.004):
+        self.track_buffer = track_buffer
+        self.acq_radius = acq_radius        # gate while still acquiring (no bind yet)
+        self.track_radius = track_radius    # gate once bound to a real detection
+        self.radius_growth = radius_growth  # gate growth per consecutive miss
+        self.state = LockState()
+        self.track_id: int | None = None
+        self.detected = False               # a real detection was associated this frame
+        self._bound = False
+        self._pred_center: tuple | None = None   # predicted target centre next frame
+        self._last_center: tuple | None = None   # last actually-observed centre
+
+    def seed(self, bbox_norm: tuple) -> None:
+        """(Re)seed the target by POSITION. Resets any existing binding so a
+        second seed (e.g. a new trail) is a fresh acquisition, not a continuation."""
+        x, y, w, h = bbox_norm
+        self._pred_center = (x + w / 2.0, y + h / 2.0)
+        self._last_center = None
+        self._bound = False
+        self.detected = False
+        self.track_id = None
+        # Report TRACKING at the seed so the scheduler places the ROI tile here.
+        self.state = LockState(track_id=None, bbox_norm=tuple(bbox_norm),
+                               status="TRACKING", frames_since_seen=0,
+                               last_velocity=(0.0, 0.0))
+
+    def step(self, target_dets: Sequence[Det]) -> bool:
+        """Associate the nearest in-gate detection; return True iff a real
+        detection was adopted this frame."""
+        s = self.state
+        self.detected = False
+        if self._pred_center is None:        # never seeded (or already given up)
+            s.status = "LOST"
+            return False
+
+        pcx, pcy = self._pred_center
+        base = self.track_radius if self._bound else self.acq_radius
+        gate = base + self.radius_growth * s.frames_since_seen
+        best, best_d = None, gate
+        for d in target_dets:
+            cx, cy = d.x + d.w / 2.0, d.y + d.h / 2.0
+            dist = ((cx - pcx) ** 2 + (cy - pcy) ** 2) ** 0.5
+            if dist < best_d:
+                best_d, best = dist, d
+
+        if best is not None:
+            cx, cy = best.x + best.w / 2.0, best.y + best.h / 2.0
+            if self._last_center is not None:
+                s.last_velocity = (cx - self._last_center[0],
+                                   cy - self._last_center[1])
+            self._last_center = (cx, cy)
+            self._pred_center = (cx + s.last_velocity[0], cy + s.last_velocity[1])
+            s.bbox_norm = (best.x, best.y, best.w, best.h)   # the REAL bbox
+            s.status = "TRACKING"
+            s.frames_since_seen = 0
+            self._bound = True
+            self.detected = True
+            return True
+
+        # Miss: glide the ROI along the predicted track, widen the gate, age out.
+        s.frames_since_seen += 1
+        if s.frames_since_seen > self.track_buffer:
+            s.status = "LOST"
+            self._pred_center = None
+            return False
+        vx, vy = s.last_velocity
+        npcx, npcy = pcx + vx, pcy + vy
+        self._pred_center = (npcx, npcy)
+        bw, bh = s.bbox_norm[2], s.bbox_norm[3]
+        s.bbox_norm = (npcx - bw / 2.0, npcy - bh / 2.0, bw, bh)  # ROI follows prediction
+        s.status = "TRACKING"                 # keep sampling the spot it should be at
+        return False
+
+
 class MultiTargetLock:
     """Tracks ALL activated ByteTracker tracks across multiple classes.
 

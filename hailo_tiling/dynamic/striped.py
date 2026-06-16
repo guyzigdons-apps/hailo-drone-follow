@@ -9,18 +9,21 @@ __all__ = ["StripedDenseScheduler"]
 class StripedDenseScheduler:
     """Flat-load dense tiling that sweeps the whole frame at a low effective rate.
 
-    The dense grid (default 8x6, whole frame, multi-scale) is laid out row-major
-    and swept a few cells per frame so the per-frame dense cost is flat (no
-    discovery spike) while any given cell is refreshed only ~once per sweep — the
-    "lower-fps full-frame dense" pass. Off-sweep detections are carried forward by
-    DetectionPersistence (the research's skipped-tile carry-forward). Two sweep
-    orders:
+    The dense grid (default 7x6 @ 0.15 overlap, whole frame, multi-scale) is laid
+    out row-major and swept a few cells per frame so the per-frame dense cost is
+    flat (no discovery spike) while any given cell is refreshed only ~once per
+    sweep — the "lower-fps full-frame dense" pass. On a 3840x2160 source the
+    default grid yields ~629x472 px crops (scale ~1.0 — the model's native
+    640x480 with no upscaling) that overlap their neighbours by ~0.15, so objects
+    on a tile boundary still appear whole in an adjacent tile. Off-sweep
+    detections are carried forward by DetectionPersistence (the research's
+    skipped-tile carry-forward). Two sweep orders:
 
       - ``rolling`` (default): emit ``dense_per_frame`` consecutive cells in
         row-major order, advancing each frame and wrapping — a row-band of dense
         tiles that rolls down the frame. Full-frame refresh every
-        ceil(n_cells / dense_per_frame) frames. With 8x6 and dense_per_frame=2
-        that is 24 frames (~2.5 Hz/cell at 60 fps).
+        ceil(n_cells / dense_per_frame) frames. With 7x6 (42 cells) and
+        dense_per_frame=2 that is 21 frames (~2.9 Hz/cell at 60 fps).
       - ``interleaved``: K = round(fps / cadence_fps) interleaved stripes,
         stripe ``frame % K`` per frame (legacy).
 
@@ -31,8 +34,8 @@ class StripedDenseScheduler:
     """
 
     def __init__(self, src_w: int, src_h: int, *,
-                 dense_grid: tuple = (8, 6), fps: float = 60.0,
-                 cadence_fps: float = 2.0, grid_overlap: float = 0.0,
+                 dense_grid: tuple = (7, 6), fps: float = 60.0,
+                 cadence_fps: float = 2.0, grid_overlap: float = 0.15,
                  stripe_mode: str = "rolling", dense_per_frame: int = 2,
                  **v1_kwargs):
         self.src_w = int(src_w)
