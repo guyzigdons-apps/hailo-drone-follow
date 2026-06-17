@@ -14,6 +14,20 @@
           "trials": []
         }
       ]
+    },
+    {
+      "id": "0007clean", "title": "DJI 0007 — target only (clean + crosshair)",
+      "variants": [
+        {
+          "fov": "native",
+          "source": "/home/giladn/Videos/Drone/Training/Car/DJI_20260614160255_0007_D.MP4",
+          "runs": [
+            {"id": "0007_targetonly", "label": "target only (smoothed crosshair)", "type": "DYN",
+             "path": "tiling_lab/runs/showcase_0007/frames_targetonly_clean.json"}
+          ],
+          "trials": []
+        }
+      ]
     }
   ]
 }
