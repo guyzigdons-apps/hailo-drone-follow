@@ -119,6 +119,7 @@ export function initOverlay(store) {
 
     drawTiles(state, px, py, cbW, zoom);
     drawDetections(state, px, py, zoom);
+    drawCrosshair(state, px, py, zoom);
 
     publishCounts(state);
   }
@@ -231,6 +232,44 @@ export function initOverlay(store) {
       }
     }
     ctx.globalAlpha = 1;
+  }
+
+  // Red crosshair at the EMA-smoothed target center (core/track.js). Constant
+  // on-screen size (divide by zoom). Drawn for every enabled run that has a
+  // smoothed target position at the current frame — normally just one.
+  function drawCrosshair(state, px, py, zoom) {
+    const { enabledRuns, runDocs, frame } = state;
+    if (!enabledRuns || !enabledRuns.length) return;
+    const arm = 12 / zoom;   // outer reach of each tick
+    const gap = 4 / zoom;    // open gap around the center (don't occlude it)
+    const ring = 6 / zoom;   // central ring radius
+
+    for (const runId of enabledRuns) {
+      const doc = runDocs.get(runId);
+      const c = doc && doc.targetTrack && doc.targetTrack.get(frame);
+      if (!c) continue;
+      const cx = px(c.cx);
+      const cy = py(c.cy);
+
+      const paint = (lineW, style) => {
+        ctx.lineWidth = lineW;
+        ctx.strokeStyle = style;
+        ctx.beginPath();
+        ctx.moveTo(cx - arm, cy); ctx.lineTo(cx - gap, cy);
+        ctx.moveTo(cx + gap, cy); ctx.lineTo(cx + arm, cy);
+        ctx.moveTo(cx, cy - arm); ctx.lineTo(cx, cy - gap);
+        ctx.moveTo(cx, cy + gap); ctx.lineTo(cx, cy + arm);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, cy, ring, 0, Math.PI * 2);
+        ctx.stroke();
+      };
+
+      ctx.lineCap = 'round';
+      paint(4 / zoom, 'rgba(0,0,0,0.6)');   // dark halo for contrast on video
+      paint(2 / zoom, TARGET_COLOR);        // red crosshair
+      ctx.lineCap = 'butt';
+    }
   }
 
   function drawChip(d, x, y, color, zoom, contentTop) {
