@@ -1404,6 +1404,66 @@ class OverlayViewer:
             pass
 
 
+def smooth_target_track(runs: list["Run"], *, alpha: float = 0.18,
+                        reset_gap: int = 30,
+                        target_label: str = "target") -> dict[int, tuple[float, float]]:
+    """Frame -> EMA-smoothed (cx, cy) of the target detection centre (normalized).
+
+    Mirrors the web visualizer's smoothTargetTrack (web/js/core/track.js): a
+    CAUSAL exponential moving average over the 'target' detection centres, with
+    a reset after a > ``reset_gap`` frame absence so the crosshair snaps to a
+    re-acquisition instead of gliding across empty space. Only frames that
+    actually contain a target get an entry.
+    """
+    centres: dict[int, tuple[float, float]] = {}
+    for r in runs:
+        for n, dets in r.idx.items():
+            if n in centres:
+                continue
+            for det in dets:
+                if det.get("label") == target_label:
+                    bx, by, bw, bh = det["bbox"]
+                    centres[n] = (bx + bw / 2.0, by + bh / 2.0)
+                    break
+    out: dict[int, tuple[float, float]] = {}
+    sx = sy = None
+    prev: int | None = None
+    for n in sorted(centres):
+        cx, cy = centres[n]
+        if sx is None or (prev is not None and n - prev > reset_gap):
+            sx, sy = cx, cy
+        else:
+            sx = alpha * cx + (1.0 - alpha) * sx
+            sy = alpha * cy + (1.0 - alpha) * sy
+        out[n] = (sx, sy)
+        prev = n
+    return out
+
+
+def _draw_crosshair(frame, cx: int, cy: int, out_w: int,
+                    colour: tuple[int, int, int] = (0, 0, 255)) -> None:
+    """Small red crosshair (ticks + ring) with a dark halo, at (cx, cy) px.
+
+    Sizes are proportional to the output width so it matches the web
+    visualizer's look at any resolution (arm 12 / gap 4 / ring 6 at 1920 wide).
+    """
+    arm = max(8, round(out_w * 12 / 1920))
+    gap = max(3, round(out_w * 4 / 1920))
+    ring = max(4, round(out_w * 6 / 1920))
+    color_lw = max(2, round(out_w / 960))
+    halo_lw = color_lw + max(2, round(out_w / 640))
+
+    def paint(lw: int, col: tuple[int, int, int]) -> None:
+        cv2.line(frame, (cx - arm, cy), (cx - gap, cy), col, lw, cv2.LINE_AA)
+        cv2.line(frame, (cx + gap, cy), (cx + arm, cy), col, lw, cv2.LINE_AA)
+        cv2.line(frame, (cx, cy - arm), (cx, cy - gap), col, lw, cv2.LINE_AA)
+        cv2.line(frame, (cx, cy + gap), (cx, cy + arm), col, lw, cv2.LINE_AA)
+        cv2.circle(frame, (cx, cy), ring, col, lw, cv2.LINE_AA)
+
+    paint(halo_lw, (0, 0, 0))   # dark halo for contrast on video
+    paint(color_lw, colour)     # red crosshair
+
+
 def export_runs(video_path: Path, runs: list["Run"], out_path: Path, *,
                 fps: float | None = None,
                 out_width: int | None = None,
@@ -1412,7 +1472,10 @@ def export_runs(video_path: Path, runs: list["Run"], out_path: Path, *,
                 conf_min: float = 0.25,
                 hide_phantoms: bool = True,
                 containment: bool = True,
-                tiles_source: str | None = None) -> int:
+                tiles_source: str | None = None,
+                crosshair: bool = False,
+                draw_dets: bool = True,
+                crosshair_alpha: float = 0.18) -> int:
     """Headless render of all loaded runs' overlays straight to an MP4.
 
     Re-uses the viewer's draw logic (phantom hide, containment merge, per-run
@@ -1469,6 +1532,9 @@ def export_runs(video_path: Path, runs: list["Run"], out_path: Path, *,
     sx, sy = float(out_w), float(out_h)
     resize_needed = (out_w, out_h) != (src_w, src_h)
 
+    # Smoothed target trajectory for the crosshair (frame -> normalized cx,cy).
+    track = smooth_target_track(runs, alpha=crosshair_alpha) if crosshair else {}
+
     cap.set(cv2.CAP_PROP_POS_FRAMES, first)
     n = first
     written = 0
@@ -1490,34 +1556,41 @@ def export_runs(video_path: Path, runs: list["Run"], out_path: Path, *,
                               (int((tx + tw) * sx), int((ty + th) * sy)),
                               CAT_COLOURS.get(cat, (255, 255, 255)), tile_lw)
 
-        for r in runs:
-            colour = r.colour_bgr  # frame and palette are both BGR
-            dets = []
-            for det in r.idx.get(n, []):
-                if hide_phantoms and r.tile_rects and is_phantom(det, r.tile_rects):
-                    continue
-                dets.append(det)
-            if containment:
-                dets = containment_merge(dets, area_ratio_max=0.5,
-                                         center_slack=0.0)
-            for det in dets:
-                conf = float(det.get("confidence", 0.0))
-                if conf < conf_min:
-                    continue
-                label = det.get("label", "?")
-                # Per-label colour (target red, vehicle green, person orange).
-                # The export frame is BGR (no _rgb swap, unlike the GUI's RGB
-                # disp), so color_for_label's BGR tuple is used verbatim.
-                det_colour = (color_for_label(label)
-                              if label in _LABEL_COLORS else colour)
-                bx, by, bw, bh = det["bbox"]
-                p1 = (int(bx * sx), int(by * sy))
-                p2 = (int((bx + bw) * sx), int((by + bh) * sy))
-                cv2.rectangle(frame, p1, p2, det_colour, box_lw)
-                tag = f"{label} {conf:.2f}"
-                cv2.putText(frame, tag, (p1[0], max(15, p1[1] - 4)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, det_colour, 1,
-                            cv2.LINE_AA)
+        if draw_dets:
+            for r in runs:
+                colour = r.colour_bgr  # frame and palette are both BGR
+                dets = []
+                for det in r.idx.get(n, []):
+                    if hide_phantoms and r.tile_rects and is_phantom(det, r.tile_rects):
+                        continue
+                    dets.append(det)
+                if containment:
+                    dets = containment_merge(dets, area_ratio_max=0.5,
+                                             center_slack=0.0)
+                for det in dets:
+                    conf = float(det.get("confidence", 0.0))
+                    if conf < conf_min:
+                        continue
+                    label = det.get("label", "?")
+                    # Per-label colour (target red, vehicle green, person orange).
+                    # The export frame is BGR (no _rgb swap, unlike the GUI's RGB
+                    # disp), so color_for_label's BGR tuple is used verbatim.
+                    det_colour = (color_for_label(label)
+                                  if label in _LABEL_COLORS else colour)
+                    bx, by, bw, bh = det["bbox"]
+                    p1 = (int(bx * sx), int(by * sy))
+                    p2 = (int((bx + bw) * sx), int((by + bh) * sy))
+                    cv2.rectangle(frame, p1, p2, det_colour, box_lw)
+                    tag = f"{label} {conf:.2f}"
+                    cv2.putText(frame, tag, (p1[0], max(15, p1[1] - 4)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, det_colour, 1,
+                                cv2.LINE_AA)
+
+        # Crosshair on top of any boxes, at the smoothed target centre.
+        if crosshair and n in track:
+            tcx, tcy = track[n]
+            _draw_crosshair(frame, int(round(tcx * sx)), int(round(tcy * sy)),
+                            out_w, color_for_label("target"))
 
         cv2.putText(frame, f"frame {n}", (8, 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
@@ -1577,6 +1650,15 @@ def main(argv=None) -> int:
     ap.add_argument("--no-containment-merge", action="store_true",
                     help="Disable containment-merge in --export "
                          "(default: on, matching the GUI default).")
+    ap.add_argument("--export-crosshair", action="store_true",
+                    help="Draw a smoothed red crosshair on the tracked target "
+                         "centre (EMA over 'target' detections).")
+    ap.add_argument("--export-no-dets", action="store_true",
+                    help="Do not draw detection boxes in --export — e.g. a "
+                         "crosshair-only render (combine with --export-crosshair).")
+    ap.add_argument("--crosshair-alpha", type=float, default=0.18,
+                    help="EMA smoothing factor for --export-crosshair "
+                         "(default 0.18; higher = snappier/less lag).")
     args = ap.parse_args(argv)
 
     if not args.video.is_file():
@@ -1607,6 +1689,9 @@ def main(argv=None) -> int:
             hide_phantoms=not args.no_hide_phantoms,
             containment=not args.no_containment_merge,
             tiles_source=args.export_tiles,
+            crosshair=args.export_crosshair,
+            draw_dets=not args.export_no_dets,
+            crosshair_alpha=args.crosshair_alpha,
         )
 
     root = tk.Tk()
