@@ -37,6 +37,15 @@ const TILE_COLORS = {
 // dynamic + dynamic-merged are solid (DS §3.4 table).
 const DASHED_CATEGORIES = new Set(['multi-scale', 'single-scale']);
 
+// The locked follow target is always drawn red, overriding the per-run palette
+// slot — mirrors the burned-in showcase render (overlay_viewer.py target=red).
+export const TARGET_COLOR = '#FF2D2D';
+
+// Color a detection box: red for the locked 'target' label, else the run color.
+export function colorForDetection(det, runColor) {
+  return det && det.label === 'target' ? TARGET_COLOR : runColor;
+}
+
 // Mirrors --font-mono in tokens.css (canvas can't read CSS vars cheaply).
 const MONO_FONT = '"JetBrains Mono","SF Mono","Cascadia Code",Consolas,"Roboto Mono",monospace';
 
@@ -182,7 +191,7 @@ export function initOverlay(store) {
       const doc = runDocs.get(runId);
       if (!doc) continue;
       const slot = runColors[runId] || 1;
-      const color = RUN_PALETTE[(slot - 1) % RUN_PALETTE.length];
+      const runColor = RUN_PALETTE[(slot - 1) % RUN_PALETTE.length];
       // Run-row hover emphasis (DS §6.3): dim the OTHER runs' boxes to 60%.
       ctx.globalAlpha = hoverRun && hoverRun !== runId ? 0.6 : 1;
 
@@ -195,6 +204,7 @@ export function initOverlay(store) {
         const y = py(Number(bbox[1]));
         const w = Number(bbox[2]) * cbWspan;
         const h = Number(bbox[3]) * cbHspan;
+        const color = colorForDetection(d, runColor);
 
         const isHover =
           hoveredDet && hoveredDet.runId === runId && hoveredDet.index === i;

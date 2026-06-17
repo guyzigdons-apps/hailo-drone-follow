@@ -1,0 +1,19 @@
+{
+  "title": "Hailo Dynamic Tiling — Showcase",
+  "videos": [
+    {
+      "id": "0007", "title": "DJI 0007 — single-target car follow (dynamic tiling)",
+      "variants": [
+        {
+          "fov": "native",
+          "source": "/home/giladn/Videos/Drone/Training/Car/DJI_20260614160255_0007_D.MP4",
+          "runs": [
+            {"id": "0007_showcase", "label": "dynamic ROI + dense search (live)", "type": "DYN",
+             "path": "tiling_lab/runs/showcase_0007/frames.json"}
+          ],
+          "trials": []
+        }
+      ]
+    }
+  ]
+}

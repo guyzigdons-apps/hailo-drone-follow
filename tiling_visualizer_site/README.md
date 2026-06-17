@@ -44,15 +44,16 @@ cd tiling_visualizer_site
 python3 package_site.py
 
 # Serve and open in browser
-python3 serve.py            # no-cache dev server on :8123 (preferred)
+python3 serve.py            # no-cache + Range-aware dev server on :8123 (preferred)
 # or: python3 -m http.server 8123 --directory dist
 # → http://localhost:8123
 ```
 
-> **Note:** `python3 -m http.server` does **not** implement HTTP Range requests.
-> Video playback will work, but seeking may be degraded (the browser cannot
-> fetch arbitrary byte ranges, so it may have to re-download from the start).
-> Use nginx for production (see [Deployment](#deployment-to-a-hailo-server)).
+> **Note:** `serve.py` implements HTTP Range requests (`206 Partial Content`),
+> so video seeking and frame-stepping work locally. `python3 -m http.server`
+> does **not** — with it, seeking is degraded (the browser cannot fetch
+> arbitrary byte ranges and may re-download from the start). Use nginx for
+> production (see [Deployment](#deployment-to-a-hailo-server)).
 
 ### Flags
 

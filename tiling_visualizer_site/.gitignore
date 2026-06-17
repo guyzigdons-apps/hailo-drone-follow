@@ -1,4 +1,5 @@
 dist/
+showcase_dist/
 *.mp4
 __pycache__/
 web/data/
