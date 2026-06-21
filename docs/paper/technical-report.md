@@ -101,7 +101,7 @@ deterministic given the video.
 | 12x9 | static | 108.00 | 8837 | 1.0000 | 1.0000 | 0 |
 
 
-*Source: `dynamic_tiling/runs/ablation_0026_fov50/ablation_table.md` (committed).*
+*Source: `tiling_lab/runs/ablation_0026_fov50/ablation_table.md` (committed).*
 
 #### Clip 0026 — fov60
 
@@ -123,7 +123,7 @@ deterministic given the video.
 | 12x9 | static | 108.00 | 7230 | 1.0000 | 1.0000 | 0 |
 
 
-*Source: `dynamic_tiling/runs/ablation_0026_fov60/ablation_table.md` (committed).*
+*Source: `tiling_lab/runs/ablation_0026_fov60/ablation_table.md` (committed).*
 
 #### Clip 0026 — fov70
 
@@ -145,7 +145,7 @@ deterministic given the video.
 | 12x9 | static | 108.00 | 7295 | 1.0000 | 1.0000 | 0 |
 
 
-*Source: `dynamic_tiling/runs/ablation_0026_fov70/ablation_table.md` (committed).*
+*Source: `tiling_lab/runs/ablation_0026_fov70/ablation_table.md` (committed).*
 
 <!-- END:ablation -->
 

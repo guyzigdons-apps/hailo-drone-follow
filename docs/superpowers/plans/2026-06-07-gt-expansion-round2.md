@@ -70,3 +70,40 @@ After each pass: delete that clip's decode .bin; kick the matching Phase C agent
 
 ## State log
 - 2026-06-07: plan written; Phase A started.
+- 2026-06-07: B3 dense 0019 DONE (550 frames, 15.3 det/f, 209 s; chain confirmed
+  multi-class — TRACKED_CLASSES=(1,2), only run_mot_eval needs --classes 1,2).
+  C-0019 DONE: 47 tracks (44 vehicle / 3 person), 16 review cases (all
+  keep_short) at tiling_lab/runs/gt_verify_0019_default/; click-through:
+  `.venv_gt/bin/python -m tiling_lab.gt.gt_review_gui --outdir tiling_lab/runs/gt_verify_0019_default`.
+  A1: 0012 transcode DONE (629M); 0013 first attempt OOM-killed (exit 137),
+  retry running with nice+4 threads. B1 dense 0012 RUNNING on chip.
+- 2026-06-07: B1 dense 0012 DONE (920 fr, 7.6 det/f, 336 s; NOTE: new dense runs
+  do NOT regrow decode .bin caches — no cleanup needed). C-0012 DONE: 4 tracks
+  (2 person full-span — the ReID pair — + 2 vehicle), ZERO review cases; human
+  step = whole-clip eyeball via overlay_viewer then finalize; track 2 has 12
+  interior gap frames → run_gt_interp at corrections. A1 0013 transcode retry
+  DONE (935M, exit 0). B4 dense 0029 fov50 RUNNING on chip; 0013 queued next.
+- 2026-06-07: B4 dense 0029 fov50 DONE (637 fr, 4.5 det/f, conf 0.66 — lowest of
+  the round). C-0029f50 DONE: 38 tracks ALL vehicle, 0 person, 17 keep_short
+  cases — ⚠ FLAG for Gilad: all-vehicle + heavy fragmentation is unusual;
+  eyeball the overlay to check for missed/misclassified pedestrians before
+  verdicts. B2 dense 0013 RUNNING on chip.
+- 2026-06-07: B2 dense 0013 DONE (1338 fr, 6.7 det/f, conf 0.824, 502 s).
+  C-0013 DONE: 4 person (tracks 1+5 = full-clip ReID pair; 4+6 early fragments)
+  + 2 vehicle; 2 keep_short cases. B5 dense 0029 fov60 RUNNING on chip.
+- 2026-06-07: B5 dense 0029 fov60 DONE; C-0029f60 DONE: 50 tracks ALL vehicle,
+  21 keep_short cases — same pattern as fov50. ⚠ RESOLVED by frame inspection:
+  0029 is a high-altitude landscape clip, highway traffic at right edge, NO
+  pedestrians visible — all-vehicle GT is CORRECT (scene content, not detector
+  failure). Re-role 0029 as a long-range small-vehicle MOT/coverage clip;
+  review = drop/merge of highway fragments. B6 dense 0029 fov70 RUNNING.
+- 2026-06-07: B6 + C-0029f70 DONE: 58 vehicle tracks / 28 keep_short cases
+  (fov50/60/70 = 38/50/58 — monotone with FOV, sane). All of 0029 staged.
+  B7 stretch: 0026 fov60+fov70 denses chained RUNNING on chip.
+- 2026-06-07: B7 + C-0026 DONE — fov60: 9 trk (6p/3v), 2 cases; fov70: 21 trk
+  (14p/7v), 9 cases (VGA mislabel caveat flagged in both). **ALL PHASE B+C
+  COMPLETE** — 8 review queues ready (runbook:
+  tiling_lab/runs/gt_verify_round2_README.md). C7 runbook written. Gilad
+  reviewing manually (0012 viewer opened). Phase D trials chain RUNNING on
+  chip (0027f50 baseline+winner, 0026f50 winner). GATED on verdicts: D2 ReID
+  (0012/0013), D3 MOT (0019), D5 (0029), then D6 ROUND2.md.
