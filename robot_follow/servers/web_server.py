@@ -60,6 +60,12 @@ class SharedUIState:
         # UI can render the overlay against whatever's currently in use.
         # Each entry: (name, x, y, w, h).
         self._tiles: list = []
+        # Latest per-frame tile-attribution stats from the native subscriber.
+        # Kept outside _frame_snapshot so update_frame (called from the video
+        # bridge between detection commits) doesn't clobber it — otherwise
+        # SSE events sourced from a video frame would arrive without stats
+        # and the UI's tile badge / [edit tiles] link would never render.
+        self._latest_stats: Optional[dict] = None
         self._velocity = {
             "forward_m_s": 0.0,
             "down_m_s": 0.0,
@@ -90,6 +96,8 @@ class SharedUIState:
                 self._detections = detections
                 self._following_id = following_id
                 self._paused = paused
+                if stats is not None:
+                    self._latest_stats = stats
                 snapshot = {
                     "detections": list(self._detections),
                     "following_id": self._following_id,
@@ -97,8 +105,6 @@ class SharedUIState:
                     "velocity": dict(self._velocity),
                     "perf": dict(self._perf),
                 }
-                if stats is not None:
-                    snapshot["stats"] = stats
                 self._frame_snapshot = snapshot
                 self._frame_seq += 1
                 self._cond.notify_all()
@@ -327,11 +333,13 @@ class _WebHandler(BaseHTTPRequestHandler):
                 # are reported separately so the UI can show which path
                 # is queuing — the user has been seeing video drift by
                 # minutes while detections stayed sub-second.
-                # Annotate the snapshot with the active tile geometry so
-                # the UI can render the overlay + populate the editor's
-                # initial value. ``stats`` is opaque here — passes through
-                # to UI as-is (tiling attribution lives in
-                # subscriber._compute_tile_stats).
+                # Annotate every event with current tile geometry + the
+                # latest stats. Stats come from a SharedUIState field
+                # rather than the snapshot because update_frame (video-
+                # bridge) overwrites _frame_snapshot between detection
+                # commits — without this, stats would only ride along on
+                # ~half of SSE events and the UI badge would render
+                # flakily (or not at all immediately after page load).
                 annotated = dict(snapshot)
                 tiles = self.ui_state._tiles
                 if tiles:
@@ -339,6 +347,8 @@ class _WebHandler(BaseHTTPRequestHandler):
                         {"name": n, "x": x, "y": y, "w": w, "h": h}
                         for (n, x, y, w, h) in tiles
                     ]
+                if self.ui_state._latest_stats is not None:
+                    annotated["stats"] = self.ui_state._latest_stats
                 self.wfile.write(f"data: {json.dumps(annotated)}\n\n".encode())
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):

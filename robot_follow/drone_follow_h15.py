@@ -397,27 +397,63 @@ def main():
 
     _WebHandler.do_POST = _patched_do_post
 
-    # Apply-tiles callback for /api/tiles POST: stop the running native
-    # pipeline + subscriber + video bridge, rebuild them with new tile
-    # geometry, restart. Order matches the existing shutdown/startup
-    # sequence in _quit_pipeline / the main try block. Native mode only —
-    # the WebServer rejects POSTs with 503 when this is None.
+    # Apply-tiles callback for /api/tiles POST.
+    #
+    # Fast path (always tried first): hot-swap via the C++ control server's
+    # REP socket. The DynamicTilingCropStage swaps its tile vector under a
+    # brief mutex; existing in-flight frames carry their own bbox in the
+    # subframe ROI (see dsp_cropping.cpp:250), so no reset is needed.
+    # Typical latency: a few ms — vs ~5 s for the rebuild path.
+    #
+    # Slow path (fallback on control-server timeout / error): full
+    # rebuild of native_proc + subscriber + video_bridge with --tiles
+    # on the C++ command line. Used on first-time setup, after a
+    # binary crash, or if the control socket is unreachable. Tile
+    # COUNT changes also force the slow path because the aggregator's
+    # static_subframes is fixed at C++ startup.
     apply_tiles_cb = None
     if native_mode:
+        from robot_follow.native_pipeline import control_client
+
         def apply_tiles_cb(new_tiles):  # noqa: E306 — nested for closure capture
             nonlocal native_proc, subscriber, video_bridge
+
+            current_count = len(active_tiles) if active_tiles else len(new_tiles)
+            count_changed = (len(new_tiles) != current_count)
+
+            if not count_changed:
+                # Same tile count — try the hot-swap fast path.
+                try:
+                    control_client.set_tiles(new_tiles)
+                    LOGGER.info("[app] Hot-swapped %d tile(s) via control server",
+                                len(new_tiles))
+                    # Refresh the subscriber's attribution table so its
+                    # per-tile stats line up with the new geometry. Video
+                    # bridge isn't tile-aware; no update needed there.
+                    if subscriber is not None:
+                        subscriber.set_tiles(new_tiles)
+                    ui_state.set_tiles(new_tiles)
+                    active_tiles[:] = list(new_tiles)
+                    return
+                except control_client.TileControlError as e:
+                    LOGGER.warning(
+                        "[app] Hot-swap failed (%s); falling back to full rebuild",
+                        e)
+            else:
+                LOGGER.info(
+                    "[app] Tile count changed (%d → %d); rebuild required "
+                    "(aggregator's static_subframes is fixed at C++ startup)",
+                    current_count, len(new_tiles))
+
             new_spec = tiles_to_spec(new_tiles)
-            LOGGER.info("[app] Applying new tile config: %s", new_tiles)
-            # Tear down in startup-reverse order: bridge first (so it
-            # doesn't get a flood of EOS-then-restart packets), then
-            # subscriber, then the C++ binary.
+            LOGGER.info("[app] Rebuilding native pipeline with new tiles: %s",
+                        new_tiles)
             if video_bridge is not None:
                 video_bridge.stop()
             if subscriber is not None:
                 subscriber.stop()
             if native_proc is not None:
                 native_proc.stop()
-            # Rebuild
             native_proc = NativePipelineProcess(
                 zmq_port=args.zmq_port,
                 multicast=True,
@@ -433,12 +469,11 @@ def main():
                 tiles=new_tiles,
             )
             video_bridge = NativeVideoBridge(ui_state)
-            # Reflect the new tiles in the SSE feed so any open UI sees
-            # them immediately.
             ui_state.set_tiles(new_tiles)
+            active_tiles[:] = list(new_tiles)
             native_proc.start()
             subscriber.start()
-            time.sleep(0.5)  # same handshake delay as initial startup
+            time.sleep(0.5)
             if video_bridge is not None:
                 video_bridge.start()
 
