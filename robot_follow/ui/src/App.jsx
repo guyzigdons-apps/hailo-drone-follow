@@ -11,6 +11,21 @@ const OVERLAY_SMOOTH_ALPHA = 0.5;
 const CROSS_HALF_SIZE = 10; // pixels, half the arm length of the cross
 const CROSS_STROKE = 3;
 const CROSS_HALO_STROKE = 6;
+// Whole-frame default tile geometry (4 overlapping quadrants + full frame).
+// POSTed to /api/tiles to revert inference to the whole frame once the
+// operator clears all hand-drawn regions. Mirrors DEFAULT_TILES on the
+// Python side (subscriber.py) and the C++ framework default.
+const DEFAULT_TILE_SPEC =
+  "0,0,0.6,0.6;0.4,0,0.6,0.6;0,0.4,0.6,0.6;0.4,0.4,0.6,0.6;0,0,1,1";
+// Ignore rubber-band drags smaller than this (normalized) — treats an
+// accidental click as "cancel" rather than a zero-area region.
+const MIN_REGION_SIZE = 0.02;
+// Network input dimensions (YOLOv8s hailo_yolov8s_384_640.hef → 640×384 WxH).
+// The DSP crop-resize is a plain stretch to these dims, so a crop whose pixel
+// aspect already matches gets scaled uniformly (no warp). We expand each drawn
+// region to this aspect before sending it as a tile — see expandToNetAspect().
+const NET_INPUT_W = 640;
+const NET_INPUT_H = 384;
 
 export default function App() {
   const [detections, setDetections] = useState([]);
@@ -46,6 +61,17 @@ export default function App() {
   const [tileEditorOpen, setTileEditorOpen] = useState(false);
   const [tileSpecDraft, setTileSpecDraft] = useState("");
   const [tileApplyState, setTileApplyState] = useState({ status: "idle" });
+  // Hand-drawn inference regions. `regionArmed` is set by the "+" button /
+  // key and means "the next click-drag on the video defines a region".
+  // `regions` is the committed list ({x,y,w,h} normalized); when non-empty
+  // only these areas are inferred. `drawRect` is the live rubber-band during
+  // a drag. drawStartRef holds the drag origin so mouse-up can compute the
+  // final rect without depending on stale state.
+  const [regionArmed, setRegionArmed] = useState(false);
+  const [regions, setRegions] = useState([]);
+  const [drawRect, setDrawRect] = useState(null);
+  const [regionApplyState, setRegionApplyState] = useState({ status: "idle" });
+  const drawStartRef = useRef(null);
   const canvasRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -490,6 +516,170 @@ export default function App() {
     }
   };
 
+  // --- Hand-drawn inference regions --------------------------------------
+
+  // Convert a viewport pixel coordinate to normalized [0,1] frame coords,
+  // relative to the rendered video canvas. The canvas is width:100%/height:auto
+  // with the SVG overlay matching it exactly (no letterboxing), so the canvas
+  // client rect is the video rect.
+  const clientToNorm = useCallback((clientX, clientY) => {
+    const el = canvasRef.current;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return null;
+    const nx = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    const ny = Math.min(1, Math.max(0, (clientY - r.top) / r.height));
+    return { x: nx, y: ny };
+  }, []);
+
+  // Expand a drawn region so its CROP has the same pixel aspect ratio as the
+  // network input, so the DSP's stretch resize scales it uniformly (no warp).
+  // The extra area is filled with real neighbouring scene (not black). Growth
+  // is centred on the region and clamped to the frame; only the smaller axis
+  // grows, so the drawn region always stays fully inside the expanded crop.
+  const expandToNetAspect = (r) => {
+    const vw = videoDims.width || 16;
+    const vh = videoDims.height || 9;
+    // Target tile w/h in NORMALIZED coords = net pixel aspect ÷ frame pixel
+    // aspect. e.g. (640/384) / (1920/1080) = 0.9375 for a 16:9 frame.
+    const targetWH = (NET_INPUT_W / NET_INPUT_H) * (vh / vw);
+    let { x, y, w, h } = r;
+    if (w / h < targetWH) {
+      const newW = Math.min(1, h * targetWH); // too narrow → widen
+      x += (w - newW) / 2;
+      w = newW;
+    } else {
+      const newH = Math.min(1, w / targetWH); // too wide → grow height
+      y += (h - newH) / 2;
+      h = newH;
+    }
+    // Keep the (grown) box inside the frame. Shifting is safe: the box only
+    // grew, so the original region is still contained after clamping.
+    x = Math.max(0, Math.min(x, 1 - w));
+    y = Math.max(0, Math.min(y, 1 - h));
+    return { x, y, w, h };
+  };
+
+  // Map the committed region list to a tile list for /api/tiles. Each region
+  // is aspect-expanded. The native pipeline requires ≥2 tiles (a single tile
+  // starves the AI stage), so a lone region is sent as two identical tiles —
+  // duplicating keeps it aspect-correct (splitting into halves would warp each
+  // half); the aggregator de-dups the fully-overlapping detections via NMS.
+  const regionsToTiles = (regs) => {
+    const ex = regs.map(expandToNetAspect);
+    if (ex.length === 1) {
+      return [
+        { name: "R1", ...ex[0] },
+        { name: "R1b", ...ex[0] },
+      ];
+    }
+    return ex.map((t, i) => ({ name: `R${i + 1}`, ...t }));
+  };
+
+  // POST the current region set to the pipeline. Empty list → revert to the
+  // whole-frame default. Triggers a brief pipeline restart on the backend.
+  const applyRegions = async (regs) => {
+    const body = regs.length === 0
+      ? { spec: DEFAULT_TILE_SPEC }
+      : { tiles: regionsToTiles(regs) };
+    setRegionApplyState({ status: "applying" });
+    try {
+      const res = await fetch("/api/tiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setRegionApplyState({
+          status: "error",
+          message: data.error || `HTTP ${res.status}`,
+        });
+        return;
+      }
+      setRegionApplyState({
+        status: "applied",
+        message: regs.length === 0
+          ? "whole frame"
+          : `${regs.length} region${regs.length > 1 ? "s" : ""}`,
+      });
+      setTimeout(() => setRegionApplyState({ status: "idle" }), 2500);
+    } catch (e) {
+      setRegionApplyState({ status: "error", message: String(e) });
+    }
+  };
+
+  const onRegionMouseDown = (e) => {
+    const p = clientToNorm(e.clientX, e.clientY);
+    if (!p) return;
+    drawStartRef.current = p;
+    setDrawRect({ x: p.x, y: p.y, w: 0, h: 0 });
+  };
+
+  const onRegionMouseMove = (e) => {
+    const s = drawStartRef.current;
+    if (!s) return;
+    const p = clientToNorm(e.clientX, e.clientY);
+    if (!p) return;
+    setDrawRect({
+      x: Math.min(s.x, p.x),
+      y: Math.min(s.y, p.y),
+      w: Math.abs(p.x - s.x),
+      h: Math.abs(p.y - s.y),
+    });
+  };
+
+  const onRegionMouseUp = (e) => {
+    const s = drawStartRef.current;
+    drawStartRef.current = null;
+    setDrawRect(null);
+    setRegionArmed(false);
+    if (!s) return;
+    const p = clientToNorm(e.clientX, e.clientY) || s;
+    const rect = {
+      x: Math.min(s.x, p.x),
+      y: Math.min(s.y, p.y),
+      w: Math.abs(p.x - s.x),
+      h: Math.abs(p.y - s.y),
+    };
+    if (rect.w < MIN_REGION_SIZE || rect.h < MIN_REGION_SIZE) return; // cancel
+    const next = [...regions, rect];
+    setRegions(next);
+    applyRegions(next);
+  };
+
+  const onRegionMouseLeave = () => {
+    // Abort the in-progress drag but stay armed so the operator can retry.
+    drawStartRef.current = null;
+    setDrawRect(null);
+  };
+
+  const clearRegions = () => {
+    setRegionArmed(false);
+    setDrawRect(null);
+    drawStartRef.current = null;
+    setRegions([]);
+    applyRegions([]);
+  };
+
+  // "+" arms region drawing; Escape cancels. Ignored while typing in a field.
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+      if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        setRegionArmed((v) => !v);
+      } else if (e.key === "Escape") {
+        setRegionArmed(false);
+        setDrawRect(null);
+        drawStartRef.current = null;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const TILE_PRESETS = [
     {
       label: "Default (4 quadrants + full)",
@@ -915,6 +1105,84 @@ export default function App() {
           ref={canvasRef}
           className="video-feed"
         />
+        {/* Inference-region toolbar. "+ Add region" arms a click-drag on the
+            video that defines an area to run inference on. Drawing an area
+            replaces whole-frame inference with just the selected region(s);
+            "Clear regions" reverts to the whole frame. Also bindable via the
+            "+" key. */}
+        <div
+          style={{
+            position: "absolute",
+            top: 4,
+            left: 4,
+            display: "flex",
+            gap: 6,
+            alignItems: "center",
+            zIndex: 20,
+            fontFamily: "monospace",
+            fontSize: 12,
+          }}
+        >
+          <button
+            onClick={() => setRegionArmed((v) => !v)}
+            title="Press + then click-drag on the video to select an inference area"
+            style={{
+              background: regionArmed ? "#1b6" : "rgba(0,0,0,0.55)",
+              color: "#fff",
+              border: "1px solid #888",
+              borderRadius: 3,
+              padding: "3px 8px",
+              cursor: "pointer",
+              fontFamily: "monospace",
+              fontSize: 12,
+            }}
+          >
+            {regionArmed ? "Click-drag to select…" : "＋ Add region"}
+          </button>
+          {regions.length > 0 && (
+            <button
+              onClick={clearRegions}
+              style={{
+                background: "rgba(0,0,0,0.55)",
+                color: "#fff",
+                border: "1px solid #888",
+                borderRadius: 3,
+                padding: "3px 8px",
+                cursor: "pointer",
+                fontFamily: "monospace",
+                fontSize: 12,
+              }}
+            >
+              Clear regions ({regions.length})
+            </button>
+          )}
+          {regionApplyState.status === "applying" && (
+            <span style={{ color: "#ffd54f" }}>applying…</span>
+          )}
+          {regionApplyState.status === "applied" && (
+            <span style={{ color: "#80f060" }}>{regionApplyState.message}</span>
+          )}
+          {regionApplyState.status === "error" && (
+            <span style={{ color: "#ff8080" }}>{regionApplyState.message}</span>
+          )}
+        </div>
+        {/* Transparent capture layer — only mounted while armed. Sits above
+            the video + SVG so it intercepts the drag (and blocks detection
+            click-to-follow) while a region is being drawn. */}
+        {regionArmed && (
+          <div
+            onMouseDown={onRegionMouseDown}
+            onMouseMove={onRegionMouseMove}
+            onMouseUp={onRegionMouseUp}
+            onMouseLeave={onRegionMouseLeave}
+            style={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 10,
+              cursor: "crosshair",
+            }}
+          />
+        )}
         {/* Tile stats badge. Shows the per-frame detection count + smallest
             bbox + per-tile attribution, plus toggles for the tile-boundary
             overlay and the [edit tiles] modal. Only renders in native
@@ -1018,6 +1286,57 @@ export default function App() {
                   </g>
                 );
               })}
+            {/* Hand-drawn inference regions (solid cyan) + the aspect-expanded
+                area actually fed to the network (faint dashed). */}
+            {regions.map((r, i) => {
+              const e = expandToNetAspect(r);
+              return (
+                <g key={`roi-${i}`}>
+                  <rect
+                    x={e.x * vw}
+                    y={e.y * vh}
+                    width={e.w * vw}
+                    height={e.h * vh}
+                    fill="rgba(0,229,255,0.06)"
+                    stroke="#00e5ff"
+                    strokeWidth={1.5}
+                    strokeDasharray="4 4"
+                    opacity={0.5}
+                  />
+                  <rect
+                    x={r.x * vw}
+                    y={r.y * vh}
+                    width={r.w * vw}
+                    height={r.h * vh}
+                    fill="none"
+                    stroke="#00e5ff"
+                    strokeWidth={3}
+                    opacity={0.9}
+                  />
+                  <text
+                    x={r.x * vw + 6}
+                    y={r.y * vh + 20}
+                    fill="#00e5ff"
+                    fontSize={16}
+                    fontFamily="monospace"
+                  >
+                    ROI {i + 1}
+                  </text>
+                </g>
+              );
+            })}
+            {drawRect && (
+              <rect
+                x={drawRect.x * vw}
+                y={drawRect.y * vh}
+                width={drawRect.w * vw}
+                height={drawRect.h * vh}
+                fill="rgba(0,229,255,0.15)"
+                stroke="#00e5ff"
+                strokeWidth={2}
+                strokeDasharray="6 4"
+              />
+            )}
             {detections.map((det, i) => {
               const isFollowing =
                 det.id != null && det.id === followingId;
