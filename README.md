@@ -149,6 +149,12 @@ robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 4. **ReID recovery** — If the tracker loses the target (occlusion, fast turn), ReID compares appearance embeddings to re-identify the person under a new track ID. Works in both auto and locked modes. If ReID cannot recover the target within the search timeout (`--reid-timeout`, default 20s), the app returns to auto mode.
 5. **Control** — A PID-style controller computes yaw, forward/backward, and altitude commands at 10 Hz and sends them to the flight controller via MAVSDK offboard mode.
 
+> **📊 Full architecture & data-flow diagrams:** see
+> [`docs/architecture.md`](docs/architecture.md) — an annotated, end-to-end map
+> from the camera sensor through the Hailo NPU pipeline, tracking/ReID,
+> shared state, and the decision loop, out to the flight controller and web UI
+> (both the main path and the native H15 path).
+
 ## Native H15 pipeline & inference regions
 
 On the **Hailo-15 (H15)** target there is a second run path: a C++ binary
