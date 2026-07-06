@@ -27,6 +27,66 @@ const MIN_REGION_SIZE = 0.02;
 const NET_INPUT_W = 640;
 const NET_INPUT_H = 384;
 
+// --- regions ⇄ tiles ----------------------------------------------------
+// "regions" (the user-facing list: draw/clear/edit) and the pipeline "tiles"
+// vector are two views of the SAME thing. A region IS an inference tile; the
+// only divergence is the pipeline's ≥2-tile rule, so a lone region is sent as
+// two identical tiles. These helpers convert both ways so editing either side
+// stays in sync (regions→tiles on apply, tiles→regions on load/SSE).
+
+// Parse "x,y,w,h;x,y,w,h;..." (optional "name=" prefix) → [{x,y,w,h}].
+function parseSpecToRegions(spec) {
+  const out = [];
+  for (const raw of String(spec).split(";")) {
+    const s = raw.trim();
+    if (!s) continue;
+    const nums = s.replace(/^[^=]*=/, "").split(",").map((n) => Number(n.trim()));
+    if (nums.length !== 4 || nums.some((n) => !Number.isFinite(n))) {
+      throw new Error(`bad tile "${s}" (need x,y,w,h)`);
+    }
+    const [x, y, w, h] = nums;
+    out.push({ x, y, w, h });
+  }
+  return out;
+}
+
+const regionsToSpec = (regs) =>
+  regs.map((r) => `${r.x},${r.y},${r.w},${r.h}`).join(";");
+
+// Remove exactly-duplicate rectangles (e.g. the single-region duplicate).
+function dedupeTiles(tiles) {
+  const seen = new Set();
+  const out = [];
+  for (const t of tiles) {
+    const k = [t.x, t.y, t.w, t.h].map((v) => Number(v).toFixed(4)).join(",");
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ x: t.x, y: t.y, w: t.w, h: t.h });
+  }
+  return out;
+}
+
+// The whole-frame default (4 quadrants + full). When the active tiles equal
+// this, there are no user regions — so tiles→regions yields an empty list.
+const DEFAULT_TILE_SET = parseSpecToRegions(DEFAULT_TILE_SPEC);
+function isDefaultTiles(regs) {
+  if (regs.length !== DEFAULT_TILE_SET.length) return false;
+  const key = (r) => [r.x, r.y, r.w, r.h].map((v) => Number(v).toFixed(3)).join(",");
+  const have = new Set(regs.map(key));
+  return DEFAULT_TILE_SET.every((r) => have.has(key(r)));
+}
+
+// regions → pipeline tiles. Regions are already aspect-expanded (a region IS
+// a tile), so no expansion here — just satisfy the ≥2-tile rule by duplicating
+// a lone region (the aggregator de-dups the fully-overlapping detections).
+function regionsToTiles(regs) {
+  if (regs.length === 1) {
+    const r = regs[0];
+    return [{ name: "R1", ...r }, { name: "R1b", ...r }];
+  }
+  return regs.map((r, i) => ({ name: `R${i + 1}`, x: r.x, y: r.y, w: r.w, h: r.h }));
+}
+
 export default function App() {
   const [detections, setDetections] = useState([]);
   const [followingId, setFollowingId] = useState(null);
@@ -72,7 +132,14 @@ export default function App() {
   const [drawRect, setDrawRect] = useState(null);
   const [regionApplyState, setRegionApplyState] = useState({ status: "idle" });
   const drawStartRef = useRef(null);
+  // Guards the one-time reconstruction of `regions` from the pipeline's active
+  // tiles on load (tiles→regions). After the first sync, `regions` is the
+  // local source of truth and isn't overwritten by the per-frame SSE tiles.
+  const regionsInitedRef = useRef(false);
   const canvasRef = useRef(null);
+  // Per-tile debug thumbnail canvases (index → <canvas>), populated by
+  // callback refs. Filled by the draw effect when "show tiles" is on.
+  const tileThumbRefs = useRef(new Map());
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
   const logEndRef = useRef(null);
@@ -110,6 +177,16 @@ export default function App() {
         }
         if (Array.isArray(data.tiles) && data.tiles.length) {
           setTiles(data.tiles);
+          // One-time tiles→regions sync on load: reconstruct the region list
+          // from whatever tiles the pipeline is already running, so the UI
+          // reflects them (and "clear"/"edit" work) after a reload. Deduped
+          // (undoes the single-region duplicate); the whole-frame default maps
+          // to no regions. Skipped forever after — regions is local truth then.
+          if (!regionsInitedRef.current) {
+            regionsInitedRef.current = true;
+            const deduped = dedupeTiles(data.tiles);
+            if (!isDefaultTiles(deduped)) setRegions(deduped);
+          }
         }
       } catch {
         // malformed event
@@ -485,13 +562,27 @@ export default function App() {
   const vw = videoDims.width;
   const vh = videoDims.height;
 
+  // "Edit tiles" edits the region list (same source of truth as draw/clear).
+  // Parse the spec into regions, sync them, and apply — so editing tiles and
+  // drawing regions stay equivalent.
   const applyTileSpec = async (spec) => {
+    let parsed;
+    try {
+      parsed = parseSpecToRegions(spec);
+    } catch (e) {
+      setTileApplyState({ status: "error", message: `Parse: ${e.message || e}` });
+      return;
+    }
+    setRegions(parsed);
     setTileApplyState({ status: "applying" });
+    const body = parsed.length === 0
+      ? { spec: DEFAULT_TILE_SPEC }
+      : { tiles: regionsToTiles(parsed) };
     try {
       const res = await fetch("/api/tiles", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ spec }),
+        body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -558,22 +649,6 @@ export default function App() {
     x = Math.max(0, Math.min(x, 1 - w));
     y = Math.max(0, Math.min(y, 1 - h));
     return { x, y, w, h };
-  };
-
-  // Map the committed region list to a tile list for /api/tiles. Each region
-  // is aspect-expanded. The native pipeline requires ≥2 tiles (a single tile
-  // starves the AI stage), so a lone region is sent as two identical tiles —
-  // duplicating keeps it aspect-correct (splitting into halves would warp each
-  // half); the aggregator de-dups the fully-overlapping detections via NMS.
-  const regionsToTiles = (regs) => {
-    const ex = regs.map(expandToNetAspect);
-    if (ex.length === 1) {
-      return [
-        { name: "R1", ...ex[0] },
-        { name: "R1b", ...ex[0] },
-      ];
-    }
-    return ex.map((t, i) => ({ name: `R${i + 1}`, ...t }));
   };
 
   // POST the current region set to the pipeline. Empty list → revert to the
@@ -643,7 +718,10 @@ export default function App() {
       h: Math.abs(p.y - s.y),
     };
     if (rect.w < MIN_REGION_SIZE || rect.h < MIN_REGION_SIZE) return; // cancel
-    const next = [...regions, rect];
+    // Store the aspect-expanded rect: a region IS the inference tile, so what
+    // you see in the overlay is exactly what's fed to the network (modulo the
+    // single-region duplicate). Keeps regions and tiles equivalent.
+    const next = [...regions, expandToNetAspect(rect)];
     setRegions(next);
     applyRegions(next);
   };
@@ -679,6 +757,43 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Debug: reconstruct each pipeline tile's chip-input image (crop → resize to
+  // the 640×384 target) from the live display frame while "show tiles" is on.
+  // This mirrors the crop/resize geometry the NPU receives (aspect, framing,
+  // any edge-clamp warp) — faithful for geometry, though sourced from the
+  // display frame, not the literal NV12 buffer on the DSP. There's no black
+  // padding to show: the expand-to-aspect crop is scaled uniformly.
+  useEffect(() => {
+    if (!showTiles || !tiles.length) return undefined;
+    let raf;
+    let last = 0;
+    const draw = (ts) => {
+      raf = requestAnimationFrame(draw);
+      if (ts - last < 120) return; // throttle to ~8 fps
+      last = ts;
+      const src = canvasRef.current;
+      if (!src || !src.width) return;
+      tiles.forEach((t, i) => {
+        const cv = tileThumbRefs.current.get(i);
+        const g = cv && cv.getContext("2d");
+        if (!g) return;
+        g.fillStyle = "#000";
+        g.fillRect(0, 0, cv.width, cv.height);
+        const sx = t.x * src.width;
+        const sy = t.y * src.height;
+        const sw = Math.max(1, t.w * src.width);
+        const sh = Math.max(1, t.h * src.height);
+        try {
+          g.drawImage(src, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
+        } catch {
+          // frame not ready yet
+        }
+      });
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [showTiles, tiles]);
 
   const TILE_PRESETS = [
     {
@@ -1236,10 +1351,13 @@ export default function App() {
                   opacity: 0.8,
                 }}
                 onClick={() => {
+                  // Seed the editor from the current regions (the source of
+                  // truth). Editing here updates regions, keeping the two in
+                  // sync. Empty → the current active tiles as a starting point.
                   setTileSpecDraft(
-                    tiles
-                      .map((t) => `${t.x},${t.y},${t.w},${t.h}`)
-                      .join(";"),
+                    regions.length
+                      ? regionsToSpec(regions)
+                      : tiles.map((t) => `${t.x},${t.y},${t.w},${t.h}`).join(";"),
                   );
                   setTileEditorOpen(true);
                 }}
@@ -1286,45 +1404,33 @@ export default function App() {
                   </g>
                 );
               })}
-            {/* Hand-drawn inference regions (solid cyan) + the aspect-expanded
-                area actually fed to the network (faint dashed). */}
-            {regions.map((r, i) => {
-              const e = expandToNetAspect(r);
-              return (
-                <g key={`roi-${i}`}>
-                  <rect
-                    x={e.x * vw}
-                    y={e.y * vh}
-                    width={e.w * vw}
-                    height={e.h * vh}
-                    fill="rgba(0,229,255,0.06)"
-                    stroke="#00e5ff"
-                    strokeWidth={1.5}
-                    strokeDasharray="4 4"
-                    opacity={0.5}
-                  />
-                  <rect
-                    x={r.x * vw}
-                    y={r.y * vh}
-                    width={r.w * vw}
-                    height={r.h * vh}
-                    fill="none"
-                    stroke="#00e5ff"
-                    strokeWidth={3}
-                    opacity={0.9}
-                  />
-                  <text
-                    x={r.x * vw + 6}
-                    y={r.y * vh + 20}
-                    fill="#00e5ff"
-                    fontSize={16}
-                    fontFamily="monospace"
-                  >
-                    ROI {i + 1}
-                  </text>
-                </g>
-              );
-            })}
+            {/* Inference regions. A region IS the tile fed to the network
+                (already aspect-expanded), so this box is exactly the inferred
+                area. The pipeline's active tiles render separately under the
+                "show tiles" toggle and should coincide with these. */}
+            {regions.map((r, i) => (
+              <g key={`roi-${i}`}>
+                <rect
+                  x={r.x * vw}
+                  y={r.y * vh}
+                  width={r.w * vw}
+                  height={r.h * vh}
+                  fill="none"
+                  stroke="#00e5ff"
+                  strokeWidth={3}
+                  opacity={0.9}
+                />
+                <text
+                  x={r.x * vw + 6}
+                  y={r.y * vh + 20}
+                  fill="#00e5ff"
+                  fontSize={16}
+                  fontFamily="monospace"
+                >
+                  ROI {i + 1}
+                </text>
+              </g>
+            ))}
             {drawRect && (
               <rect
                 x={drawRect.x * vw}
@@ -1433,6 +1539,65 @@ export default function App() {
           </svg>
         )}
           </div>
+
+          {/* Debug: the actual chip inputs (each tile cropped + resized to the
+              640×384 network input). Shown with "show tiles". Includes the
+              single-region duplicate, so you see exactly what's fed per frame. */}
+          {showTiles && tiles.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 8,
+                marginTop: 8,
+                padding: 8,
+                background: "#1a1a1a",
+                borderRadius: 6,
+              }}
+            >
+              <div
+                style={{
+                  width: "100%",
+                  fontFamily: "monospace",
+                  fontSize: 11,
+                  color: "#888",
+                }}
+              >
+                Chip inputs — each tile cropped &amp; resized to 640×384
+                (reconstructed from the display frame):
+              </div>
+              {tiles.map((t, i) => (
+                <div key={`thumb-${i}`} style={{ textAlign: "center" }}>
+                  <canvas
+                    width={240}
+                    height={144}
+                    ref={(el) => {
+                      if (el) tileThumbRefs.current.set(i, el);
+                      else tileThumbRefs.current.delete(i);
+                    }}
+                    style={{
+                      width: 200,
+                      height: 120,
+                      background: "#000",
+                      border: "1px solid #00e5ff",
+                      borderRadius: 3,
+                      display: "block",
+                    }}
+                  />
+                  <div
+                    style={{
+                      fontFamily: "monospace",
+                      fontSize: 10,
+                      color: "#aaa",
+                      marginTop: 2,
+                    }}
+                  >
+                    {t.name} · {(t.w * 100).toFixed(0)}×{(t.h * 100).toFixed(0)}%
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="logs-panel side-card">
             <button

@@ -422,9 +422,15 @@ def main():
             count_changed = (len(new_tiles) != current_count)
 
             if not count_changed:
-                # Same tile count — try the hot-swap fast path.
+                # Same tile count — try the hot-swap fast path. Use a short
+                # probe timeout: the ControlServer is currently disabled in
+                # main.cpp (bisection), so this call just fails fast and we
+                # fall back to the rebuild without burning the full 1.5 s
+                # default timeout on every same-count edit. A real hot-swap
+                # (once the server is re-enabled) completes in a few ms, so
+                # 250 ms is ample headroom.
                 try:
-                    control_client.set_tiles(new_tiles)
+                    control_client.set_tiles(new_tiles, timeout_ms=250)
                     LOGGER.info("[app] Hot-swapped %d tile(s) via control server",
                                 len(new_tiles))
                     # Refresh the subscriber's attribution table so its
