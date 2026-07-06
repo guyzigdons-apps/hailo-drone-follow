@@ -28,11 +28,13 @@ const NET_INPUT_W = 640;
 const NET_INPUT_H = 384;
 
 // --- regions ⇄ tiles ----------------------------------------------------
-// "regions" (the user-facing list: draw/clear/edit) and the pipeline "tiles"
-// vector are two views of the SAME thing. A region IS an inference tile; the
-// only divergence is the pipeline's ≥2-tile rule, so a lone region is sent as
-// two identical tiles. These helpers convert both ways so editing either side
-// stays in sync (regions→tiles on apply, tiles→regions on load/SSE).
+// "regions" are the ORIGINAL rectangles the operator draws/edits. The pipeline
+// "tiles" are those regions expanded to the network aspect (the padded crops
+// fed to the chip), plus the ≥2-tile rule (a lone region → two identical
+// tiles). regions→tiles happens in buildTiles() at apply time; tiles→regions
+// (dedupe) runs once on load/SSE so a reload still shows the active tiles.
+// (Expansion is idempotent, so a region reconstructed from a padded tile and
+// re-expanded is unchanged.)
 
 // Parse "x,y,w,h;x,y,w,h;..." (optional "name=" prefix) → [{x,y,w,h}].
 function parseSpecToRegions(spec) {
@@ -76,16 +78,10 @@ function isDefaultTiles(regs) {
   return DEFAULT_TILE_SET.every((r) => have.has(key(r)));
 }
 
-// regions → pipeline tiles. Regions are already aspect-expanded (a region IS
-// a tile), so no expansion here — just satisfy the ≥2-tile rule by duplicating
-// a lone region (the aggregator de-dups the fully-overlapping detections).
-function regionsToTiles(regs) {
-  if (regs.length === 1) {
-    const r = regs[0];
-    return [{ name: "R1", ...r }, { name: "R1b", ...r }];
-  }
-  return regs.map((r, i) => ({ name: `R${i + 1}`, x: r.x, y: r.y, w: r.w, h: r.h }));
-}
+// A full-frame tile (always present in the pipeline tile set). Not a user
+// region — stripped when reconstructing regions from the active tiles.
+const isFullFrameTile = (t) =>
+  t.w >= 0.999 && t.h >= 0.999 && t.x <= 0.001 && t.y <= 0.001;
 
 export default function App() {
   const [detections, setDetections] = useState([]);
@@ -185,7 +181,10 @@ export default function App() {
           if (!regionsInitedRef.current) {
             regionsInitedRef.current = true;
             const deduped = dedupeTiles(data.tiles);
-            if (!isDefaultTiles(deduped)) setRegions(deduped);
+            // Strip the always-present full-frame tile — it isn't a user region.
+            if (!isDefaultTiles(deduped)) {
+              setRegions(deduped.filter((t) => !isFullFrameTile(t)));
+            }
           }
         }
       } catch {
@@ -577,7 +576,7 @@ export default function App() {
     setTileApplyState({ status: "applying" });
     const body = parsed.length === 0
       ? { spec: DEFAULT_TILE_SPEC }
-      : { tiles: regionsToTiles(parsed) };
+      : { tiles: buildTiles(parsed) };
     try {
       const res = await fetch("/api/tiles", {
         method: "POST",
@@ -651,12 +650,26 @@ export default function App() {
     return { x, y, w, h };
   };
 
+  // Build the pipeline tiles from the user's ORIGINAL regions. The full frame
+  // is ALWAYS included as a tile (so the whole scene is inferred regardless of
+  // regions), followed by each region expanded to the network aspect (the
+  // "padded" tile fed to the chip). Regions themselves stay the original drawn
+  // shapes — this is the only place expansion happens, so the overlay shows
+  // originals while "show tiles" shows these padded tiles. The always-present
+  // full tile also satisfies the pipeline's ≥2-tile rule for a single region
+  // (full + region), so no duplicate is needed. expandToNetAspect is
+  // idempotent (re-expanding a padded region reconstructed from SSE is a no-op).
+  const buildTiles = (regs) => [
+    { name: "FULL", x: 0, y: 0, w: 1, h: 1 },
+    ...regs.map((r, i) => ({ name: `R${i + 1}`, ...expandToNetAspect(r) })),
+  ];
+
   // POST the current region set to the pipeline. Empty list → revert to the
   // whole-frame default. Triggers a brief pipeline restart on the backend.
   const applyRegions = async (regs) => {
     const body = regs.length === 0
       ? { spec: DEFAULT_TILE_SPEC }
-      : { tiles: regionsToTiles(regs) };
+      : { tiles: buildTiles(regs) };
     setRegionApplyState({ status: "applying" });
     try {
       const res = await fetch("/api/tiles", {
@@ -718,10 +731,10 @@ export default function App() {
       h: Math.abs(p.y - s.y),
     };
     if (rect.w < MIN_REGION_SIZE || rect.h < MIN_REGION_SIZE) return; // cancel
-    // Store the aspect-expanded rect: a region IS the inference tile, so what
-    // you see in the overlay is exactly what's fed to the network (modulo the
-    // single-region duplicate). Keeps regions and tiles equivalent.
-    const next = [...regions, expandToNetAspect(rect)];
+    // Store the ORIGINAL drawn rect — the overlay shows exactly what you drew.
+    // Expansion to the network aspect (the padded tile fed to the chip) happens
+    // only in buildTiles() at apply time and is shown under "show tiles".
+    const next = [...regions, rect];
     setRegions(next);
     applyRegions(next);
   };
@@ -1404,10 +1417,10 @@ export default function App() {
                   </g>
                 );
               })}
-            {/* Inference regions. A region IS the tile fed to the network
-                (already aspect-expanded), so this box is exactly the inferred
-                area. The pipeline's active tiles render separately under the
-                "show tiles" toggle and should coincide with these. */}
+            {/* Inference regions — the ORIGINAL shapes the operator drew.
+                The padded tiles actually fed to the chip (each expanded to the
+                640×384 aspect) render separately under the "show tiles" toggle
+                and in the debug strip below the video. */}
             {regions.map((r, i) => (
               <g key={`roi-${i}`}>
                 <rect

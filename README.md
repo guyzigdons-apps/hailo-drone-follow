@@ -149,6 +149,37 @@ robot-follow --input udp://0.0.0.0:5600 --takeoff-landing --webui
 4. **ReID recovery** — If the tracker loses the target (occlusion, fast turn), ReID compares appearance embeddings to re-identify the person under a new track ID. Works in both auto and locked modes. If ReID cannot recover the target within the search timeout (`--reid-timeout`, default 20s), the app returns to auto mode.
 5. **Control** — A PID-style controller computes yaw, forward/backward, and altitude commands at 10 Hz and sends them to the flight controller via MAVSDK offboard mode.
 
+## Native H15 pipeline & inference regions
+
+On the **Hailo-15 (H15)** target there is a second run path: a C++ binary
+(`df_native_pipeline`) owns the ISP + NPU inference and publishes detections
+over ZMQ, while the Python orchestrator (`drone_follow_h15`) runs ByteTracker,
+the follow loop, and the web UI. Enable it with `--native-pipeline`:
+
+```bash
+# On the H15, from /home/root:
+PYTHONPATH=/home/root python3 -m robot_follow.drone_follow_h15 \
+    --native-pipeline --serial /dev/ttyACM0
+# Web UI: http://10.0.0.1:5001
+```
+
+This path adds **tiling** — detection runs on sub-rectangles of the frame,
+each cropped + resized on the DSP to the network input (640×384) and inferred
+separately, so small/distant people are still detected. From the web UI you
+can **draw the inference regions**:
+
+- Press **`＋ Add region`** (or the `+` key), then **click-drag** on the video
+  to select a region. Each region is expanded to the network aspect so it
+  isn't warped; the **full frame is always inferred too**.
+- **Clear regions** reverts to the whole-frame default; **Edit tiles** edits
+  them as text; **Show tiles** overlays the actual (padded) tiles plus a debug
+  strip of each tile's chip input.
+
+Build/deploy the C++ binary and the full tiling/regions details are in
+[`robot_follow/native_pipeline/README.md`](robot_follow/native_pipeline/README.md);
+a plan to surface the literal DSP crop buffers is in
+[`docs/tile-crop-debug-view.md`](docs/tile-crop-debug-view.md).
+
 ## Key CLI Options
 
 | Flag | Default | Description |
